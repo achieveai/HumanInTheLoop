@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "human-in-the-loop": {
-      "command": "node",
-      "args": ["D:\\Source\\repos\\Hitl_MCP\\hitl-mcp-server\\dist\\index.js"],
+      "command": "npx",
+      "args": ["-y", "@achieveai/hitl-mcp-server"],
       "env": {
         "NODE_ENV": "production"
       }

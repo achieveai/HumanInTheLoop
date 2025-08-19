@@ -64,12 +64,29 @@ When generating code, the AI can ask:
 - Node.js 18+ and npm
 - A browser (for displaying dialogs)
 
+### Quick Install from NPM
+
+```bash
+# Install globally from npm
+npm install -g @achieveai/hitl-mcp-server
+
+# Now you can run it from anywhere
+hitl-mcp-server
+```
+
+### Using with npx (no installation required)
+
+```bash
+# Run directly without installing
+npx @achieveai/hitl-mcp-server
+```
+
 ### From Source
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd hitl-mcp-server
+git clone https://github.com/achieveai/HumanInTheLoop.git
+cd HumanInTheLoop/hitl-mcp-server
 
 # Install dependencies
 npm install
@@ -79,19 +96,6 @@ npm run build
 
 # Test the installation
 npm run dev
-```
-
-### Global Installation
-
-```bash
-# Build first
-npm run build
-
-# Install globally
-npm install -g .
-
-# Now you can run it from anywhere
-hitl-mcp-server
 ```
 
 ## Configuration
@@ -110,8 +114,23 @@ Add the server to your Claude Desktop config file:
 {
   "mcpServers": {
     "human-in-the-loop": {
-      "command": "node",
-      "args": ["D:\\Source\\repos\\Hitl_MCP\\hitl-mcp-server\\dist\\index.js"],
+      "command": "npx",
+      "args": ["-y", "@achieveai/hitl-mcp-server"],
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}
+```
+
+Or if you've installed it globally:
+
+```json
+{
+  "mcpServers": {
+    "human-in-the-loop": {
+      "command": "hitl-mcp-server",
       "env": {
         "NODE_ENV": "production"
       }
@@ -147,9 +166,8 @@ Add to your Cursor settings:
   "mcpServers": {
     "human-in-the-loop": {
       "name": "Human In The Loop",
-      "command": "node",
-      "args": ["./dist/index.js"],
-      "cwd": "D:\\Source\\repos\\Hitl_MCP\\hitl-mcp-server",
+      "command": "npx",
+      "args": ["-y", "@achieveai/hitl-mcp-server"],
       "transport": "stdio",
       "autoStart": false
     }
@@ -157,21 +175,40 @@ Add to your Cursor settings:
 }
 ```
 
-### NPM Global Installation
+Or if you've installed it globally:
 
-```bash
-# Install globally from npm
-npm install -g @achieveai/hitl-mcp-server
-
-# Then use in any config:
+```json
 {
   "mcpServers": {
     "human-in-the-loop": {
-      "command": "hitl-mcp-server"
+      "name": "Human In The Loop",
+      "command": "hitl-mcp-server",
+      "transport": "stdio",
+      "autoStart": false
     }
   }
 }
 ```
+
+### Recommended Configuration
+
+For all MCP clients, we recommend using npx for zero-installation setup:
+
+```json
+{
+  "mcpServers": {
+    "human-in-the-loop": {
+      "command": "npx",
+      "args": ["-y", "@achieveai/hitl-mcp-server"]
+    }
+  }
+}
+```
+
+This approach:
+- Requires no installation
+- Always uses the latest version
+- Works immediately on any system with Node.js
 
 ## Usage
 
