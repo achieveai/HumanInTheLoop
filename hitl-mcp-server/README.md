@@ -1,15 +1,61 @@
 # Human In The Loop MCP Server
 
-A Model Context Protocol (MCP) server that enables LLM agents to request human input through interactive dialog boxes. This tool provides a seamless way for AI agents to ask for clarification, make decisions with human guidance, and handle ambiguous situations.
+A Model Context Protocol (MCP) server that bridges the gap between AI autonomy and human oversight by enabling LLM agents to request human input at critical decision points.
 
-## Features
+## What This Tool Does
 
-- **Interactive Dialog UI**: Opens a browser-based dialog for user interaction
-- **Multiple Choice Questions**: Support for both single and multiple selection
-- **Custom Input**: "Other" field for free-text responses
+This MCP server allows AI agents like Claude to pause their execution and ask humans for guidance through interactive browser-based dialogs. Instead of making assumptions or failing when faced with ambiguity, AI agents can now gracefully request human input and continue with confidence.
+
+## Real-World Use Cases
+
+### 1. **Code Generation Decisions**
+When generating code, the AI can ask:
+- "Which framework should I use: React, Vue, or Angular?"
+- "Should I implement this with TypeScript or JavaScript?"
+- "Which testing framework do you prefer?"
+
+### 2. **Deployment & Operations**
+- "Ready to deploy to production? I've run all tests."
+- "Should I rollback the deployment? Errors detected."
+- "Which environment: staging or production?"
+
+### 3. **Data Processing**
+- "Found 1000 duplicate records. Delete all, keep first, or review manually?"
+- "Which columns should I include in the export?"
+- "Normalize the data using method A (faster) or B (more accurate)?"
+
+### 4. **Content & Documentation**
+- "Which tone for the documentation: formal, casual, or technical?"
+- "Include code examples in the README?"
+- "Which sections are most important for your users?"
+
+### 5. **Git Operations**
+- "Which files should I include in this commit?"
+- "Merge conflict detected. Keep theirs, ours, or manual review?"
+- "Create a new branch or commit to main?"
+
+## What to Expect
+
+### For Developers
+- **Reduced Errors**: AI agents won't make incorrect assumptions about your preferences
+- **Better Control**: Maintain oversight of critical decisions while letting AI handle the implementation
+- **Improved Workflow**: AI can complete complex multi-step tasks with human guidance at key points
+- **Time Savings**: Let AI do the work while you just make the important decisions
+
+### For AI Agents
+- **Clear Decision Points**: No more guessing what the user wants
+- **Graceful Handling**: Ambiguous situations become opportunities for clarification
+- **Better Results**: Human input ensures the output matches expectations
+- **Continuous Workflow**: Complete tasks without stopping for every small decision
+
+## Core Features
+
+- **Browser-Based Dialogs**: Clean, accessible UI that opens automatically
+- **Multiple Choice Support**: Single or multi-select options with descriptions
+- **Custom Input**: "Other" field for responses not in the list
+- **Timeout Support**: Auto-dismiss dialogs after specified time
 - **Cross-Platform**: Works on Windows, macOS, and Linux
-- **Timeout Support**: Configurable timeouts for time-sensitive decisions
-- **STDIO Transport**: Easy integration with Claude Desktop and other MCP clients
+- **Zero Configuration**: Works out of the box with sensible defaults
 
 ## Installation
 
@@ -83,7 +129,7 @@ Create `.vscode/mcp.json` in your workspace:
   "mcpServers": {
     "human-in-the-loop": {
       "command": "npx",
-      "args": ["-y", "@hitl/mcp-server"],
+      "args": ["-y", "@achieveai/hitl-mcp-server"],
       "env": {
         "NODE_ENV": "production"
       }
@@ -114,8 +160,8 @@ Add to your Cursor settings:
 ### NPM Global Installation
 
 ```bash
-# Install globally from npm (when published)
-npm install -g @hitl/mcp-server
+# Install globally from npm
+npm install -g @achieveai/hitl-mcp-server
 
 # Then use in any config:
 {
@@ -266,17 +312,43 @@ hitl-mcp-server/
 - `npm test` - Run unit tests
 - `npm run typecheck` - Check TypeScript types without building
 
-## Why Use This Tool?
+## Why This Tool Matters
 
-LLM agents often encounter situations requiring human judgment:
+### The Problem
+AI agents are powerful but often encounter situations where they need human judgment:
+- Ambiguous requirements that could be interpreted multiple ways
+- Critical decisions that could have significant consequences
+- Subjective choices about style, approach, or priorities
+- Missing context that only the human user possesses
 
-1. **Ambiguous Requirements**: When instructions are unclear or contradictory
-2. **Critical Decisions**: Before performing irreversible actions
-3. **Multiple Valid Approaches**: When several solutions are equally valid
-4. **Missing Context**: When additional information is needed
-5. **Subjective Choices**: Design decisions, naming conventions, etc.
+### The Solution
+This tool creates a seamless communication channel between AI and humans:
+- **AI Autonomy**: The agent continues working independently until it needs input
+- **Human Control**: You maintain oversight of important decisions
+- **Efficient Workflow**: No need to micromanage - only intervene when necessary
+- **Better Outcomes**: Combine AI efficiency with human judgment
 
-This tool ensures AI agents can gracefully handle these situations by requesting human input rather than making assumptions or failing silently.
+### Expected Benefits
+
+1. **Increased Productivity**
+   - Let AI handle implementation while you focus on decisions
+   - Batch multiple tasks with decision points
+   - Reduce back-and-forth clarifications
+
+2. **Improved Accuracy**
+   - No more AI guessing your preferences
+   - Catch potential issues before they happen
+   - Ensure outputs match your expectations
+
+3. **Enhanced Trust**
+   - Know that AI will ask before making critical changes
+   - Review and approve important decisions
+   - Maintain control while leveraging AI capabilities
+
+4. **Seamless Integration**
+   - Works with Claude Desktop, Cursor, VS Code, and other MCP clients
+   - No complex setup or configuration required
+   - Natural integration into existing AI workflows
 
 ## Troubleshooting
 
@@ -297,9 +369,16 @@ This tool ensures AI agents can gracefully handle these situations by requesting
 - Verify Node.js version is 18 or higher
 - Run `npm install` to ensure all dependencies are installed
 
+## Security & Privacy
+
+- All dialogs run locally on your machine
+- No data is sent to external servers
+- Dialog server only accepts connections from localhost
+- Temporary server instances are created per request
+
 ## License
 
-MIT
+GPL-3.0
 
 ## Contributing
 
