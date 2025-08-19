@@ -1,0 +1,56 @@
+{
+  "name": "@hitl/mcp-server",
+  "version": "1.0.0",
+  "description": "Human In The Loop MCP Server - Enables LLM agents to ask questions and get user feedback through interactive dialogs",
+  "main": "dist/index.js",
+  "bin": {
+    "hitl-mcp-server": "./dist/index.js"
+  },
+  "type": "module",
+  "files": [
+    "dist/",
+    "config/",
+    "mcp.json",
+    "README.md",
+    "LICENSE",
+    "example-usage.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/hitl-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/hitl-mcp-server/issues"
+  },
+  "homepage": "https://github.com/yourusername/hitl-mcp-server#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:dialog": "tsx src/test-client.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["mcp", "llm", "human-in-the-loop", "dialog", "interactive"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "express": "^4.21.2",
+    "open": "^10.1.0",
+    "uuid": "^11.0.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.5",
+    "@types/uuid": "^10.0.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.6",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

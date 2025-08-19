@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "human-in-the-loop": {
+      "command": "node",
+      "args": ["D:\\Source\\repos\\Hitl_MCP\\hitl-mcp-server\\dist\\index.js"],
+      "env": {
+        "NODE_ENV": "production"
+      }
+    }
+  }
+}

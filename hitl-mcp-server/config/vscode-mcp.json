@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "human-in-the-loop": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@hitl/mcp-server"
+      ],
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "capabilities": {
+        "tools": true
+      }
+    }
+  }
+}

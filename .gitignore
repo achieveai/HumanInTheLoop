@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build outputs
+dist/
+*/dist/
+*.js.map
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing
+coverage/
+.nyc_output
+
+# Temporary files
+.tmp/
+tmp/
+temp/
+
+# Claude workspace files (optional - uncomment if you want to exclude)
+# .claude/
+
+# OS files
+Thumbs.db

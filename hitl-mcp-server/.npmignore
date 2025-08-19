@@ -1,0 +1,29 @@
+# Source files
+src/
+*.ts
+!*.d.ts
+
+# Config files
+tsconfig.json
+jest.config.js
+.gitignore
+
+# Test files
+**/__tests__/
+*.test.*
+test-client.*
+
+# Development files
+.vscode/
+.idea/
+*.log
+node_modules/
+
+# Documentation source
+*.md
+!README.md
+
+# Config examples (keep for reference)
+!config/
+!mcp.json
+!example-usage.md

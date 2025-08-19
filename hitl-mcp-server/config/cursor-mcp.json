@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "human-in-the-loop": {
+      "name": "Human In The Loop",
+      "description": "Interactive dialog system for getting human feedback",
+      "command": "node",
+      "args": ["./dist/index.js"],
+      "cwd": "D:\\Source\\repos\\Hitl_MCP\\hitl-mcp-server",
+      "env": {
+        "NODE_ENV": "production"
+      },
+      "transport": "stdio",
+      "autoStart": false,
+      "restartOnFailure": true,
+      "maxRestarts": 3
+    }
+  }
+}

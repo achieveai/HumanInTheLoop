@@ -1,0 +1,152 @@
+{
+  "name": "@hitl/mcp-server",
+  "version": "1.0.0",
+  "description": "Human In The Loop MCP Server - Enables LLM agents to ask questions and get user feedback through interactive dialogs",
+  "author": "",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "llm",
+    "human-in-the-loop",
+    "dialog",
+    "interactive",
+    "feedback",
+    "decision-making"
+  ],
+  "runtime": "node",
+  "tools": [
+    {
+      "name": "ask_human",
+      "description": "Get human input for decisions, clarifications, and guidance through an interactive dialog",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "The question or decision you need help with"
+          },
+          "options": {
+            "type": "array",
+            "description": "Array of possible choices",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
+              },
+              "required": ["label", "value"]
+            }
+          },
+          "allowMultiple": {
+            "type": "boolean",
+            "default": false
+          },
+          "allowOther": {
+            "type": "boolean",
+            "default": true
+          },
+          "context": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "number"
+          }
+        },
+        "required": ["question", "options"]
+      }
+    }
+  ],
+  "config": {
+    "port": {
+      "type": "number",
+      "description": "Port for the dialog server (0 for auto-assign)",
+      "default": 0
+    },
+    "browserPath": {
+      "type": "string",
+      "description": "Path to browser executable (optional)",
+      "required": false
+    },
+    "autoOpen": {
+      "type": "boolean",
+      "description": "Automatically open browser for dialogs",
+      "default": true
+    }
+  },
+  "commands": {
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "test": "tsx src/dialog-manager.test.ts",
+    "inspector": "npx @modelcontextprotocol/inspector node dist/index.js"
+  },
+  "transports": ["stdio"],
+  "capabilities": {
+    "tools": true,
+    "resources": false,
+    "prompts": false,
+    "sampling": false
+  },
+  "requirements": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "examples": [
+    {
+      "name": "Simple Yes/No Question",
+      "tool": "ask_human",
+      "arguments": {
+        "question": "Should I proceed with this action?",
+        "options": [
+          {"label": "Yes", "value": "yes"},
+          {"label": "No", "value": "no"}
+        ],
+        "allowMultiple": false,
+        "allowOther": false
+      }
+    },
+    {
+      "name": "File Selection",
+      "tool": "ask_human",
+      "arguments": {
+        "question": "Which file should I modify?",
+        "options": [
+          {
+            "label": "index.ts",
+            "value": "src/index.ts",
+            "description": "Main entry point"
+          },
+          {
+            "label": "config.json",
+            "value": "config.json",
+            "description": "Configuration file"
+          }
+        ],
+        "allowMultiple": false,
+        "allowOther": true,
+        "context": "Multiple files match the search criteria"
+      }
+    },
+    {
+      "name": "Multiple Selection",
+      "tool": "ask_human",
+      "arguments": {
+        "question": "Which tests should I run?",
+        "options": [
+          {"label": "Unit tests", "value": "unit"},
+          {"label": "Integration tests", "value": "integration"},
+          {"label": "E2E tests", "value": "e2e"}
+        ],
+        "allowMultiple": true,
+        "allowOther": false
+      }
+    }
+  ]
+}

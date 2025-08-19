@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(mkdir:*)",
+      "Bash(npm init:*)",
+      "Bash(npm install)",
+      "Bash(npm run build:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npm test)",
+      "Bash(npx tsx:*)",
+      "Bash(node:*)",
+      "Bash(echo $APPDATA)",
+      "Bash(npm run test:dialog:*)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
