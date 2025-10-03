@@ -123,8 +123,8 @@ describe('DialogManager', () => {
         allowOther: true
       });
 
-      expect(html).toContain('other-input');
-      expect(html).toContain('Other (please specify)');
+      expect(html).toContain('id="other-input"');
+      expect(html).toContain('Additional Context (optional)');
     });
 
     it('should not include other field when not allowed', () => {
@@ -137,8 +137,8 @@ describe('DialogManager', () => {
         allowOther: false
       });
 
-      expect(html).not.toContain('other-input');
-      expect(html).not.toContain('Other (please specify)');
+      expect(html).not.toContain('id="other-input"');
+      expect(html).not.toContain('Additional Context (optional)');
     });
   });
 

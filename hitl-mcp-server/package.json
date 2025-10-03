@@ -1,6 +1,6 @@
 {
   "name": "@achieveai/hitl-mcp-server",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Human In The Loop MCP Server - Enables LLM agents to ask questions and get user feedback through interactive dialogs",
   "main": "dist/index.js",
   "bin": {
@@ -10,6 +10,7 @@
   "files": [
     "dist/",
     "config/",
+    "sounds/",
     "mcp.json",
     "README.md",
     "LICENSE",

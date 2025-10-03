@@ -2,6 +2,12 @@ import express, { Express, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import open from 'open';
 import { EventEmitter } from 'events';
+import { exec } from 'child_process';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export interface DialogOption {
   label: string;
@@ -101,6 +107,7 @@ export class DialogManager extends EventEmitter {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Human In The Loop - Response Required</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/lib/marked.umd.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -111,7 +118,9 @@ export class DialogManager extends EventEmitter {
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
+            height: 100vh;
+            max-height: 100vh;
+            overflow-y: auto;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -124,6 +133,8 @@ export class DialogManager extends EventEmitter {
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
             max-width: 600px;
             width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
             padding: 32px;
             animation: slideIn 0.3s ease-out;
         }
@@ -170,6 +181,90 @@ export class DialogManager extends EventEmitter {
             font-size: 14px;
             color: #4a5568;
             border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            line-height: 1.6;
+        }
+
+        /* Markdown styling in context */
+        .context strong {
+            font-weight: 600;
+            color: #2d3748;
+        }
+
+        .context code {
+            background: #e2e8f0;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+        }
+
+        .context pre {
+            background: #2d3748;
+            color: #f7fafc;
+            padding: 12px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 8px 0;
+        }
+
+        .context pre code {
+            background: transparent;
+            color: inherit;
+            padding: 0;
+        }
+
+        .context ul, .context ol {
+            margin-left: 20px;
+            margin-top: 8px;
+            margin-bottom: 8px;
+        }
+
+        .context li {
+            margin: 4px 0;
+        }
+
+        .context p {
+            margin: 8px 0;
+        }
+
+        .context h1, .context h2, .context h3 {
+            margin-top: 12px;
+            margin-bottom: 8px;
+            color: #2d3748;
+        }
+
+        .context a {
+            color: #667eea;
+            text-decoration: underline;
+        }
+
+        .context blockquote {
+            border-left: 3px solid #cbd5e0;
+            padding-left: 12px;
+            margin: 8px 0;
+            color: #718096;
+            font-style: italic;
+        }
+
+        /* Custom scrollbar for context */
+        .context::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .context::-webkit-scrollbar-track {
+            background: #e2e8f0;
+            border-radius: 4px;
+        }
+
+        .context::-webkit-scrollbar-thumb {
+            background: #cbd5e0;
+            border-radius: 4px;
+        }
+
+        .context::-webkit-scrollbar-thumb:hover {
+            background: #a0aec0;
         }
         
         .options-container {
@@ -301,7 +396,8 @@ export class DialogManager extends EventEmitter {
         
         ${request.context ? `
         <div class="context">
-            <strong>Context:</strong> ${this.escapeHtml(request.context)}
+            <strong>Context:</strong>
+            <div id="context-content"></div>
         </div>
         ` : ''}
         
@@ -324,11 +420,11 @@ export class DialogManager extends EventEmitter {
         
         ${request.allowOther ? `
         <div class="other-section">
-            <label class="other-label" for="other-input">Other (please specify):</label>
-            <textarea class="other-input" 
-                      id="other-input" 
-                      rows="3" 
-                      placeholder="Enter your custom response here..."></textarea>
+            <label class="other-label" for="other-input">Additional Context (optional):</label>
+            <textarea class="other-input"
+                      id="other-input"
+                      rows="3"
+                      placeholder="Provide any additional context, clarifications, or notes to help guide the AI..."></textarea>
         </div>
         ` : ''}
         
@@ -344,6 +440,7 @@ export class DialogManager extends EventEmitter {
         const dialogId = '${request.id}';
         const allowMultiple = ${request.allowMultiple};
         const allowOther = ${request.allowOther};
+        const contextMarkdown = ${request.context ? JSON.stringify(request.context) : 'null'};
         
         function toggleOption(index) {
             const option = document.getElementById('option-' + index);
@@ -377,9 +474,9 @@ export class DialogManager extends EventEmitter {
         async function submitResponse() {
             const selectedValues = getSelectedValues();
             const otherText = allowOther ? document.getElementById('other-input').value.trim() : '';
-            
+
             if (selectedValues.length === 0 && !otherText) {
-                showError('Please select at least one option or provide a custom response');
+                showError('Please select at least one option and/or provide additional context');
                 return;
             }
             
@@ -446,6 +543,27 @@ export class DialogManager extends EventEmitter {
                 }
             });
         }
+
+        // Note: Sound notification is played from the server before opening the browser
+        // No client-side sound needed
+
+        // Render markdown in context
+        if (contextMarkdown && typeof marked !== 'undefined') {
+            const contextElement = document.getElementById('context-content');
+            if (contextElement) {
+                try {
+                    // Configure marked for safe HTML rendering
+                    marked.setOptions({
+                        breaks: true,
+                        gfm: true
+                    });
+                    contextElement.innerHTML = marked.parse(contextMarkdown);
+                } catch (error) {
+                    // Fallback to plain text if markdown parsing fails
+                    contextElement.textContent = contextMarkdown;
+                }
+            }
+        }
     </script>
 </body>
 </html>`;
@@ -508,12 +626,62 @@ export class DialogManager extends EventEmitter {
 
       const dialogUrl = `http://localhost:${this.port}/dialog/${dialogId}`;
       console.error(`Opening dialog: ${dialogUrl}`);
-      
+
+      // Play notification sound from server before opening browser
+      this.playNotificationSound();
+
       open(dialogUrl).catch((err) => {
         console.error('Failed to open browser:', err);
         console.error(`Please manually open: ${dialogUrl}`);
       });
     });
+  }
+
+  private playNotificationSound(): void {
+    try {
+      // Path to bundled notification sound (relative to dist folder) - used as fallback
+      const bundledSound = path.join(__dirname, '..', 'sounds', 'notification.wav');
+
+      if (process.platform === 'win32') {
+        // Windows: Try system sound first, then fall back to bundled sound
+        const systemSound = 'C:\\Windows\\Media\\Windows Notify Messaging.wav';
+        const script = `(New-Object Media.SoundPlayer '${systemSound}').PlaySync()`;
+        exec(`powershell -c "${script}"`, (error) => {
+          if (error) {
+            // Fallback to bundled custom sound
+            const fallbackScript = `(New-Object Media.SoundPlayer '${bundledSound}').PlaySync()`;
+            exec(`powershell -c "${fallbackScript}"`, (err2) => {
+              if (err2) {
+                // Final fallback to beeps
+                const beepScript = '[console]::beep(659,150); [console]::beep(880,200)';
+                exec(`powershell -c "${beepScript}"`, () => {
+                  process.stdout.write('\x07');
+                });
+              }
+            });
+          }
+        });
+      } else if (process.platform === 'darwin') {
+        // macOS: Use system sound, fall back to bundled sound
+        exec('afplay /System/Library/Sounds/Glass.aiff', (error) => {
+          if (error) {
+            exec(`afplay "${bundledSound}"`, () => {
+              process.stdout.write('\x07');
+            });
+          }
+        });
+      } else {
+        // Linux: Try system sound, fall back to bundled sound
+        exec(`paplay /usr/share/sounds/freedesktop/stereo/message.oga 2>/dev/null || paplay "${bundledSound}" 2>/dev/null || beep || echo -en "\\a"`, (error) => {
+          if (error) {
+            process.stdout.write('\x07');
+          }
+        });
+      }
+    } catch (error) {
+      // Ultimate fallback: ASCII bell character
+      process.stdout.write('\x07');
+    }
   }
 
   async close(): Promise<void> {

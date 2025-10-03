@@ -41,17 +41,28 @@ class HumanInTheLoopServer {
       tools: [
         {
           name: TOOL_NAME,
-          description: `CRITICAL: Use this tool when you need human guidance or decision-making. This tool is ESSENTIAL for:
-• Resolving ambiguities or unclear requirements
-• Making subjective decisions that require human judgment
-• Choosing between multiple valid approaches
-• Confirming critical actions before execution
-• Getting additional context or clarification
-• Handling edge cases not covered by your instructions
+          description: `CRITICAL: Use this tool whenever you have ANY doubt or need human decision-making. This tool is ESSENTIAL for:
 
-This tool opens an interactive dialog box for the human to respond, ensuring you get the guidance needed to proceed correctly. The human can select from provided options or enter a custom response.
+WHEN TO USE (err on the side of asking):
+• You have even slight uncertainty about what the user wants
+• You need clarification on ambiguous requirements or instructions
+• The user explicitly told you to ask for their input on decisions
+• Multiple valid approaches exist and you're unsure which to choose
+• A decision could have significant consequences
+• You're about to make assumptions that might be wrong
+• You need confirmation before critical or irreversible actions
+• You need additional context not provided in your instructions
 
-IMPORTANT: Prefer using this tool over making assumptions or returning incomplete results. Getting human input ensures accuracy and alignment with user expectations.`,
+HOW TO USE:
+• Provide clear, specific options for the human to choose from
+• Think carefully about which option you would recommend and mark it with "(RECOMMENDED)" in the label
+  Example: { label: "PostgreSQL (RECOMMENDED)", value: "postgres", description: "Best for complex queries" }
+• The human can select one or more options AND provide additional context
+• The "(RECOMMENDED)" marker helps guide the user but won't appear in the returned value
+
+This tool opens an interactive browser dialog with a pleasant notification sound. The human can select options and optionally provide additional context to guide your next steps.
+
+IMPORTANT: When in doubt, ASK. Using this tool is far better than making incorrect assumptions. Getting human input ensures accuracy and alignment with user expectations.`,
           inputSchema: {
             type: 'object',
             properties: {
@@ -85,11 +96,11 @@ IMPORTANT: Prefer using this tool over making assumptions or returning incomplet
               allowMultiple: {
                 type: 'boolean',
                 description: 'Whether to allow selecting multiple options (checkbox vs radio)',
-                default: false
+                default: true
               },
               allowOther: {
                 type: 'boolean',
-                description: 'Whether to show an "Other" text field for custom input',
+                description: 'Whether to show an "Additional Context" text field where the user can provide supplementary information alongside their selection(s)',
                 default: true
               },
               context: {
@@ -137,11 +148,16 @@ IMPORTANT: Prefer using this tool over making assumptions or returning incomplet
           id: uuidv4(),
           question: args.question,
           options: dialogOptions,
-          allowMultiple: args.allowMultiple || false,
+          allowMultiple: args.allowMultiple !== false,
           allowOther: args.allowOther !== false,
           context: args.context,
           timeout: args.timeout
         });
+
+        // Helper function to strip (RECOMMENDED) markers from values
+        const stripRecommended = (value: string): string => {
+          return value.replace(/\s*\(RECOMMENDED\)\s*/gi, '').trim();
+        };
 
         let result: any = {
           success: true,
@@ -151,17 +167,31 @@ IMPORTANT: Prefer using this tool over making assumptions or returning incomplet
         if (response.otherText === 'SKIPPED') {
           result.skipped = true;
           result.response = 'User skipped this question';
-        } else if (response.otherText && response.otherText !== '') {
-          result.response = response.otherText;
-          result.responseType = 'custom';
-        } else if (response.selectedValues.length > 0) {
-          result.response = args.allowMultiple 
-            ? response.selectedValues 
-            : response.selectedValues[0];
-          result.responseType = 'selection';
+          result.responseType = 'skipped';
         } else {
-          result.response = null;
-          result.responseType = 'none';
+          // Clean the selected values
+          const cleanedValues = response.selectedValues.map(stripRecommended);
+
+          // Include selected values if any
+          if (cleanedValues.length > 0) {
+            result.selectedValues = args.allowMultiple ? cleanedValues : cleanedValues[0];
+          }
+
+          // Include context if provided
+          if (response.otherText && response.otherText !== '') {
+            result.context = response.otherText;
+          }
+
+          // Determine response type
+          if (cleanedValues.length > 0 && result.context) {
+            result.responseType = 'selection_with_context';
+          } else if (cleanedValues.length > 0) {
+            result.responseType = 'selection';
+          } else if (result.context) {
+            result.responseType = 'context_only';
+          } else {
+            result.responseType = 'none';
+          }
         }
 
         return {

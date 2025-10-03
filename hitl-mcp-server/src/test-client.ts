@@ -33,7 +33,21 @@ async function testDialogManager() {
         ],
         allowMultiple: false,
         allowOther: true,
-        context: 'This is for a new web application with expected 10k daily active users'
+        context: `This is for a new web application with expected **10k daily active users**.
+
+**Requirements:**
+- Must support \`refresh tokens\`
+- Should integrate with existing \`Redis\` cache
+- Need to handle \`multi-device\` sessions
+
+> **Note:** Security is critical - use industry standard practices.
+
+\`\`\`javascript
+// Example usage
+const token = generateToken(user);
+\`\`\`
+
+See [OAuth 2.0 Spec](https://oauth.net/2/) for details.`
       }
     },
     {
