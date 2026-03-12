@@ -1,0 +1,161 @@
+name: Build & Release HITL Client
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v2.0.0)'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-client:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: hitl-client-windows-x64
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: hitl-client-linux-x64
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            artifact: hitl-client-macos-arm64
+          - platform: macos-13
+            target: x86_64-apple-darwin
+            artifact: hitl-client-macos-x64
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libasound2-dev
+
+      - name: Install frontend dependencies
+        working-directory: hitl-mcp-server/client
+        run: npm install
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: hitl-mcp-server/client
+          tauriScript: npx tauri
+          args: --target ${{ matrix.target }}
+
+      - name: Collect Windows artifacts
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts -Force
+          $msi = Get-ChildItem -Path "hitl-mcp-server/client/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi" -ErrorAction SilentlyContinue
+          $exe = Get-ChildItem -Path "hitl-mcp-server/client/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue
+          $bin = "hitl-mcp-server/client/src-tauri/target/${{ matrix.target }}/release/hitl-client.exe"
+          if ($msi) { Copy-Item $msi.FullName "artifacts/${{ matrix.artifact }}.msi" }
+          if ($exe) { Copy-Item $exe.FullName "artifacts/${{ matrix.artifact }}-setup.exe" }
+          if (Test-Path $bin) { Copy-Item $bin "artifacts/${{ matrix.artifact }}.exe" }
+
+      - name: Collect Linux artifacts
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          mkdir -p artifacts
+          cp hitl-mcp-server/client/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb artifacts/${{ matrix.artifact }}.deb 2>/dev/null || true
+          cp hitl-mcp-server/client/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage artifacts/${{ matrix.artifact }}.AppImage 2>/dev/null || true
+          cp hitl-mcp-server/client/src-tauri/target/${{ matrix.target }}/release/hitl-client artifacts/${{ matrix.artifact }} 2>/dev/null || true
+
+      - name: Collect macOS artifacts
+        if: startsWith(matrix.platform, 'macos')
+        run: |
+          mkdir -p artifacts
+          DMG=$(find hitl-mcp-server/client/src-tauri/target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" 2>/dev/null | head -1)
+          if [ -n "$DMG" ]; then cp "$DMG" "artifacts/${{ matrix.artifact }}.dmg"; fi
+          BIN="hitl-mcp-server/client/src-tauri/target/${{ matrix.target }}/release/hitl-client"
+          if [ -f "$BIN" ]; then cp "$BIN" "artifacts/${{ matrix.artifact }}"; fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  publish-release:
+    needs: build-client
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lR release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-npm:
+    needs: build-client
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        working-directory: hitl-mcp-server
+        run: npm install
+
+      - name: Build shared + server
+        working-directory: hitl-mcp-server
+        run: npm run build:shared && npm run build:server
+
+      - name: Publish to npm
+        working-directory: hitl-mcp-server/server
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,19 +1,42 @@
 {
-  "name": "@hitl/server",
+  "name": "@achieveai/hitl-mcp-server",
   "version": "2.0.0",
-  "private": true,
+  "description": "Human-in-the-Loop MCP Server — enables LLM agents to ask questions across all your devices via ntfy.sh",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/mcp-server.js",
   "bin": {
-    "hitl": "./dist/cli.js",
-    "hitl-mcp-server": "./dist/index.js"
+    "hitl": "dist/cli.js",
+    "hitl-mcp-server": "dist/mcp-server.js"
   },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "dist/**/*.map",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "llm",
+    "human-in-the-loop",
+    "hitl",
+    "dialog",
+    "interactive",
+    "model-context-protocol",
+    "ntfy",
+    "notifications"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/achieveai/hitl-mcp-server.git"
+  },
+  "license": "MIT",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "node dist/mcp-server.js",
     "dev": "tsx src/index.ts",
     "test": "jest --config jest.config.js",
-    "clean": "rimraf dist"
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@hitl/shared": "*",
