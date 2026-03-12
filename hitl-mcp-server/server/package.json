@@ -27,7 +27,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/achieveai/hitl-mcp-server.git"
+    "url": "git+https://github.com/achieveai/HumanInTheLoop.git"
   },
   "license": "MIT",
   "scripts": {
