@@ -8,6 +8,7 @@ let currentQuestionId = null;
 async function init() {
     const { listen } = window.__TAURI__.event;
     const { invoke } = window.__TAURI__.core;
+    const { getCurrentWindow } = window.__TAURI__.window;
 
     const dialogContainer = document.getElementById('dialog-container');
     const dismissedContainer = document.getElementById('dismissed-container');
@@ -54,6 +55,13 @@ async function init() {
                     }
                 },
             });
+
+            // Show window only after content is fully painted (prevents flash)
+            await new Promise(resolve => {
+                requestAnimationFrame(() => requestAnimationFrame(resolve));
+            });
+            await getCurrentWindow().show();
+            await getCurrentWindow().setFocus();
         } catch (err) {
             console.error('Failed to parse question from URL:', err);
             dialogContainer.innerHTML = '<p style="color:red;padding:24px;">Failed to load question data.</p>';

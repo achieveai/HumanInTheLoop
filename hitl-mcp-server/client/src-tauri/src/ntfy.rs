@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use futures_util::StreamExt;
 use reqwest::Client;
 use tauri::{AppHandle, Emitter, Manager};
@@ -6,8 +7,8 @@ use crate::config::load_config;
 use crate::types::{AnswerMessage, DismissNotificationMessage, HitlConfig, NotificationMessage, QuestionMessage};
 
 /// Start listening to ntfy for incoming question messages.
-/// Emits `show-question` events to the Tauri frontend when a question arrives.
-/// Emits `dismiss-question` events when an answer for an open question arrives.
+/// First polls cached messages to find pending (unanswered) questions,
+/// then subscribes to live messages going forward.
 pub async fn subscribe_loop(app: AppHandle) {
     let config = match load_config() {
         Ok(c) => c,
@@ -17,21 +18,26 @@ pub async fn subscribe_loop(app: AppHandle) {
         }
     };
 
-    let since_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let url = format!(
-        "{}/{}/json?since={}",
+    let base_url = format!(
+        "{}/{}",
         config.ntfy_url.trim_end_matches('/'),
-        config.topic_id,
-        since_ts
+        config.topic_id
     );
 
-    eprintln!("Subscribing to ntfy: {}", url);
+    // Phase 1: Poll all cached messages to find pending questions
+    eprintln!("Fetching cached messages to find pending questions...");
+    let answered_ids = fetch_answered_ids(&config, &base_url).await;
+    eprintln!("Found {} answered questions in cache", answered_ids.len());
+
+    // Show any pending (unanswered) questions from cache
+    show_pending_from_cache(&app, &config, &base_url, &answered_ids).await;
+
+    // Phase 2: Subscribe to live messages (new ones only)
+    let live_url = format!("{}/json", base_url);
+    eprintln!("Subscribing to live ntfy messages: {}", live_url);
 
     loop {
-        match subscribe_once(&app, &config, &url).await {
+        match subscribe_live(&app, &config, &live_url).await {
             Ok(()) => eprintln!("ntfy stream ended, reconnecting in 5s..."),
             Err(e) => eprintln!("ntfy error: {}, reconnecting in 5s...", e),
         }
@@ -39,7 +45,109 @@ pub async fn subscribe_loop(app: AppHandle) {
     }
 }
 
-async fn subscribe_once(
+/// Poll cached messages and return a set of question IDs that have been answered.
+async fn fetch_answered_ids(_config: &HitlConfig, base_url: &str) -> HashSet<String> {
+    let mut answered = HashSet::new();
+    let poll_url = format!("{}/json?since=all&poll=1", base_url);
+
+    let client = Client::new();
+    let response = match client
+        .get(&poll_url)
+        .header("Accept", "application/x-ndjson")
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            eprintln!("Cache poll returned {}", r.status());
+            return answered;
+        }
+        Err(e) => {
+            eprintln!("Cache poll failed: {}", e);
+            return answered;
+        }
+    };
+
+    let body = response.text().await.unwrap_or_default();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+
+        if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(msg_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
+                if let Ok(answer) = serde_json::from_str::<AnswerMessage>(msg_str) {
+                    if answer.msg_type == "answer" {
+                        answered.insert(answer.question_id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    answered
+}
+
+/// Show pending (unanswered) questions and notifications from the cache.
+async fn show_pending_from_cache(
+    app: &AppHandle,
+    config: &HitlConfig,
+    base_url: &str,
+    answered_ids: &HashSet<String>,
+) {
+    let poll_url = format!("{}/json?since=all&poll=1", base_url);
+
+    let client = Client::new();
+    let response = match client
+        .get(&poll_url)
+        .header("Accept", "application/x-ndjson")
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return,
+    };
+
+    let body = response.text().await.unwrap_or_default();
+    // Track dismissed notifications too
+    let mut dismissed_notifications: HashSet<String> = HashSet::new();
+
+    // First pass: collect dismissed notification IDs
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(msg_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
+                if let Ok(dismiss) = serde_json::from_str::<DismissNotificationMessage>(msg_str) {
+                    if dismiss.msg_type == "dismiss_notification" {
+                        dismissed_notifications.insert(dismiss.notification_id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Second pass: show only pending questions and undismissed notifications
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+
+        if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(msg_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
+                // Show unanswered questions
+                if let Ok(question) = serde_json::from_str::<QuestionMessage>(msg_str) {
+                    if question.msg_type == "question" && !answered_ids.contains(&question.message_id) {
+                        eprintln!("Showing pending question from cache: {}", question.message_id);
+                        show_question(app, config, &question);
+                    }
+                }
+                // We intentionally skip cached notifications — they're ephemeral
+            }
+        }
+    }
+}
+
+/// Subscribe to live (new) messages from ntfy.
+async fn subscribe_live(
     app: &AppHandle,
     config: &HitlConfig,
     url: &str,
@@ -70,10 +178,9 @@ async fn subscribe_once(
                 continue;
             }
 
-            // ntfy wraps messages in an envelope with an event type and message field
             if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(&line) {
                 if let Some(message_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
-                    handle_message(app, config, message_str).await;
+                    handle_live_message(app, config, message_str).await;
                 }
             }
         }
@@ -82,44 +189,13 @@ async fn subscribe_once(
     Ok(())
 }
 
-async fn handle_message(app: &AppHandle, config: &HitlConfig, raw: &str) {
+/// Handle a live (new) message — show questions, dismiss on answers, show notifications.
+async fn handle_live_message(app: &AppHandle, config: &HitlConfig, raw: &str) {
     // Try to parse as a question
     if let Ok(question) = serde_json::from_str::<QuestionMessage>(raw) {
         if question.msg_type == "question" {
             eprintln!("Received question: {}", question.message_id);
-
-            // Play notification sound if enabled
-            if config.sound_enabled {
-                crate::sound::play_notification();
-            }
-
-            // Store the question data in Tauri state so the frontend can fetch it
-            let question_json = serde_json::to_string(&question).unwrap_or_default();
-            let label = format!("dialog-{}", &question.message_id[..8]);
-
-            // Build the window with question data encoded in the URL fragment
-            let encoded = urlencoding::encode(&question_json);
-            let url_str = format!("index.html?question={}", encoded);
-
-            match tauri::WebviewWindowBuilder::new(
-                app,
-                &label,
-                tauri::WebviewUrl::App(url_str.into()),
-            )
-            .title("HITL")
-            .inner_size(400.0, 700.0)
-            .center()
-            .resizable(true)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .focused(true)
-            .build()
-            {
-                Ok(_) => eprintln!("Dialog window created: {}", label),
-                Err(e) => eprintln!("Failed to create dialog window: {}", e),
-            }
-
+            show_question(app, config, &question);
             return;
         }
     }
@@ -132,16 +208,15 @@ async fn handle_message(app: &AppHandle, config: &HitlConfig, raw: &str) {
                 answer.question_id, answer.responded_from
             );
 
-            // Emit dismiss event to all windows
             if let Err(e) = app.emit("dismiss-question", &answer) {
                 eprintln!("Failed to emit dismiss-question: {}", e);
             }
 
-            // Close the dialog window if it exists
             let label = format!("dialog-{}", &answer.question_id[..8.min(answer.question_id.len())]);
             if let Some(window) = app.get_webview_window(&label) {
                 let _ = window.close();
             }
+            return;
         }
     }
 
@@ -154,22 +229,17 @@ async fn handle_message(app: &AppHandle, config: &HitlConfig, raw: &str) {
                 crate::sound::play_notification();
             }
 
-            // Emit to a dedicated notifications window
             let notification_json = serde_json::to_string(&notification).unwrap_or_default();
-
-            // Try to find existing notifications window or create one
             let label = "notifications";
             let window = app.get_webview_window(label);
 
             if let Some(win) = window {
-                // Window exists — just emit the new notification
                 if let Err(e) = win.emit("add-notification", &notification_json) {
                     eprintln!("Failed to emit add-notification: {}", e);
                 }
                 let _ = win.show();
                 let _ = win.set_focus();
             } else {
-                // Create a new notifications window with data in URL
                 let encoded = urlencoding::encode(&notification_json);
                 let url_str = format!("notifications.html?notification={}", encoded);
 
@@ -185,6 +255,7 @@ async fn handle_message(app: &AppHandle, config: &HitlConfig, raw: &str) {
                 .decorations(false)
                 .transparent(true)
                 .always_on_top(true)
+                .visible(false)
                 .focused(true)
                 .build()
                 {
@@ -192,6 +263,7 @@ async fn handle_message(app: &AppHandle, config: &HitlConfig, raw: &str) {
                     Err(e) => eprintln!("Failed to create notifications window: {}", e),
                 }
             }
+            return;
         }
     }
 
@@ -203,13 +275,44 @@ async fn handle_message(app: &AppHandle, config: &HitlConfig, raw: &str) {
                 dismiss.notification_id, dismiss.dismissed_from
             );
 
-            // Emit to the notifications window
             if let Some(win) = app.get_webview_window("notifications") {
                 if let Err(e) = win.emit("remove-notification", &dismiss.notification_id) {
                     eprintln!("Failed to emit remove-notification: {}", e);
                 }
             }
         }
+    }
+}
+
+/// Create and show a dialog window for a question.
+fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessage) {
+    if config.sound_enabled {
+        crate::sound::play_notification();
+    }
+
+    let question_json = serde_json::to_string(question).unwrap_or_default();
+    let label = format!("dialog-{}", &question.message_id[..8]);
+    let encoded = urlencoding::encode(&question_json);
+    let url_str = format!("index.html?question={}", encoded);
+
+    match tauri::WebviewWindowBuilder::new(
+        app,
+        &label,
+        tauri::WebviewUrl::App(url_str.into()),
+    )
+    .title("HITL")
+    .inner_size(400.0, 700.0)
+    .center()
+    .resizable(true)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .visible(false)
+    .focused(true)
+    .build()
+    {
+        Ok(_) => eprintln!("Dialog window created: {}", label),
+        Err(e) => eprintln!("Failed to create dialog window: {}", e),
     }
 }
 
