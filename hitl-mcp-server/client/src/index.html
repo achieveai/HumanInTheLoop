@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HITL — Human Input Required</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/lib/marked.umd.min.js"></script>
+</head>
+<body>
+    <div class="dialog-container" id="dialog-container">
+        <div class="loading">
+            <div class="spinner"></div>
+            <p>Waiting for question...</p>
+        </div>
+    </div>
+
+    <div class="dismissed-container" id="dismissed-container" style="display: none;">
+        <div style="text-align: center; padding: 48px;">
+            <div style="font-size: 48px; margin-bottom: 16px;">✓</div>
+            <h2 class="dismissed-title">Answered on another device</h2>
+            <p class="dismissed-subtitle" id="dismissed-device"></p>
+            <p class="dismissed-note">This window will close automatically.</p>
+        </div>
+    </div>
+
+    <script>document.addEventListener('contextmenu', e => e.preventDefault());</script>
+    <script type="module" src="app.js"></script>
+</body>
+</html>

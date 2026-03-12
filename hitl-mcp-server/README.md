@@ -1,422 +1,131 @@
-# Human In The Loop MCP Server
+# HITL MCP — Human-in-the-Loop Across All Your Machines
 
-A Model Context Protocol (MCP) server that bridges the gap between AI autonomy and human oversight by enabling LLM agents to request human input at critical decision points.
+A cross-machine notification system that lets AI agents (via MCP) ask humans for input. Questions pop up as **native windows** on **all your devices** simultaneously — answer from any one, and the rest dismiss.
 
-## What This Tool Does
+## Architecture
 
-This MCP server allows AI agents like Claude to pause their execution and ask humans for guidance through interactive browser-based dialogs. Instead of making assumptions or failing when faced with ambiguity, AI agents can now gracefully request human input and continue with confidence.
-
-## Real-World Use Cases
-
-### 1. **Code Generation Decisions**
-When generating code, the AI can ask:
-- "Which framework should I use: React, Vue, or Angular?"
-- "Should I implement this with TypeScript or JavaScript?"
-- "Which testing framework do you prefer?"
-
-### 2. **Deployment & Operations**
-- "Ready to deploy to production? I've run all tests."
-- "Should I rollback the deployment? Errors detected."
-- "Which environment: staging or production?"
-
-### 3. **Data Processing**
-- "Found 1000 duplicate records. Delete all, keep first, or review manually?"
-- "Which columns should I include in the export?"
-- "Normalize the data using method A (faster) or B (more accurate)?"
-
-### 4. **Content & Documentation**
-- "Which tone for the documentation: formal, casual, or technical?"
-- "Include code examples in the README?"
-- "Which sections are most important for your users?"
-
-### 5. **Git Operations**
-- "Which files should I include in this commit?"
-- "Merge conflict detected. Keep theirs, ours, or manual review?"
-- "Create a new branch or commit to main?"
-
-## What to Expect
-
-### For Developers
-- **Reduced Errors**: AI agents won't make incorrect assumptions about your preferences
-- **Better Control**: Maintain oversight of critical decisions while letting AI handle the implementation
-- **Improved Workflow**: AI can complete complex multi-step tasks with human guidance at key points
-- **Time Savings**: Let AI do the work while you just make the important decisions
-
-### For AI Agents
-- **Clear Decision Points**: No more guessing what the user wants
-- **Graceful Handling**: Ambiguous situations become opportunities for clarification
-- **Better Results**: Human input ensures the output matches expectations
-- **Continuous Workflow**: Complete tasks without stopping for every small decision
-
-## Core Features
-
-- **Browser-Based Dialogs**: Clean, accessible UI that opens automatically
-- **Multiple Choice Support**: Single or multi-select options with descriptions
-- **Custom Input**: "Other" field for responses not in the list
-- **Timeout Support**: Auto-dismiss dialogs after specified time
-- **Cross-Platform**: Works on Windows, macOS, and Linux
-- **Zero Configuration**: Works out of the box with sensible defaults
-
-## Installation
-
-### Prerequisites
-
-- Node.js 18+ and npm
-- A browser (for displaying dialogs)
-
-### Quick Install from NPM
-
-```bash
-# Install globally from npm
-npm install -g @achieveai/hitl-mcp-server
-
-# Now you can run it from anywhere
-hitl-mcp-server
+```
+LLM → MCP Server (ask_human) → ntfy.sh pub/sub → Tauri Client Apps (all machines)
+                                     ↑                        │
+                                     └── answer ──────────────┘
 ```
 
-### Using with npx (no installation required)
+- **MCP Server** (`server/`): Node.js MCP server exposing `ask_human` tool. Publishes questions to ntfy.sh, waits for answers.
+- **Tauri Client** (`client/`): Native system tray app that subscribes to ntfy.sh. Pops up a webview dialog when questions arrive.
+- **Shared Types** (`shared/`): TypeScript protocol definitions shared between server and client.
+
+## Quick Start
+
+### 1. Initialize Config
 
 ```bash
-# Run directly without installing
-npx @achieveai/hitl-mcp-server
+cd server && npm install && npm run build
+npx hitl init
 ```
 
-### From Source
+This creates `~/.hitl/config.json` with a unique topic ID:
+
+```json
+{
+  "topicId": "hitl-a1b2c3d4-...",
+  "ntfyUrl": "https://ntfy.sh",
+  "deviceName": "MY-LAPTOP",
+  "soundEnabled": true
+}
+```
+
+### 2. Copy Config to Other Machines
+
+Copy the **same** `~/.hitl/config.json` (or just the `topicId`) to every machine where you want to receive notifications.
+
+### 3. Install Tauri Client (on each machine)
 
 ```bash
-# Clone the repository
-git clone https://github.com/achieveai/HumanInTheLoop.git
-cd HumanInTheLoop/hitl-mcp-server
-
-# Install dependencies
-npm install
-
-# Build the TypeScript code
-npm run build
-
-# Test the installation
-npm run dev
+cd client && npm install && npm run build
 ```
 
-## Configuration
+Run the built app — it sits in your system tray and listens for questions.
 
-Pre-configured examples are available in the `config/` directory for different MCP clients.
+### 4. Configure MCP
 
-### Claude Desktop Configuration
-
-Add the server to your Claude Desktop config file:
-
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Linux**: `~/.config/claude/claude_desktop_config.json`
+Add to your MCP client config (e.g., Claude Desktop):
 
 ```json
 {
   "mcpServers": {
-    "human-in-the-loop": {
-      "command": "npx",
-      "args": ["-y", "@achieveai/hitl-mcp-server"],
-      "env": {
-        "NODE_ENV": "production"
-      }
+    "hitl": {
+      "command": "node",
+      "args": ["path/to/server/dist/mcp-server.js"]
     }
   }
 }
 ```
 
-Or if you've installed it globally:
+## How It Works
 
-```json
-{
-  "mcpServers": {
-    "human-in-the-loop": {
-      "command": "hitl-mcp-server",
-      "env": {
-        "NODE_ENV": "production"
-      }
-    }
-  }
-}
-```
+1. An LLM calls the `ask_human` tool with a question, options, and context
+2. The MCP server auto-detects the git repo and publishes the question to your ntfy.sh topic
+3. All your Tauri clients receive the notification and pop up a native dialog
+4. You answer on any device — the answer flows back through ntfy.sh
+5. All other popups dismiss, and the MCP server returns the response to the LLM
 
-### VS Code Configuration
-
-Create `.vscode/mcp.json` in your workspace:
-
-```json
-{
-  "mcpServers": {
-    "human-in-the-loop": {
-      "command": "npx",
-      "args": ["-y", "@achieveai/hitl-mcp-server"],
-      "env": {
-        "NODE_ENV": "production"
-      }
-    }
-  }
-}
-```
-
-### Cursor IDE Configuration
-
-Add to your Cursor settings:
-
-```json
-{
-  "mcpServers": {
-    "human-in-the-loop": {
-      "name": "Human In The Loop",
-      "command": "npx",
-      "args": ["-y", "@achieveai/hitl-mcp-server"],
-      "transport": "stdio",
-      "autoStart": false
-    }
-  }
-}
-```
-
-Or if you've installed it globally:
-
-```json
-{
-  "mcpServers": {
-    "human-in-the-loop": {
-      "name": "Human In The Loop",
-      "command": "hitl-mcp-server",
-      "transport": "stdio",
-      "autoStart": false
-    }
-  }
-}
-```
-
-### Recommended Configuration
-
-For all MCP clients, we recommend using npx for zero-installation setup:
-
-```json
-{
-  "mcpServers": {
-    "human-in-the-loop": {
-      "command": "npx",
-      "args": ["-y", "@achieveai/hitl-mcp-server"]
-    }
-  }
-}
-```
-
-This approach:
-- Requires no installation
-- Always uses the latest version
-- Works immediately on any system with Node.js
-
-## Usage
-
-Once configured, the AI agent can use the `ask_human` tool to request input:
-
-### Example: Single Choice
-
-```javascript
-{
-  "question": "Which database should I use for this project?",
-  "options": [
-    {
-      "label": "PostgreSQL",
-      "value": "postgres",
-      "description": "Robust relational database with advanced features"
-    },
-    {
-      "label": "MongoDB",
-      "value": "mongo",
-      "description": "Flexible document database for unstructured data"
-    },
-    {
-      "label": "SQLite",
-      "value": "sqlite",
-      "description": "Lightweight embedded database"
-    }
-  ],
-  "allowMultiple": false,
-  "allowOther": true,
-  "context": "This is for a medium-scale web application with complex queries"
-}
-```
-
-### Example: Multiple Choice
-
-```javascript
-{
-  "question": "Which files should I include in the commit?",
-  "options": [
-    {
-      "label": "src/index.ts",
-      "value": "index"
-    },
-    {
-      "label": "src/utils.ts",
-      "value": "utils"
-    },
-    {
-      "label": "README.md",
-      "value": "readme"
-    }
-  ],
-  "allowMultiple": true,
-  "allowOther": false,
-  "context": "Several files have been modified"
-}
-```
-
-### Example: With Timeout
-
-```javascript
-{
-  "question": "Should I proceed with the deployment?",
-  "options": [
-    {
-      "label": "Yes, deploy now",
-      "value": "yes"
-    },
-    {
-      "label": "No, cancel",
-      "value": "no"
-    }
-  ],
-  "allowMultiple": false,
-  "allowOther": false,
-  "timeout": 30000  // 30 seconds
-}
-```
-
-## Response Format
-
-The tool returns a JSON response:
-
-```javascript
-{
-  "success": true,
-  "timestamp": 1703001234567,
-  "response": "selected_value",  // or array for multiple selection
-  "responseType": "selection"    // or "custom" for other text, "none" if skipped
-}
-```
-
-## Testing
-
-### Run Unit Tests
+## CLI Commands
 
 ```bash
-npm test
+hitl init                    # Create ~/.hitl/config.json with a new topic
+hitl config show             # Print current config
+hitl config set-topic <id>   # Set topic ID (sync across machines)
+hitl test                    # Send a test question to verify connectivity
 ```
 
-### Test Dialog Manager
+## Tool Schema
 
-```bash
-npm run build
-node dist/test-client.js
-```
+The `ask_human` tool accepts:
 
-This will open test dialogs to verify the UI is working correctly.
+| Parameter | Required | Description |
+|---|---|---|
+| `question` | ✅ | The question to ask |
+| `context` | ✅ | What project/work the LLM is doing |
+| `options` | ✅ | Array of `{ label, value, description? }` |
+| `allowMultiple` | ❌ | Allow multi-select (default: true) |
+| `allowOther` | ❌ | Show free-text field (default: true) |
+| `timeout` | ❌ | Timeout in ms (default: 300000) |
 
-### Manual Testing with MCP Inspector
+The server auto-detects `repo` (name, branch, remote URL) from the git context.
 
-You can use the MCP Inspector tool to test the server:
-
-```bash
-npx @modelcontextprotocol/inspector node dist/index.js
-```
-
-## Development
-
-### Project Structure
+## Project Structure
 
 ```
 hitl-mcp-server/
-├── src/
-│   ├── index.ts           # Main MCP server implementation
-│   ├── dialog-manager.ts  # Dialog UI and HTTP server
-│   └── test-client.ts     # Test client for dialog manager
-├── dist/                  # Compiled JavaScript (after build)
-├── package.json
-├── tsconfig.json
-└── README.md
+├── server/          # MCP Server (Node.js/TypeScript)
+│   └── src/
+│       ├── mcp-server.ts      # MCP entry point
+│       ├── ntfy-transport.ts  # ntfy.sh pub/sub
+│       ├── git-context.ts     # Git repo detection
+│       ├── config.ts          # Config reader
+│       └── cli.ts             # CLI helper
+├── client/          # Tauri Client App
+│   ├── src-tauri/   # Rust backend
+│   │   └── src/
+│   │       ├── main.rs   # App entry, tray, commands
+│   │       ├── ntfy.rs   # ntfy subscription + publish
+│   │       ├── config.rs # Config reader
+│   │       ├── tray.rs   # System tray
+│   │       └── types.rs  # Rust message types
+│   └── src/         # Web frontend (rendered in native webview)
+│       ├── index.html
+│       ├── styles.css
+│       ├── dialog.js
+│       └── app.js
+├── shared/          # Shared protocol types
+│   └── src/
+│       └── index.ts
+└── package.json     # Workspace root
 ```
 
-### Available Scripts
+## Security
 
-- `npm run build` - Compile TypeScript to JavaScript
-- `npm run dev` - Run in development mode with auto-reload
-- `npm test` - Run unit tests
-- `npm run typecheck` - Check TypeScript types without building
-
-## Why This Tool Matters
-
-### The Problem
-AI agents are powerful but often encounter situations where they need human judgment:
-- Ambiguous requirements that could be interpreted multiple ways
-- Critical decisions that could have significant consequences
-- Subjective choices about style, approach, or priorities
-- Missing context that only the human user possesses
-
-### The Solution
-This tool creates a seamless communication channel between AI and humans:
-- **AI Autonomy**: The agent continues working independently until it needs input
-- **Human Control**: You maintain oversight of important decisions
-- **Efficient Workflow**: No need to micromanage - only intervene when necessary
-- **Better Outcomes**: Combine AI efficiency with human judgment
-
-### Expected Benefits
-
-1. **Increased Productivity**
-   - Let AI handle implementation while you focus on decisions
-   - Batch multiple tasks with decision points
-   - Reduce back-and-forth clarifications
-
-2. **Improved Accuracy**
-   - No more AI guessing your preferences
-   - Catch potential issues before they happen
-   - Ensure outputs match your expectations
-
-3. **Enhanced Trust**
-   - Know that AI will ask before making critical changes
-   - Review and approve important decisions
-   - Maintain control while leveraging AI capabilities
-
-4. **Seamless Integration**
-   - Works with Claude Desktop, Cursor, VS Code, and other MCP clients
-   - No complex setup or configuration required
-   - Natural integration into existing AI workflows
-
-## Troubleshooting
-
-### Dialog doesn't open
-
-- Check if port 3000-5000 range is available
-- Ensure your default browser is properly configured
-- Check the server logs for error messages
-
-### Timeout errors
-
-- Increase the timeout value in your request
-- Ensure the dialog window has focus
-
-### Server won't start
-
-- Check if another instance is already running
-- Verify Node.js version is 18 or higher
-- Run `npm install` to ensure all dependencies are installed
-
-## Security & Privacy
-
-- All dialogs run locally on your machine
-- No data is sent to external servers
-- Dialog server only accepts connections from localhost
-- Temporary server instances are created per request
-
-## License
-
-GPL-3.0
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+- Your ntfy topic ID is a long random UUID — effectively a secret key
+- Anyone with the topic ID can read/publish messages
+- Use ntfy access tokens for additional security
+- Consider self-hosting ntfy for sensitive environments

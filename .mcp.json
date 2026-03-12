@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "hitl": {
+      "command": "node",
+      "args": ["B:\\sources\\Hitl_MCP\\hitl-mcp-server\\server\\dist\\mcp-server.js"]
+    }
+  }
+}
