@@ -1,4 +1,4 @@
-import type { QuestionMessage, AnswerMessage, HitlMessage, HitlConfig } from '@hitl/shared';
+import type { QuestionMessage, AnswerMessage, HitlMessage, HitlConfig } from './types.js';
 
 /**
  * Transport layer for communicating with ntfy.sh.

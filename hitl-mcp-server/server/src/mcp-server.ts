@@ -11,7 +11,7 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import type { QuestionMessage, HitlToolResponse } from '@hitl/shared';
+import type { QuestionMessage, HitlToolResponse } from './types.js';
 import { NtfyTransport } from './ntfy-transport.js';
 import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';

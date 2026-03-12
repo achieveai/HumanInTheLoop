@@ -1,5 +1,5 @@
 import { execSync } from 'child_process';
-import type { RepoContext } from '@hitl/shared';
+import type { RepoContext } from './types.js';
 
 /**
  * Auto-detect git repository context from the current working directory.

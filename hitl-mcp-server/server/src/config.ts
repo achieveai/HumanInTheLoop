@@ -2,8 +2,8 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { homedir, hostname } from 'os';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import type { HitlConfig } from '@hitl/shared';
-import { DEFAULT_NTFY_URL } from '@hitl/shared';
+import type { HitlConfig } from './types.js';
+import { DEFAULT_NTFY_URL } from './types.js';
 
 const CONFIG_DIR = path.join(homedir(), '.hitl');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
