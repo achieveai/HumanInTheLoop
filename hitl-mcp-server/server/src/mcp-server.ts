@@ -9,14 +9,21 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { v4 as uuidv4 } from 'uuid';
+import { fileURLToPath } from 'url';
+import path from 'path';
 import type { QuestionMessage, HitlToolResponse } from '@hitl/shared';
 import { NtfyTransport } from './ntfy-transport.js';
 import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
+import { performSetup } from './setup.js';
 
 const TOOL_NAME = 'ask_human';
+const SETUP_TOOL_NAME = 'setup';
 const SERVER_NAME = 'hitl-mcp-server';
 const SERVER_VERSION = '2.0.0';
+
+/** Directory where the compiled server JS lives (used for relative binary paths). */
+const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 class HumanInTheLoopServer {
   private server: Server;
@@ -114,10 +121,36 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy.`,
             required: ['question', 'context', 'options'],
           },
         },
+        {
+          name: SETUP_TOOL_NAME,
+          description:
+            'Set up the HITL (Human-in-the-Loop) client on this machine. ' +
+            'Ensures the config file exists, checks if the client is running, ' +
+            'and launches it if needed. Call this tool with no arguments.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
       ],
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      // Handle setup tool
+      if (request.params.name === SETUP_TOOL_NAME) {
+        try {
+          const result = await performSetup(SERVER_DIR);
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (error) {
+          throw new McpError(
+            ErrorCode.InternalError,
+            `Setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+          );
+        }
+      }
+
       if (request.params.name !== TOOL_NAME) {
         throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${request.params.name}`);
       }
