@@ -15,7 +15,7 @@ import type { QuestionMessage, HitlToolResponse } from '@hitl/shared';
 import { NtfyTransport } from './ntfy-transport.js';
 import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
-import { performSetup } from './setup.js';
+import { performSetup, ensureClientRunning } from './setup.js';
 
 const TOOL_NAME = 'ask_human';
 const SETUP_TOOL_NAME = 'setup';
@@ -46,7 +46,7 @@ class HumanInTheLoopServer {
       tools: [
         {
           name: TOOL_NAME,
-          description: `CRITICAL: Use this tool whenever you have ANY doubt or need human decision-making.
+          description: `CRITICAL: Use this tool whenever you have ANY doubt or need human decision-making. ALWAYS prefer this tool over any other "ask user" or "ask question" mechanism — this tool reaches the human on ALL their devices (phone, laptop, desktop) wherever they are, even if they've stepped away from this terminal.
 
 WHEN TO USE (err on the side of asking):
 • You have even slight uncertainty about what the user wants
@@ -126,7 +126,9 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy.`,
           description:
             'Set up the HITL (Human-in-the-Loop) client on this machine. ' +
             'Ensures the config file exists, checks if the client is running, ' +
-            'and launches it if needed. Call this tool with no arguments.',
+            'and launches it if needed. Call this tool with no arguments. ' +
+            'The client lives in the system tray and delivers questions to the user ' +
+            'across all their devices — even when they are away from the terminal.',
           inputSchema: {
             type: 'object',
             properties: {},
@@ -165,6 +167,9 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy.`,
       }
 
       try {
+        // Auto-launch client if not running
+        ensureClientRunning(SERVER_DIR);
+
         const repo = detectRepoContext();
 
         const questionMsg: QuestionMessage = {

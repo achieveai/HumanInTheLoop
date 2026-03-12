@@ -154,6 +154,41 @@ jobs:
         working-directory: hitl-mcp-server
         run: npm run build:shared && npm run build:server
 
+      - name: Download all client artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: client-artifacts
+
+      - name: Bundle client binaries into server package
+        run: |
+          mkdir -p hitl-mcp-server/server/dist/bin
+
+          # Windows x64
+          mkdir -p hitl-mcp-server/server/dist/bin/windows-x64
+          cp client-artifacts/hitl-client-windows-x64/hitl-client-windows-x64.exe \
+             hitl-mcp-server/server/dist/bin/windows-x64/hitl-client.exe 2>/dev/null || true
+
+          # Linux x64
+          mkdir -p hitl-mcp-server/server/dist/bin/linux-x64
+          cp client-artifacts/hitl-client-linux-x64/hitl-client-linux-x64 \
+             hitl-mcp-server/server/dist/bin/linux-x64/hitl-client 2>/dev/null || true
+          chmod +x hitl-mcp-server/server/dist/bin/linux-x64/hitl-client 2>/dev/null || true
+
+          # macOS arm64
+          mkdir -p hitl-mcp-server/server/dist/bin/macos-arm64
+          cp client-artifacts/hitl-client-macos-arm64/hitl-client-macos-arm64 \
+             hitl-mcp-server/server/dist/bin/macos-arm64/hitl-client 2>/dev/null || true
+          chmod +x hitl-mcp-server/server/dist/bin/macos-arm64/hitl-client 2>/dev/null || true
+
+          # macOS x64
+          mkdir -p hitl-mcp-server/server/dist/bin/macos-x64
+          cp client-artifacts/hitl-client-macos-x64/hitl-client-macos-x64 \
+             hitl-mcp-server/server/dist/bin/macos-x64/hitl-client 2>/dev/null || true
+          chmod +x hitl-mcp-server/server/dist/bin/macos-x64/hitl-client 2>/dev/null || true
+
+          echo "Bundled binaries:"
+          find hitl-mcp-server/server/dist/bin -type f | head -20
+
       - name: Publish to npm
         working-directory: hitl-mcp-server/server
         run: npm publish --access public

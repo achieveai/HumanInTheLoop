@@ -1,6 +1,6 @@
-import { existsSync } from 'fs';
+import { existsSync, chmodSync } from 'fs';
 import { execSync, spawn } from 'child_process';
-import { homedir } from 'os';
+import { homedir, arch } from 'os';
 import path from 'path';
 import { saveConfig, generateDefaultConfig, getConfigPath } from './config.js';
 
@@ -16,6 +16,22 @@ export interface SetupResult {
   success: boolean;
   steps: SetupStepResult[];
   summary: string;
+}
+
+/**
+ * Get the platform-specific subdirectory name for bundled binaries.
+ * Maps Node.js platform/arch to the artifact names used in CI.
+ */
+function getBundledPlatformDir(): string {
+  const platform = process.platform;
+  const cpuArch = arch();
+
+  if (platform === 'win32') return 'windows-x64';
+  if (platform === 'linux') return 'linux-x64';
+  if (platform === 'darwin') {
+    return cpuArch === 'arm64' ? 'macos-arm64' : 'macos-x64';
+  }
+  return 'unknown';
 }
 
 /**
@@ -41,23 +57,36 @@ export function isProcessRunning(processName: string): boolean {
 
 /**
  * Search known locations for the HITL client binary.
- * Returns the first path that exists, or null if none found.
+ * Priority: bundled with npm package > dev build > release build > ~/.hitl/
  *
  * @param serverDir - The directory where the compiled server JS lives (e.g. server/dist/)
  */
 export function findClientBinary(serverDir: string): string | null {
   const binaryName = process.platform === 'win32' ? 'hitl-client.exe' : 'hitl-client';
+  const platformDir = getBundledPlatformDir();
 
   const candidates = [
+    // Bundled with npm package (dist/bin/{platform}/hitl-client)
+    path.resolve(serverDir, 'bin', platformDir, binaryName),
     // Dev build (relative to server dist → repo root → client)
     path.resolve(serverDir, '..', '..', 'client', 'src-tauri', 'target', 'debug', binaryName),
     // Release build
     path.resolve(serverDir, '..', '..', 'client', 'src-tauri', 'target', 'release', binaryName),
-    // Installed location
+    // Installed location in user home
     path.join(homedir(), '.hitl', binaryName),
   ];
 
-  return candidates.find((p) => existsSync(p)) ?? null;
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      // Ensure executable permission on Unix
+      if (process.platform !== 'win32') {
+        try { chmodSync(candidate, 0o755); } catch { /* best effort */ }
+      }
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -72,18 +101,43 @@ export function launchClient(binaryPath: string): void {
 }
 
 /**
+ * Ensure the HITL client is running. Finds and launches it if needed.
+ * Logs to stderr only — safe to call from the hot path of ask_human.
+ */
+export function ensureClientRunning(serverDir: string): void {
+  const binaryName = process.platform === 'win32' ? 'hitl-client.exe' : 'hitl-client';
+
+  if (isProcessRunning(binaryName)) {
+    return;
+  }
+
+  const binaryPath = findClientBinary(serverDir);
+  if (binaryPath) {
+    try {
+      launchClient(binaryPath);
+      console.error(`Auto-launched HITL client from ${binaryPath}`);
+    } catch (err) {
+      console.error(`Failed to auto-launch HITL client: ${err}`);
+    }
+  }
+}
+
+/**
  * Build a user-friendly "not found" message listing the paths that were searched.
  */
-function buildNotFoundMessage(): string {
+function buildNotFoundMessage(serverDir: string): string {
   const binaryName = process.platform === 'win32' ? 'hitl-client.exe' : 'hitl-client';
+  const platformDir = getBundledPlatformDir();
   return [
     `HITL client binary not found. Searched locations:`,
-    `  - <serverDir>/../../client/src-tauri/target/debug/${binaryName}`,
-    `  - <serverDir>/../../client/src-tauri/target/release/${binaryName}`,
+    `  - ${path.resolve(serverDir, 'bin', platformDir, binaryName)} (bundled)`,
+    `  - <repo>/client/src-tauri/target/debug/${binaryName}`,
+    `  - <repo>/client/src-tauri/target/release/${binaryName}`,
     `  - ~/.hitl/${binaryName}`,
     ``,
-    `To build the client from source, run:`,
-    `  cd client && cargo tauri build`,
+    `Install the client from GitHub Releases:`,
+    `  https://github.com/achieveai/HumanInTheLoop/releases`,
+    `Or build from source: cd client && npm run build`,
   ].join('\n');
 }
 
@@ -129,7 +183,7 @@ export async function performSetup(serverDir: string): Promise<SetupResult> {
   const binaryPath = findClientBinary(serverDir);
   if (!binaryPath) {
     overallSuccess = false;
-    steps.push({ step: 'client', status: 'not_found', message: buildNotFoundMessage() });
+    steps.push({ step: 'client', status: 'not_found', message: buildNotFoundMessage(serverDir) });
     return { success: overallSuccess, steps, summary: formatSummary(steps) };
   }
 

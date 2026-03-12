@@ -12,6 +12,8 @@
     "dist/**/*.js",
     "dist/**/*.d.ts",
     "dist/**/*.map",
+    "dist/bin/**/*",
+    "scripts/postinstall.js",
     "README.md"
   ],
   "keywords": [
@@ -36,6 +38,7 @@
     "dev": "tsx src/index.ts",
     "test": "jest --config jest.config.js",
     "clean": "rimraf dist",
+    "postinstall": "node scripts/postinstall.js",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
