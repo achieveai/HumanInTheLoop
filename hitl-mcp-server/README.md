@@ -7,7 +7,7 @@ A cross-machine notification system that lets AI agents (via MCP) ask humans for
 ```
 ┌─────────────┐      ┌──────────────┐      ┌───────────────────────┐
 │  LLM Agent  │─────▶│  MCP Server  │─────▶│     ntfy.sh topic     │
-│  (Claude…)  │      │  (ask_human) │      │  (pub/sub messaging)  │
+│  (Claude…)  │      │ (ask_question)│      │  (pub/sub messaging)  │
 └─────────────┘      └──────────────┘      └───────┬───────────────┘
                            ▲                        │
                            │ answer                 ▼
@@ -17,7 +17,7 @@ A cross-machine notification system that lets AI agents (via MCP) ask humans for
                      └──────────────┘      └───────────────────────┘
 ```
 
-1. An LLM calls the `ask_human` tool with a question, options, and context
+1. An LLM calls the `ask_question` tool with a question, options, and context
 2. The MCP server auto-detects the git repo and publishes the question to your ntfy.sh topic
 3. **All** your Tauri client apps receive the notification and pop up a native dialog with a doorbell sound
 4. You answer on **any** device — the answer flows back through ntfy.sh to the MCP server
@@ -73,7 +73,7 @@ Copy the **same** `topicId` to `~/.hitl/config.json` on every machine where you 
 
 ## MCP Tools
 
-### `ask_human`
+### `ask_question`
 
 Sends a question to all connected devices. The human responds from any one.
 

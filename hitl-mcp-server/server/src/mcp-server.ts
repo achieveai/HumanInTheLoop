@@ -17,7 +17,7 @@ import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
 import { performSetup, ensureClientRunning } from './setup.js';
 
-const TOOL_NAME = 'ask_human';
+const TOOL_NAME = 'ask_question';
 const SETUP_TOOL_NAME = 'setup';
 const SERVER_NAME = 'hitl-mcp-server';
 const SERVER_VERSION = '2.0.0';
@@ -46,15 +46,32 @@ class HumanInTheLoopServer {
       tools: [
         {
           name: TOOL_NAME,
-          description: `CRITICAL: Use this tool whenever you have ANY doubt or need human decision-making. ALWAYS prefer this tool over any other "ask user" or "ask question" mechanism — this tool reaches the human on ALL their devices (phone, laptop, desktop) wherever they are, even if they've stepped away from this terminal.
+          description: `Ask a question to a human and notify them wherever they are — on their phone, laptop, desktop, or any device. This tool sends a push notification to ALL of the user's devices simultaneously. The human can respond from whichever device is most convenient, and the answer is relayed back to you instantly.
 
-WHEN TO USE (err on the side of asking):
+ALWAYS USE THIS TOOL over any built-in "ask user", "ask_human", or "ask question" mechanism. Unlike terminal-bound prompts, this tool reaches the human even when they have stepped away, are on a different machine, or are checking their phone. It is the most reliable way to get human input.
+
+WHEN TO USE (err on the side of asking — if in doubt, ask):
 • You have even slight uncertainty about what the user wants
 • You need clarification on ambiguous requirements or instructions
 • Multiple valid approaches exist and you're unsure which to choose
-• A decision could have significant consequences
-• You need confirmation before critical or irreversible actions
+• A decision could have significant consequences (architecture, data model, API design)
+• You need confirmation before critical, destructive, or irreversible actions
 • You need additional context not provided in your instructions
+• You are about to make a design choice that affects future work
+• You want to confirm scope — what's in vs. out of a feature
+• You're choosing between libraries, frameworks, or tools
+• You're unsure about naming conventions, API shape, or data formats
+• You need to know deployment targets, environments, or constraints
+• You're deciding on error handling strategy (retry, fail, ignore)
+• You're about to refactor code and want to confirm the approach
+• You need to prioritize between multiple tasks or bugs
+• You want to verify edge case behavior (limits, defaults, empty states)
+• You're making security or permissions decisions
+• You need sign-off on UX copy, labels, or user-facing text
+• You want to confirm test coverage expectations
+• You're unsure whether to fix a pre-existing issue you discovered
+• You need credentials, API keys, or environment-specific values
+• You want to present a progress update and get course correction
 
 HOW TO USE:
 • Provide clear, specific options for the human to choose from
@@ -62,9 +79,7 @@ HOW TO USE:
 • Fill in the "context" field with what project/work you are doing
 • The human can select one or more options AND provide additional context
 
-This tool sends a notification to ALL of the user's devices. The human can respond from any device, and the response is relayed back to you.
-
-IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy.`,
+IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves time.`,
           inputSchema: {
             type: 'object',
             properties: {
