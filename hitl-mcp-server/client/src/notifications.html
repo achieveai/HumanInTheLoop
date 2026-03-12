@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HITL — Notifications</title>
+    <link rel="stylesheet" href="notifications.css">
+</head>
+<body>
+    <div class="notifications-container" id="notifications-container">
+        <div class="notifications-titlebar">
+            <span class="notifications-titlebar-label">Notifications</span>
+            <span class="notifications-count" id="count-badge">0</span>
+        </div>
+        <div class="notifications-list" id="notifications-list">
+            <div class="empty-state" id="empty-state">
+                <p>No notifications</p>
+            </div>
+        </div>
+    </div>
+
+    <script>document.addEventListener('contextmenu', e => e.preventDefault());</script>
+    <script type="module" src="notifications.js"></script>
+</body>
+</html>

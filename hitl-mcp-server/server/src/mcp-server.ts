@@ -11,13 +11,14 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import type { QuestionMessage, HitlToolResponse } from './types.js';
+import type { QuestionMessage, NotificationMessage, HitlToolResponse } from './types.js';
 import { NtfyTransport } from './ntfy-transport.js';
 import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
 import { performSetup, ensureClientRunning } from './setup.js';
 
 const TOOL_NAME = 'ask_question';
+const NOTIFY_TOOL_NAME = 'notify_user';
 const SETUP_TOOL_NAME = 'setup';
 const SERVER_NAME = 'hitl-mcp-server';
 const SERVER_VERSION = '2.0.0';
@@ -128,9 +129,9 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
               },
               timeout: {
                 type: 'number',
-                description: 'Timeout in milliseconds (default: 300000 = 5 minutes)',
+                description: 'Timeout in milliseconds (default: 3600000 = 1 hour)',
                 minimum: 1000,
-                maximum: 3600000,
+                maximum: 86400000,
               },
             },
             required: ['question', 'context', 'options'],
@@ -149,10 +150,36 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
             properties: {},
           },
         },
+        {
+          name: NOTIFY_TOOL_NAME,
+          description:
+            'Send a notification to the human without waiting for a response. ' +
+            'Use this for progress updates, status messages, or any information the human should see. ' +
+            'The notification appears on all of the user\'s devices and can be dismissed. ' +
+            'Unlike ask_question, this tool returns immediately — it does NOT block.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              title: {
+                type: 'string',
+                description: 'Short title for the notification (e.g. "Build Complete", "Tests Passing")',
+              },
+              body: {
+                type: 'string',
+                description: 'Notification body text. Supports markdown.',
+              },
+              context: {
+                type: 'string',
+                description: 'Optional context about what triggered this notification.',
+              },
+            },
+            required: ['title', 'body'],
+          },
+        },
       ],
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       // Handle setup tool
       if (request.params.name === SETUP_TOOL_NAME) {
         try {
@@ -164,6 +191,39 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
           throw new McpError(
             ErrorCode.InternalError,
             `Setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+          );
+        }
+      }
+
+      // Handle notify tool (fire-and-forget)
+      if (request.params.name === NOTIFY_TOOL_NAME) {
+        const args = request.params.arguments as Record<string, unknown>;
+
+        if (!args.title || !args.body) {
+          throw new McpError(ErrorCode.InvalidParams, 'Missing required parameters: title and body');
+        }
+
+        try {
+          ensureClientRunning(SERVER_DIR);
+
+          const notification: NotificationMessage = {
+            type: 'notification',
+            messageId: uuidv4(),
+            timestamp: Date.now(),
+            title: args.title as string,
+            body: args.body as string,
+            context: (args.context as string) || undefined,
+          };
+
+          await this.transport.publish(notification);
+
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ success: true, messageId: notification.messageId }) }],
+          };
+        } catch (error) {
+          throw new McpError(
+            ErrorCode.InternalError,
+            `Failed to send notification: ${error instanceof Error ? error.message : 'Unknown error'}`
           );
         }
       }
@@ -201,17 +261,48 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
           })),
           allowMultiple: (args.allowMultiple as boolean) !== false,
           allowOther: (args.allowOther as boolean) !== false,
-          timeout: (args.timeout as number) || 300000,
+          timeout: (args.timeout as number) || 3600000,
         };
 
         console.error(`Publishing question ${questionMsg.messageId} to ntfy...`);
-        await this.transport.publishQuestion(questionMsg);
+        await this.transport.publish(questionMsg);
         console.error('Question published. Waiting for answer...');
 
-        const answer = await this.transport.waitForAnswer(
-          questionMsg.messageId,
-          questionMsg.timeout
-        );
+        // Send periodic progress notifications to prevent MCP client timeout.
+        // Each progress notification resets the client's countdown timer.
+        const HEARTBEAT_INTERVAL_MS = 15_000;
+        const progressToken = extra?._meta?.progressToken;
+        let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+        let progressCount = 0;
+
+        if (progressToken !== undefined) {
+          heartbeatTimer = setInterval(async () => {
+            progressCount++;
+            try {
+              await extra.sendNotification({
+                method: 'notifications/progress',
+                params: {
+                  progressToken,
+                  progress: progressCount,
+                  total: 0,
+                  message: 'Waiting for human response...',
+                },
+              });
+            } catch {
+              // Client may have disconnected; ignore
+            }
+          }, HEARTBEAT_INTERVAL_MS);
+        }
+
+        let answer;
+        try {
+          answer = await this.transport.waitForAnswer(
+            questionMsg.messageId,
+            questionMsg.timeout
+          );
+        } finally {
+          if (heartbeatTimer) clearInterval(heartbeatTimer);
+        }
 
         console.error(`Answer received from ${answer.respondedFrom}`);
 

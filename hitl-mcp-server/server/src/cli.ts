@@ -97,7 +97,7 @@ async function cmdTest() {
   console.log(`Message ID: ${messageId}`);
   console.log('');
 
-  await transport.publishQuestion({
+  await transport.publish({
     type: 'question',
     messageId,
     timestamp: Date.now(),

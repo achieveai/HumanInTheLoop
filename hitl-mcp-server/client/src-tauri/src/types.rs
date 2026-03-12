@@ -55,6 +55,32 @@ pub struct AnswerMessage {
 
 
 
+/// Notification message published by MCP server (fire-and-forget).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationMessage {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub message_id: String,
+    pub timestamp: u64,
+    pub title: String,
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+/// Dismiss notification message published by a client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DismissNotificationMessage {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub message_id: String,
+    pub timestamp: u64,
+    pub notification_id: String,
+    pub dismissed_from: String,
+}
+
 /// Application config from ~/.hitl/config.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

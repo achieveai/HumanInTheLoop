@@ -71,7 +71,27 @@ export interface AnswerMessage extends BaseMessage {
 }
 
 /** Union type for all messages over the ntfy channel. */
-export type HitlMessage = QuestionMessage | AnswerMessage;
+export type HitlMessage = QuestionMessage | AnswerMessage | NotificationMessage | DismissNotificationMessage;
+
+/** Published by MCP server for fire-and-forget progress notifications. */
+export interface NotificationMessage extends BaseMessage {
+  type: 'notification';
+  /** Short title for the notification */
+  title: string;
+  /** Notification body text (supports markdown) */
+  body: string;
+  /** Optional context about what triggered this notification */
+  context?: string;
+}
+
+/** Published by a client when user dismisses a notification. */
+export interface DismissNotificationMessage extends BaseMessage {
+  type: 'dismiss_notification';
+  /** The messageId of the notification being dismissed */
+  notificationId: string;
+  /** Device that dismissed it */
+  dismissedFrom: string;
+}
 
 // -----------------------------------------------------------
 // Configuration (~/.hitl/config.json)

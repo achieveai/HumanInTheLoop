@@ -3,7 +3,7 @@ import type { QuestionMessage, AnswerMessage, HitlMessage, HitlConfig } from './
 /**
  * Transport layer for communicating with ntfy.sh.
  *
- * - Publishes question messages (HTTP POST)
+ * - Publishes messages (HTTP POST)
  * - Subscribes for answer messages (SSE stream)
  */
 export class NtfyTransport {
@@ -21,9 +21,9 @@ export class NtfyTransport {
   }
 
   /**
-   * Publish a question message to the ntfy topic.
+   * Publish any HITL message to the ntfy topic.
    */
-  async publishQuestion(msg: QuestionMessage): Promise<void> {
+  async publish(msg: HitlMessage): Promise<void> {
     const response = await fetch(this.topicUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -31,8 +31,18 @@ export class NtfyTransport {
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to publish question: ${response.status} ${response.statusText}`);
+      throw new Error(`Failed to publish message: ${response.status} ${response.statusText}`);
     }
+  }
+
+  /** @deprecated Use publish() instead */
+  async publishQuestion(msg: QuestionMessage): Promise<void> {
+    return this.publish(msg);
+  }
+
+  /** @deprecated Use publish() instead */
+  async publishAnswer(msg: AnswerMessage): Promise<void> {
+    return this.publish(msg);
   }
 
   /**
@@ -83,21 +93,6 @@ export class NtfyTransport {
   }
 
   /**
-   * Publish an answer message to the ntfy topic (used by client app, exposed here for testing).
-   */
-  async publishAnswer(msg: AnswerMessage): Promise<void> {
-    const response = await fetch(this.topicUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(msg),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to publish answer: ${response.status} ${response.statusText}`);
-    }
-  }
-
-  /**
    * Open a streaming connection to ntfy and invoke the callback for each parsed HITL message.
    * Uses fetch streaming (works in Node 18+).
    */
@@ -140,7 +135,7 @@ export class NtfyTransport {
             if (ntfyEvent.message) {
               try {
                 const hitlMsg = JSON.parse(ntfyEvent.message) as HitlMessage;
-                if (hitlMsg.type === 'question' || hitlMsg.type === 'answer') {
+                if (hitlMsg.type) {
                   onMessage(hitlMsg);
                 }
               } catch {
