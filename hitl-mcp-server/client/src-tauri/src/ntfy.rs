@@ -24,16 +24,23 @@ pub async fn subscribe_loop(app: AppHandle) {
         config.topic_id
     );
 
-    // Phase 1: Poll all cached messages to find pending questions
+    // Capture timestamp before cache poll so live subscription covers the gap
+    let since_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Phase 1: Poll all cached messages once, then process
     eprintln!("Fetching cached messages to find pending questions...");
-    let answered_ids = fetch_answered_ids(&config, &base_url).await;
+    let cached_body = fetch_cached_body(&base_url).await;
+    let answered_ids = extract_answered_ids(&cached_body);
     eprintln!("Found {} answered questions in cache", answered_ids.len());
 
     // Show any pending (unanswered) questions from cache
-    show_pending_from_cache(&app, &config, &base_url, &answered_ids).await;
+    show_pending_from_cache(&app, &config, &cached_body, &answered_ids);
 
-    // Phase 2: Subscribe to live messages (new ones only)
-    let live_url = format!("{}/json", base_url);
+    // Phase 2: Subscribe to live messages (from just before cache poll to avoid gaps)
+    let live_url = format!("{}/json?since={}", base_url, since_ts);
     eprintln!("Subscribing to live ntfy messages: {}", live_url);
 
     loop {
@@ -45,9 +52,8 @@ pub async fn subscribe_loop(app: AppHandle) {
     }
 }
 
-/// Poll cached messages and return a set of question IDs that have been answered.
-async fn fetch_answered_ids(_config: &HitlConfig, base_url: &str) -> HashSet<String> {
-    let mut answered = HashSet::new();
+/// Fetch all cached messages from ntfy as a single body string.
+async fn fetch_cached_body(base_url: &str) -> String {
     let poll_url = format!("{}/json?since=all&poll=1", base_url);
 
     let client = Client::new();
@@ -60,15 +66,20 @@ async fn fetch_answered_ids(_config: &HitlConfig, base_url: &str) -> HashSet<Str
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
             eprintln!("Cache poll returned {}", r.status());
-            return answered;
+            return String::new();
         }
         Err(e) => {
             eprintln!("Cache poll failed: {}", e);
-            return answered;
+            return String::new();
         }
     };
 
-    let body = response.text().await.unwrap_or_default();
+    response.text().await.unwrap_or_default()
+}
+
+/// Extract answered question IDs from a cached message body.
+fn extract_answered_ids(body: &str) -> HashSet<String> {
+    let mut answered = HashSet::new();
     for line in body.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
@@ -83,35 +94,20 @@ async fn fetch_answered_ids(_config: &HitlConfig, base_url: &str) -> HashSet<Str
             }
         }
     }
-
     answered
 }
 
-/// Show pending (unanswered) questions and notifications from the cache.
-async fn show_pending_from_cache(
+/// Show pending (unanswered) questions from the already-fetched cache body.
+fn show_pending_from_cache(
     app: &AppHandle,
     config: &HitlConfig,
-    base_url: &str,
+    body: &str,
     answered_ids: &HashSet<String>,
 ) {
-    let poll_url = format!("{}/json?since=all&poll=1", base_url);
-
-    let client = Client::new();
-    let response = match client
-        .get(&poll_url)
-        .header("Accept", "application/x-ndjson")
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        _ => return,
-    };
-
-    let body = response.text().await.unwrap_or_default();
-    // Track dismissed notifications too
-    let mut dismissed_notifications: HashSet<String> = HashSet::new();
+    if body.is_empty() { return; }
 
     // First pass: collect dismissed notification IDs
+    let mut dismissed_notifications: HashSet<String> = HashSet::new();
     for line in body.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
@@ -133,7 +129,6 @@ async fn show_pending_from_cache(
 
         if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(line) {
             if let Some(msg_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
-                // Show unanswered questions
                 if let Ok(question) = serde_json::from_str::<QuestionMessage>(msg_str) {
                     if question.msg_type == "question" && !answered_ids.contains(&question.message_id) {
                         eprintln!("Showing pending question from cache: {}", question.message_id);
@@ -291,7 +286,8 @@ fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessag
     }
 
     let question_json = serde_json::to_string(question).unwrap_or_default();
-    let label = format!("dialog-{}", &question.message_id[..8]);
+    let id_prefix_len = 8.min(question.message_id.len());
+    let label = format!("dialog-{}", &question.message_id[..id_prefix_len]);
     let encoded = urlencoding::encode(&question_json);
     let url_str = format!("index.html?question={}", encoded);
 
