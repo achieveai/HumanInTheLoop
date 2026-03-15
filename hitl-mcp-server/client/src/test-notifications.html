@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en" style="background:transparent;">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HITL Notifications Test</title>
+    <link rel="stylesheet" href="notifications.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/lib/marked.umd.min.js"></script>
+    <script>
+        // Mock Tauri APIs
+        window.__TAURI__ = {
+            event: { listen: () => Promise.resolve(() => {}) },
+            core: {
+                invoke: (cmd, args) => {
+                    console.log('[TAURI MOCK] invoke:', cmd, args);
+                    return Promise.resolve();
+                },
+            },
+            window: {
+                getCurrentWindow: () => ({
+                    show: () => Promise.resolve(),
+                    setFocus: () => Promise.resolve(),
+                    close: () => console.log('[TAURI MOCK] window.close()'),
+                }),
+            },
+        };
+    </script>
+</head>
+<body style="background: #e2e8f0; padding: 20px;">
+    <div class="notifications-container" id="notifications-container" style="max-width: 500px; height: auto;">
+        <div class="notifications-titlebar">
+            <span class="notifications-titlebar-label">Notifications</span>
+            <span class="notifications-count" id="count-badge">0</span>
+        </div>
+        <div class="notifications-list" id="notifications-list">
+            <div class="empty-state" id="empty-state">
+                <p>No notifications</p>
+            </div>
+        </div>
+    </div>
+    <script>
+        // Inject test notifications after short delay (simulating arriving via ntfy)
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        const testNotifications = [
+            {
+                messageId: 'notif-001',
+                timestamp: Date.now(),
+                title: 'Build Complete',
+                body: '**All tests passed!** ✓\n\n- Unit tests: `47/47`\n- Integration: `12/12`\n\n> Deploy whenever you are ready.',
+                context: 'hitl-mcp-server CI pipeline',
+            },
+            {
+                messageId: 'notif-002',
+                timestamp: Date.now() - 120000,
+                title: 'Warning: High Memory Usage',
+                body: 'Process `node dist/mcp-server.js` is using **2.1 GB** of RAM.\n\nConsider restarting or checking for memory leaks.',
+                context: undefined,
+            },
+            {
+                messageId: 'notif-003',
+                timestamp: Date.now() - 3600000,
+                title: 'Plain text notification',
+                body: 'This notification has no markdown — just plain text to verify backward compat.',
+            },
+        ];
+
+        // Manually add notification cards using same logic as notifications.js
+        function formatTime(timestamp) {
+            const d = new Date(timestamp);
+            const now = new Date();
+            const diff = now - d;
+            if (diff < 60000) return 'just now';
+            if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+
+        const listEl = document.getElementById('notifications-list');
+        const emptyEl = document.getElementById('empty-state');
+        const countBadge = document.getElementById('count-badge');
+
+        testNotifications.forEach((notification, idx) => {
+            emptyEl.style.display = 'none';
+            countBadge.textContent = idx + 1;
+
+            const card = document.createElement('div');
+            card.className = 'notification-card';
+            card.dataset.id = notification.messageId;
+
+            let bodyHtml;
+            try {
+                bodyHtml = (typeof marked !== 'undefined') ? marked.parse(notification.body || '') : escapeHtml(notification.body || '');
+            } catch {
+                bodyHtml = escapeHtml(notification.body || '');
+            }
+
+            const contextHtml = notification.context
+                ? `<div class="notification-context">${escapeHtml(notification.context)}</div>`
+                : '';
+
+            card.innerHTML = `
+                <div class="notification-header">
+                    <div class="notification-title">${escapeHtml(notification.title)}</div>
+                    <div class="notification-time">${formatTime(notification.timestamp)}</div>
+                </div>
+                <div class="notification-body md-content">${bodyHtml}</div>
+                ${contextHtml}
+                <div class="notification-dismiss">
+                    <button class="dismiss-btn" data-id="${escapeHtml(notification.messageId)}">Dismiss</button>
+                </div>
+            `;
+            listEl.appendChild(card);
+        });
+        countBadge.textContent = testNotifications.length;
+    </script>
+</body>
+</html>

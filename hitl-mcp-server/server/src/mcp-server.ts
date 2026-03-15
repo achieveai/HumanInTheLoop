@@ -11,7 +11,7 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import type { QuestionMessage, NotificationMessage, HitlToolResponse } from './types.js';
+import type { QuestionMessage, NotificationMessage, HitlToolResponse, SubQuestion, SubAnswer } from './types.js';
 import { NtfyTransport } from './ntfy-transport.js';
 import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
@@ -21,7 +21,7 @@ const TOOL_NAME = 'ask_question';
 const NOTIFY_TOOL_NAME = 'notify_user';
 const SETUP_TOOL_NAME = 'setup';
 const SERVER_NAME = 'hitl-mcp-server';
-const SERVER_VERSION = '2.0.0';
+const SERVER_VERSION = '2.4.0';
 
 /** Directory where the compiled server JS lives (used for relative binary paths). */
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -111,10 +111,54 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
                       type: 'string',
                       description: 'Optional detailed description of what this option means',
                     },
+                    preview: {
+                      type: 'string',
+                      description: 'Optional markdown content shown in a side panel when this option is focused. Use for ASCII mockups, code snippets, or detailed comparisons.',
+                    },
                   },
                   required: ['label', 'value'],
                 },
                 minItems: 1,
+              },
+              questions: {
+                type: 'array',
+                description: 'Array of sub-questions for batch mode (up to 4). Mutually exclusive with question+options.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    question: {
+                      type: 'string',
+                      description: 'The sub-question text (supports markdown)',
+                    },
+                    header: {
+                      type: 'string',
+                      description: 'Short chip label shown above the question (~12 chars max)',
+                    },
+                    options: {
+                      type: 'array',
+                      description: 'Selectable options for this sub-question',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          label: { type: 'string' },
+                          value: { type: 'string' },
+                          description: { type: 'string' },
+                          preview: {
+                            type: 'string',
+                            description: 'Optional markdown shown in a side panel when this option is focused',
+                          },
+                        },
+                        required: ['label', 'value'],
+                      },
+                      minItems: 1,
+                    },
+                    allowMultiple: { type: 'boolean', default: false },
+                    allowOther: { type: 'boolean', default: true },
+                  },
+                  required: ['question', 'options'],
+                },
+                minItems: 1,
+                maxItems: 4,
               },
               allowMultiple: {
                 type: 'boolean',
@@ -134,7 +178,7 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
                 maximum: 86400000,
               },
             },
-            required: ['question', 'context', 'options'],
+            required: ['context'],
           },
         },
         {
@@ -234,10 +278,16 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
 
       const args = request.params.arguments as Record<string, unknown>;
 
-      if (!args.question || !args.context || !Array.isArray(args.options) || args.options.length === 0) {
+      const hasSingleQuestion = args.question && Array.isArray(args.options) && args.options.length > 0;
+      const hasBatchQuestions = Array.isArray(args.questions) && (args.questions as unknown[]).length > 0;
+
+      if (!args.context) {
+        throw new McpError(ErrorCode.InvalidParams, 'Missing required parameter: context');
+      }
+      if (!hasSingleQuestion && !hasBatchQuestions) {
         throw new McpError(
           ErrorCode.InvalidParams,
-          'Missing required parameters: question, context, and options array'
+          'Provide either question+options for a single question, or a questions array for batch mode'
         );
       }
 
@@ -247,21 +297,38 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
 
         const repo = detectRepoContext();
 
+        const mapOption = (opt: { label: string; value: string; description?: string; preview?: string }) => ({
+          label: opt.label || opt.value,
+          value: opt.value,
+          description: opt.description,
+          preview: opt.preview,
+        });
+
+        const batchQuestions = hasBatchQuestions
+          ? (args.questions as SubQuestion[]).map((sq) => ({
+              question: sq.question,
+              header: sq.header,
+              options: sq.options.map(mapOption),
+              allowMultiple: sq.allowMultiple ?? false,
+              allowOther: sq.allowOther ?? true,
+            }))
+          : undefined;
+
         const questionMsg: QuestionMessage = {
           type: 'question',
           messageId: uuidv4(),
           timestamp: Date.now(),
           repo,
           context: args.context as string,
-          question: args.question as string,
-          options: (args.options as Array<{ label: string; value: string; description?: string }>).map((opt) => ({
-            label: opt.label || opt.value,
-            value: opt.value,
-            description: opt.description,
-          })),
-          allowMultiple: (args.allowMultiple as boolean) !== false,
-          allowOther: (args.allowOther as boolean) !== false,
+          // For batch mode these are placeholders; client uses questions array instead
+          question: hasBatchQuestions ? '' : (args.question as string),
+          options: hasBatchQuestions
+            ? []
+            : (args.options as Array<{ label: string; value: string; description?: string; preview?: string }>).map(mapOption),
+          allowMultiple: hasBatchQuestions ? false : (args.allowMultiple as boolean) !== false,
+          allowOther: hasBatchQuestions ? true : (args.allowOther as boolean) !== false,
           timeout: (args.timeout as number) || 3600000,
+          questions: batchQuestions,
         };
 
         console.error(`Publishing question ${questionMsg.messageId} to ntfy...`);
@@ -308,6 +375,24 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
 
         // Strip (RECOMMENDED) markers from values
         const stripRecommended = (v: string) => v.replace(/\s*\(RECOMMENDED\)\s*/gi, '').trim();
+
+        // Handle batch response
+        if (answer.subAnswers && answer.subAnswers.length > 0) {
+          const cleanedAnswers: SubAnswer[] = answer.subAnswers.map((sa) => ({
+            ...sa,
+            selectedValues: sa.selectedValues.map(stripRecommended),
+          }));
+          const batchResult: HitlToolResponse = {
+            success: true,
+            timestamp: answer.timestamp,
+            respondedFrom: answer.respondedFrom,
+            responseType: 'selection',
+            answers: cleanedAnswers,
+          };
+          return {
+            content: [{ type: 'text', text: JSON.stringify(batchResult, null, 2) }],
+          };
+        }
 
         const result: HitlToolResponse = {
           success: true,

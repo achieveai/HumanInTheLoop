@@ -7,7 +7,7 @@ mod tray;
 mod types;
 
 use config::load_config;
-use types::{AnswerMessage, DismissNotificationMessage};
+use types::{AnswerMessage, DismissNotificationMessage, SubAnswer};
 
 /// Tauri command: submit an answer from the frontend.
 #[tauri::command]
@@ -16,6 +16,7 @@ async fn submit_answer(
     selected_values: Vec<String>,
     other_text: Option<String>,
     skipped: bool,
+    sub_answers: Option<Vec<SubAnswer>>,
 ) -> Result<(), String> {
     let config = load_config().map_err(|e| e.to_string())?;
 
@@ -31,6 +32,7 @@ async fn submit_answer(
         selected_values,
         other_text,
         skipped,
+        sub_answers,
     };
 
     ntfy::publish_answer(&config, &answer)

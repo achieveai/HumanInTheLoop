@@ -7,6 +7,38 @@ pub struct DialogOption {
     pub value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+/// A single question within a batch ask_question call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubQuestion {
+    pub question: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    pub options: Vec<DialogOption>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_multiple: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_other: Option<bool>,
+}
+
+/// Answer to a single sub-question within a batch response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubAnswer {
+    pub question_index: usize,
+    pub question_text: String,
+    pub selected_values: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<bool>,
+    pub response_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_preview: Option<String>,
 }
 
 /// Git repository context.
@@ -35,6 +67,9 @@ pub struct QuestionMessage {
     pub allow_other: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u64>,
+    /// Batch questions — when present, question/options at top level are ignored
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub questions: Option<Vec<SubQuestion>>,
 }
 
 /// Answer message published by a client.
@@ -51,6 +86,9 @@ pub struct AnswerMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub other_text: Option<String>,
     pub skipped: bool,
+    /// Per-question answers for batch questions
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub_answers: Option<Vec<SubAnswer>>,
 }
 
 

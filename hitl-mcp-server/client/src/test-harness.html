@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en" style="background:transparent;">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HITL Test Harness</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/lib/marked.umd.min.js"></script>
+    <!-- Mock window.__TAURI__ so app.js doesn't crash outside Tauri -->
+    <script>
+        window.__TAURI__ = {
+            event: {
+                listen: () => Promise.resolve(() => {}),
+            },
+            core: {
+                invoke: (cmd, args) => {
+                    console.log('[TAURI MOCK] invoke:', cmd, JSON.stringify(args, null, 2));
+                    window.__lastInvoke = { cmd, args };
+                    return Promise.resolve();
+                },
+            },
+            window: {
+                getCurrentWindow: () => ({
+                    show: () => Promise.resolve(),
+                    setFocus: () => Promise.resolve(),
+                    close: () => { console.log('[TAURI MOCK] window.close()'); },
+                }),
+            },
+        };
+    </script>
+</head>
+<body style="background: #e2e8f0; display: flex; justify-content: center; padding: 20px;">
+    <div class="dialog-container" id="dialog-container" style="max-width: 700px;">
+        <div class="loading">
+            <div class="spinner"></div>
+            <p>Loading test...</p>
+        </div>
+    </div>
+    <script type="module">
+        import { renderDialog, showSuccess } from './dialog.js';
+
+        // Read test scenario from hash (#preview, #batch) or query param (?scenario=)
+        // Hash is used because the 'serve' static server strips query params on redirect
+        const hashScenario = window.location.hash.replace('#', '') || null;
+        const params = new URLSearchParams(window.location.search);
+        const scenario = hashScenario || params.get('scenario') || 'single';
+        const questionParam = params.get('question');
+
+        let question;
+
+        if (questionParam) {
+            question = JSON.parse(decodeURIComponent(questionParam));
+        } else {
+            // Built-in scenarios
+            const scenarios = {
+                single: {
+                    messageId: 'test-001',
+                    type: 'question',
+                    repo: { name: 'Hitl_MCP', branch: 'main' },
+                    context: 'Deciding on **architecture** for the new feature.',
+                    question: 'Which approach should we use?\n\nChoose carefully — this affects the `API design` and **performance**.',
+                    options: [
+                        { label: 'Option A — `REST` approach', value: 'rest', description: 'Simple and **widely supported**.' },
+                        { label: 'Option B — `GraphQL`', value: 'graphql', description: 'More flexible but adds complexity.' },
+                        { label: 'Option C — `gRPC`', value: 'grpc', description: 'Best *performance* for internal services.' },
+                    ],
+                    allowMultiple: false,
+                    allowOther: true,
+                },
+                preview: {
+                    messageId: 'test-002',
+                    type: 'question',
+                    repo: { name: 'Hitl_MCP', branch: 'feature/preview' },
+                    context: 'Choosing a UI layout.',
+                    question: 'Which **layout** do you prefer?',
+                    options: [
+                        {
+                            label: 'Layout A — Sidebar',
+                            value: 'sidebar',
+                            description: 'Navigation on the left.',
+                            preview: '```\n┌─────────────────────┐\n│ Nav │  Content Area  │\n│     │                │\n│     │                │\n└─────────────────────┘\n```\n\n**Pros:** Easy navigation, clear hierarchy.\n\n**Cons:** Takes horizontal space.',
+                        },
+                        {
+                            label: 'Layout B — Top Nav',
+                            value: 'topnav',
+                            description: 'Navigation at the top.',
+                            preview: '```\n┌─────────────────────┐\n│    Navigation Bar   │\n├─────────────────────┤\n│    Content Area     │\n│                     │\n└─────────────────────┘\n```\n\n**Pros:** More vertical space for content.\n\n**Cons:** Can get crowded on mobile.',
+                        },
+                        {
+                            label: 'Layout C — Card Grid',
+                            value: 'cards',
+                            description: 'Cards in a grid.',
+                            preview: '```\n┌───┐ ┌───┐ ┌───┐\n│ A │ │ B │ │ C │\n└───┘ └───┘ └───┘\n┌───┐ ┌───┐ ┌───┐\n│ D │ │ E │ │ F │\n└───┘ └───┘ └───┘\n```\n\n**Pros:** Modern, scannable.\n\n**Cons:** Less suited for deep hierarchies.',
+                        },
+                    ],
+                    allowMultiple: false,
+                    allowOther: false,
+                },
+                batch: {
+                    messageId: 'test-003',
+                    type: 'question',
+                    repo: { name: 'Hitl_MCP', branch: 'feature/batch' },
+                    context: 'Planning the next sprint.',
+                    question: '',
+                    options: [],
+                    allowMultiple: false,
+                    allowOther: true,
+                    questions: [
+                        {
+                            question: 'What should be our **top priority** this sprint?',
+                            header: 'Priority',
+                            options: [
+                                { label: 'Bug fixes', value: 'bugs', description: 'Fix existing `critical` issues.' },
+                                { label: 'New features', value: 'features', description: 'Ship the batch questions feature.' },
+                                { label: 'Tech debt', value: 'debt', description: 'Refactor `legacy` code.' },
+                            ],
+                            allowMultiple: false,
+                            allowOther: true,
+                        },
+                        {
+                            question: 'How should we handle **deployment**?',
+                            header: 'Deploy',
+                            options: [
+                                { label: 'Manual deploy', value: 'manual' },
+                                { label: 'Auto-deploy on merge', value: 'auto', description: 'Requires CI pipeline.' },
+                                { label: 'Feature flags', value: 'flags', description: 'Deploy dark, enable per user.' },
+                            ],
+                            allowMultiple: false,
+                            allowOther: false,
+                        },
+                        {
+                            question: 'Which environments need **testing**?',
+                            header: 'Test Envs',
+                            options: [
+                                { label: 'Dev', value: 'dev' },
+                                { label: 'Staging', value: 'staging' },
+                                { label: 'Production', value: 'prod' },
+                            ],
+                            allowMultiple: true,
+                            allowOther: false,
+                        },
+                    ],
+                },
+            };
+            question = scenarios[scenario] || scenarios.single;
+        }
+
+        const container = document.getElementById('dialog-container');
+        renderDialog(container, question, {
+            onSubmit: (selected, otherText, subAnswers) => {
+                console.log('[TEST] onSubmit:', { selected, otherText, subAnswers });
+                window.__lastSubmit = { selected, otherText, subAnswers };
+                showSuccess(container);
+            },
+            onSkip: () => {
+                console.log('[TEST] onSkip');
+                window.__lastSkip = true;
+                showSuccess(container, 'Skipped');
+            },
+        });
+    </script>
+</body>
+</html>

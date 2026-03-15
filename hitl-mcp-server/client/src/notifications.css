@@ -183,3 +183,29 @@ body {
     border-color: #cbd5e0;
     color: #4a5568;
 }
+
+/* Markdown content in notification body */
+.md-content p { margin: 0 0 6px; }
+.md-content p:last-child { margin-bottom: 0; }
+.md-content strong { font-weight: 600; }
+.md-content em { font-style: italic; }
+.md-content code {
+    background: #e2e8f0;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+}
+.md-content pre {
+    background: #2d3748;
+    color: #f7fafc;
+    padding: 8px 10px;
+    border-radius: 5px;
+    overflow-x: auto;
+    margin: 4px 0;
+    font-size: 12px;
+}
+.md-content pre code { background: transparent; color: inherit; padding: 0; }
+.md-content ul, .md-content ol { margin-left: 16px; margin-top: 4px; margin-bottom: 4px; }
+.md-content li { margin: 2px 0; }
+.md-content a { color: #667eea; text-decoration: underline; }

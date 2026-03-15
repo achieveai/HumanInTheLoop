@@ -10,6 +10,33 @@ export interface DialogOption {
   value: string;
   /** Optional longer description shown below the label */
   description?: string;
+  /** Optional markdown content shown in a side panel when this option is focused */
+  preview?: string;
+}
+
+/** A single question within a batch ask_question call. */
+export interface SubQuestion {
+  /** The question text (supports markdown) */
+  question: string;
+  /** Short chip label shown above the question (~12 chars max) */
+  header?: string;
+  /** Selectable options */
+  options: DialogOption[];
+  /** Whether multiple options can be selected (default: false) */
+  allowMultiple?: boolean;
+  /** Whether a free-text "additional context" field is shown (default: true) */
+  allowOther?: boolean;
+}
+
+/** Answer to a single sub-question within a batch response. */
+export interface SubAnswer {
+  questionIndex: number;
+  questionText: string;
+  selectedValues: string[];
+  otherText?: string;
+  skipped?: boolean;
+  responseType: 'selection' | 'selection_with_context' | 'context_only' | 'skipped' | 'none';
+  selectedPreview?: string;
 }
 
 /** Git repository context auto-detected by the MCP server. */
@@ -43,9 +70,9 @@ export interface QuestionMessage extends BaseMessage {
   repo: RepoContext | null;
   /** LLM-provided description of what project/work is being done */
   context: string;
-  /** The question to ask the human */
+  /** The question to ask the human (ignored when questions array is present) */
   question: string;
-  /** Selectable options */
+  /** Selectable options (ignored when questions array is present) */
   options: DialogOption[];
   /** Whether multiple options can be selected */
   allowMultiple: boolean;
@@ -53,6 +80,8 @@ export interface QuestionMessage extends BaseMessage {
   allowOther: boolean;
   /** Timeout in milliseconds (0 = no timeout) */
   timeout?: number;
+  /** Batch questions — when present, question/options at top level are ignored */
+  questions?: SubQuestion[];
 }
 
 /** Published by a client app when the human responds. */
@@ -68,6 +97,8 @@ export interface AnswerMessage extends BaseMessage {
   otherText?: string;
   /** Whether the user explicitly skipped */
   skipped: boolean;
+  /** Per-question answers for batch questions */
+  subAnswers?: SubAnswer[];
 }
 
 /** Union type for all messages over the ntfy channel. */
@@ -129,6 +160,8 @@ export interface HitlToolResponse {
   response?: string;
   responseType: 'selection' | 'selection_with_context' | 'context_only' | 'skipped' | 'none';
   respondedFrom?: string;
+  /** Populated for batch questions (questions array) */
+  answers?: SubAnswer[];
 }
 
 export interface HitlToolError {

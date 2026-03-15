@@ -26,13 +26,14 @@ async function init() {
             dialogContainer.style.display = 'block';
 
             renderDialog(dialogContainer, question, {
-                onSubmit: async (selectedValues, otherText) => {
+                onSubmit: async (selectedValues, otherText, subAnswers) => {
                     try {
                         await invoke('submit_answer', {
                             questionId: currentQuestionId,
                             selectedValues,
                             otherText: otherText || null,
                             skipped: false,
+                            subAnswers: subAnswers || null,
                         });
                         showSuccess(dialogContainer);
                         setTimeout(() => window.close(), 2000);
@@ -47,6 +48,7 @@ async function init() {
                             selectedValues: [],
                             otherText: null,
                             skipped: true,
+                            subAnswers: null,
                         });
                         showSuccess(dialogContainer, 'Question skipped');
                         setTimeout(() => window.close(), 2000);
