@@ -11,14 +11,24 @@ function escapeHtml(text) {
 /**
  * Render markdown text to HTML. Falls back to escapeHtml if marked is unavailable.
  */
+/**
+ * Normalize literal \n sequences (backslash + n from JSON round-trips) to real newlines.
+ */
+function normalizeNewlines(text) {
+    return text ? text.replace(/\\n/g, '\n') : '';
+}
+
 function renderMarkdown(text, inline = false) {
     if (!text) return '';
-    if (typeof marked === 'undefined') return escapeHtml(text);
+    text = normalizeNewlines(text);
+    if (typeof marked === 'undefined') {
+        return escapeHtml(text).replace(/\n/g, '<br>');
+    }
     try {
         marked.setOptions({ breaks: true, gfm: true });
         return inline ? marked.parseInline(text) : marked.parse(text);
     } catch {
-        return escapeHtml(text);
+        return escapeHtml(text).replace(/\n/g, '<br>');
     }
 }
 
@@ -80,14 +90,10 @@ export function renderDialog(container, question, callbacks) {
 
     container.innerHTML = `
         <div class="dialog-titlebar">
-            <span class="dialog-titlebar-label">HITL</span>
+            <span class="dialog-titlebar-label">Human Input Required</span>
             <button class="dialog-close" id="btn-close" title="Close">✕</button>
         </div>
         <div class="dialog-scroll">
-            <div class="header">
-                <h1 class="title">Human Input Required</h1>
-                <p class="subtitle">An AI agent needs your guidance to continue</p>
-            </div>
             ${metaBadges ? `<div class="meta-row">${metaBadges}</div>` : ''}
             ${!isBatch ? `<div class="question md-content">${renderMarkdown(question.question)}</div>` : ''}
             ${llmContext ? `
@@ -105,23 +111,26 @@ export function renderDialog(container, question, callbacks) {
             <div class="error-message" id="error-message"></div>
         </div>
         <div class="dialog-footer">
+            ${isBatch ? `
+            <div class="button-container stepper-footer">
+                <button class="button button-secondary" id="btn-skip">Skip</button>
+                <button class="button button-secondary" id="btn-prev" style="display:none">Previous</button>
+                <button class="button button-primary" id="btn-next">Next</button>
+            </div>
+            ` : `
             <div class="button-container">
                 <button class="button button-secondary" id="btn-skip">Skip</button>
                 <button class="button button-primary" id="btn-submit">Submit Response</button>
             </div>
+            `}
         </div>
     `;
 
     // Render markdown context
-    if (llmContext && typeof marked !== 'undefined') {
+    if (llmContext) {
         const contextEl = document.getElementById('context-content');
         if (contextEl) {
-            try {
-                marked.setOptions({ breaks: true, gfm: true });
-                contextEl.innerHTML = marked.parse(llmContext);
-            } catch {
-                contextEl.textContent = llmContext;
-            }
+            contextEl.innerHTML = renderMarkdown(llmContext);
         }
     }
 
@@ -144,16 +153,10 @@ export function renderDialog(container, question, callbacks) {
     }
 
     // Wire up buttons
-    document.getElementById('btn-submit').addEventListener('click', () => {
-        if (isBatch) {
-            const subAnswers = collectBatchAnswers(container, question.questions);
-            const hasAnyAnswer = subAnswers.some(sa => sa.selectedValues.length > 0 || sa.otherText);
-            if (!hasAnyAnswer) {
-                showError('Please answer at least one question');
-                return;
-            }
-            callbacks.onSubmit([], null, subAnswers);
-        } else {
+    if (isBatch) {
+        initBatchStepper(container, question.questions, callbacks);
+    } else {
+        document.getElementById('btn-submit').addEventListener('click', () => {
             const selected = [];
             container.querySelectorAll('input[name="options"]:checked').forEach(el => {
                 selected.push(el.value);
@@ -165,25 +168,44 @@ export function renderDialog(container, question, callbacks) {
                 return;
             }
             callbacks.onSubmit(selected, otherText);
-        }
-    });
+        });
 
-    document.getElementById('btn-skip').addEventListener('click', () => {
-        callbacks.onSkip();
-    });
+        document.getElementById('btn-skip').addEventListener('click', () => {
+            callbacks.onSkip();
+        });
+    }
 
     document.getElementById('btn-close')?.addEventListener('click', () => {
-        window.close();
+        if (window.__TAURI__?.window?.getCurrentWindow) {
+            window.__TAURI__.window.getCurrentWindow().close();
+        } else {
+            window.close();
+        }
     });
 
     // Ctrl+Enter to submit from textarea
     container.querySelectorAll('.other-input').forEach(textarea => {
         textarea.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && e.ctrlKey) {
-                document.getElementById('btn-submit').click();
+                const btn = document.getElementById('btn-submit') || document.getElementById('btn-next');
+                if (btn) btn.click();
             }
         });
     });
+
+    // Guard against accidental keypresses when window steals focus.
+    // Block Enter/Space on footer buttons for a short window after render.
+    let inputGuardActive = true;
+    setTimeout(() => { inputGuardActive = false; }, 500);
+    container.querySelector('.dialog-footer')?.addEventListener('keydown', (e) => {
+        if (inputGuardActive && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+    }, true);
+
+    // Ensure no button has focus on initial render
+    document.activeElement?.blur?.();
 }
 
 /**
@@ -215,7 +237,15 @@ function renderSingleQuestion(question) {
  * Render HTML for batch questions.
  */
 function renderBatchQuestions(subQuestions) {
-    return subQuestions.map((sq, i) => {
+    // Build stepper tabs
+    const tabs = subQuestions.map((sq, i) => {
+        const label = sq.header || `Q${i + 1}`;
+        return `<button class="stepper-tab${i === 0 ? ' active' : ''}" data-step="${i}">${escapeHtml(label)}</button>`;
+    }).join('');
+
+    const tabsHtml = `<div class="stepper-tabs">${tabs}</div>`;
+
+    const stepsHtml = subQuestions.map((sq, i) => {
         const inputType = (sq.allowMultiple ?? false) ? 'checkbox' : 'radio';
         const groupName = `options-${i}`;
         const hasPreview = !(sq.allowMultiple ?? false) && sq.options.some(o => o.preview);
@@ -247,8 +277,9 @@ function renderBatchQuestions(subQuestions) {
 
         const headerChip = sq.header ? `<span class="sub-question-chip">${escapeHtml(sq.header)}</span>` : '';
 
+        const hiddenClass = i === 0 ? '' : ' stepper-step-hidden';
         return `
-            <div class="sub-question" id="sub-question-${i}" data-index="${i}">
+            <div class="sub-question${hiddenClass}" id="sub-question-${i}" data-index="${i}">
                 <div class="sub-question-header">
                     ${headerChip}
                     <div class="sub-question-text md-content">${renderMarkdown(sq.question)}</div>
@@ -258,6 +289,8 @@ function renderBatchQuestions(subQuestions) {
             </div>
         `;
     }).join('');
+
+    return tabsHtml + `<div class="stepper-body">${stepsHtml}</div>`;
 }
 
 /**
@@ -331,6 +364,97 @@ function wireBatchOptions(container, subQuestions) {
             }
         }
     });
+}
+
+/**
+ * Initialize the batch stepper controller — one question visible at a time.
+ */
+function initBatchStepper(container, subQuestions, callbacks) {
+    let currentStep = 0;
+    const totalSteps = subQuestions.length;
+    const tabs = container.querySelectorAll('.stepper-tab');
+    const steps = container.querySelectorAll('.stepper-body .sub-question');
+    const btnSkip = document.getElementById('btn-skip');
+    const btnPrev = document.getElementById('btn-prev');
+    const btnNext = document.getElementById('btn-next');
+    const scrollArea = container.querySelector('.dialog-scroll');
+
+    function isStepAnswered(index) {
+        const step = steps[index];
+        if (!step) return false;
+        const hasChecked = step.querySelector('input:checked') !== null;
+        const textarea = step.querySelector('.other-input');
+        const hasText = textarea ? textarea.value.trim().length > 0 : false;
+        return hasChecked || hasText;
+    }
+
+    function updateTabStates() {
+        tabs.forEach((tab, i) => {
+            tab.classList.toggle('active', i === currentStep);
+            tab.classList.toggle('answered', i !== currentStep && isStepAnswered(i));
+        });
+    }
+
+    function updateFooterButtons() {
+        // Skip only on first step
+        btnSkip.style.display = currentStep === 0 ? '' : 'none';
+        // Previous hidden on first step
+        btnPrev.style.display = currentStep > 0 ? '' : 'none';
+        // Last step shows "Submit Response", others show "Next"
+        if (currentStep === totalSteps - 1) {
+            btnNext.textContent = 'Submit Response';
+        } else {
+            btnNext.textContent = 'Next';
+        }
+    }
+
+    function goToStep(index) {
+        if (index < 0 || index >= totalSteps) return;
+        steps.forEach((step, i) => {
+            step.classList.toggle('stepper-step-hidden', i !== index);
+        });
+        currentStep = index;
+        updateTabStates();
+        updateFooterButtons();
+        if (scrollArea) scrollArea.scrollTop = 0;
+    }
+
+    // Tab clicks
+    tabs.forEach((tab, i) => {
+        tab.addEventListener('click', () => goToStep(i));
+    });
+
+    // Previous button
+    btnPrev.addEventListener('click', () => goToStep(currentStep - 1));
+
+    // Next / Submit button
+    btnNext.addEventListener('click', () => {
+        if (currentStep < totalSteps - 1) {
+            goToStep(currentStep + 1);
+        } else {
+            // Last step — collect and submit
+            const subAnswers = collectBatchAnswers(container, subQuestions);
+            const hasAnyAnswer = subAnswers.some(sa => sa.selectedValues.length > 0 || sa.otherText);
+            if (!hasAnyAnswer) {
+                showError('Please answer at least one question');
+                return;
+            }
+            callbacks.onSubmit([], null, subAnswers);
+        }
+    });
+
+    // Skip button
+    btnSkip.addEventListener('click', () => callbacks.onSkip());
+
+    // Real-time tab state updates on input changes
+    const stepperBody = container.querySelector('.stepper-body');
+    if (stepperBody) {
+        stepperBody.addEventListener('change', () => updateTabStates());
+        stepperBody.addEventListener('input', () => updateTabStates());
+    }
+
+    // Initialize
+    goToStep(0);
 }
 
 /**

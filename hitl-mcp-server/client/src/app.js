@@ -36,7 +36,7 @@ async function init() {
                             subAnswers: subAnswers || null,
                         });
                         showSuccess(dialogContainer);
-                        setTimeout(() => window.close(), 2000);
+                        setTimeout(() => getCurrentWindow().close(), 2000);
                     } catch (err) {
                         console.error('Submit failed:', err);
                     }
@@ -51,7 +51,7 @@ async function init() {
                             subAnswers: null,
                         });
                         showSuccess(dialogContainer, 'Question skipped');
-                        setTimeout(() => window.close(), 2000);
+                        setTimeout(() => getCurrentWindow().close(), 2000);
                     } catch (err) {
                         console.error('Skip failed:', err);
                     }
@@ -83,7 +83,7 @@ async function init() {
                 deviceEl.textContent = `Answered by: ${answer.respondedFrom}`;
             }
 
-            setTimeout(() => window.close(), 3000);
+            setTimeout(() => getCurrentWindow().close(), 3000);
         }
     });
 }

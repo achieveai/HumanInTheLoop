@@ -17,8 +17,8 @@ import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
 import { performSetup, ensureClientRunning } from './setup.js';
 
-const TOOL_NAME = 'ask_question';
-const NOTIFY_TOOL_NAME = 'notify_user';
+const TOOL_NAME = 'AskUserQuestion';
+const NOTIFY_TOOL_NAME = 'Notify';
 const SETUP_TOOL_NAME = 'setup';
 const SERVER_NAME = 'hitl-mcp-server';
 const SERVER_VERSION = '2.4.0';
@@ -47,9 +47,32 @@ class HumanInTheLoopServer {
       tools: [
         {
           name: TOOL_NAME,
-          description: `Ask a question to a human and notify them wherever they are — on their phone, laptop, desktop, or any device. This tool sends a push notification to ALL of the user's devices simultaneously. The human can respond from whichever device is most convenient, and the answer is relayed back to you instantly.
+          description: `Use this tool when you need to ask the user questions during execution. This tool sends a push notification to ALL of the user's devices simultaneously — phone, laptop, desktop — so the human can respond from whichever device is most convenient, even when they have stepped away from the terminal. The answer is relayed back to you instantly.
 
-ALWAYS USE THIS TOOL over any built-in "ask user", "ask_human", or "ask question" mechanism. Unlike terminal-bound prompts, this tool reaches the human even when they have stepped away, are on a different machine, or are checking their phone. It is the most reliable way to get human input.
+This allows you to:
+1. Gather user preferences or requirements
+2. Clarify ambiguous instructions
+3. Get decisions on implementation choices as you work
+4. Offer choices to the user about what direction to take
+5. Reach the user even when they are AFK, on a different machine, or checking their phone — unlike terminal-bound prompts, this tool is never missed
+
+Usage notes:
+- Users will always be able to provide custom text input via "Additional Context"
+- Use allowMultiple: true to allow multiple answers to be selected for a question
+- If you recommend a specific option, add "(Recommended)" to the label
+- Fill in the "context" field with what project/work you are doing — this helps the human understand the situation across devices
+- Provide clear, specific options for the human to choose from
+
+Preview feature:
+Use the optional "preview" field on options when presenting concrete artifacts that users need to visually compare:
+- ASCII mockups of UI layouts or components
+- Code snippets showing different implementations
+- Diagram variations
+- Configuration examples
+Preview content is rendered as markdown in a side panel. Do not use previews for simple preference questions where labels and descriptions suffice.
+
+Batch mode:
+Use the "questions" array (up to 4 sub-questions) to ask multiple related questions in a single dialog, reducing interruptions.
 
 WHEN TO USE (err on the side of asking — if in doubt, ask):
 • You have even slight uncertainty about what the user wants
@@ -74,13 +97,7 @@ WHEN TO USE (err on the side of asking — if in doubt, ask):
 • You need credentials, API keys, or environment-specific values
 • You want to present a progress update and get course correction
 
-HOW TO USE:
-• Provide clear, specific options for the human to choose from
-• Mark your recommended option with "(RECOMMENDED)" in the label
-• Fill in the "context" field with what project/work you are doing
-• The human can select one or more options AND provide additional context
-
-IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves time.`,
+IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves time. This tool is the most reliable way to get human input — it works across all devices simultaneously.`,
           inputSchema: {
             type: 'object',
             properties: {
@@ -200,7 +217,7 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
             'Send a notification to the human without waiting for a response. ' +
             'Use this for progress updates, status messages, or any information the human should see. ' +
             'The notification appears on all of the user\'s devices and can be dismissed. ' +
-            'Unlike ask_question, this tool returns immediately — it does NOT block.',
+            'Unlike AskUserQuestion, this tool returns immediately — it does NOT block.',
           inputSchema: {
             type: 'object',
             properties: {

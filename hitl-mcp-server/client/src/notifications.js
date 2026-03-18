@@ -1,0 +1,187 @@
+const { getCurrentWindow } = window.__TAURI__.window;
+const { listen } = window.__TAURI__.event;
+const { invoke } = window.__TAURI__.core;
+
+const notifications = []; // Array of notification objects
+const listEl = document.getElementById('notifications-list');
+const emptyEl = document.getElementById('empty-state');
+const countBadge = document.getElementById('count-badge');
+
+function formatTime(timestamp) {
+    const d = new Date(timestamp);
+    const now = new Date();
+    const diff = now - d;
+    if (diff < 60000) return 'just now';
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function normalizeNewlines(text) {
+    return text ? text.replace(/\\n/g, '\n') : '';
+}
+
+function renderMarkdown(text) {
+    if (!text) return '';
+    text = normalizeNewlines(text);
+    if (typeof marked === 'undefined') {
+        return escapeHtml(text).replace(/\n/g, '<br>');
+    }
+    try {
+        marked.setOptions({ breaks: true, gfm: true });
+        return marked.parse(text);
+    } catch {
+        return escapeHtml(text).replace(/\n/g, '<br>');
+    }
+}
+
+function renderNotifications() {
+    // Update count badge
+    countBadge.textContent = notifications.length;
+
+    if (notifications.length === 0) {
+        emptyEl.style.display = 'block';
+        // Auto-close window after brief delay when empty
+        setTimeout(async () => {
+            if (notifications.length === 0) {
+                const win = getCurrentWindow();
+                await win.close();
+            }
+        }, 1500);
+        return;
+    }
+
+    emptyEl.style.display = 'none';
+}
+
+function addNotificationCard(notification) {
+    emptyEl.style.display = 'none';
+
+    const card = document.createElement('div');
+    card.className = 'notification-card';
+    card.dataset.id = notification.messageId;
+
+    let contextHtml = '';
+    if (notification.context) {
+        contextHtml = `<div class="notification-context md-content">${renderMarkdown(notification.context)}</div>`;
+    }
+
+    const bodyHtml = renderMarkdown(notification.body);
+
+    card.innerHTML = `
+        <div class="notification-header">
+            <div class="notification-title">${escapeHtml(notification.title)}</div>
+            <div class="notification-time">${formatTime(notification.timestamp)}</div>
+        </div>
+        <div class="notification-body md-content">${bodyHtml}</div>
+        ${contextHtml}
+        <div class="notification-dismiss">
+            <button class="dismiss-btn" data-id="${escapeHtml(notification.messageId)}">Dismiss</button>
+        </div>
+    `;
+
+    // Prepend so newest is on top
+    listEl.insertBefore(card, listEl.firstChild);
+
+    // Wire up dismiss button
+    card.querySelector('.dismiss-btn').addEventListener('click', () => {
+        dismissNotification(notification.messageId, card);
+    });
+
+    renderNotifications();
+}
+
+async function dismissNotification(messageId, cardEl) {
+    // Animate out
+    cardEl.classList.add('dismissing');
+
+    try {
+        await invoke('dismiss_notification', { notificationId: messageId });
+    } catch (err) {
+        console.error('Failed to dismiss notification:', err);
+    }
+
+    // Remove from array
+    const idx = notifications.findIndex(n => n.messageId === messageId);
+    if (idx !== -1) notifications.splice(idx, 1);
+
+    // Remove card after animation
+    setTimeout(() => {
+        cardEl.remove();
+        renderNotifications();
+    }, 300);
+}
+
+function removeNotificationById(messageId) {
+    const idx = notifications.findIndex(n => n.messageId === messageId);
+    if (idx === -1) return;
+
+    notifications.splice(idx, 1);
+
+    const card = listEl.querySelector(`[data-id="${messageId}"]`);
+    if (card) {
+        card.classList.add('dismissing');
+        setTimeout(() => {
+            card.remove();
+            renderNotifications();
+        }, 300);
+    } else {
+        renderNotifications();
+    }
+}
+
+// Parse initial notification from URL params
+function loadInitialNotification() {
+    const params = new URLSearchParams(window.location.search);
+    const notificationParam = params.get('notification');
+    if (notificationParam) {
+        try {
+            const notification = JSON.parse(decodeURIComponent(notificationParam));
+            notifications.push(notification);
+            addNotificationCard(notification);
+        } catch (err) {
+            console.error('Failed to parse initial notification:', err);
+        }
+    }
+    renderNotifications();
+}
+
+// Listen for new notifications from Rust backend
+async function setupListeners() {
+    await listen('add-notification', (event) => {
+        try {
+            const notification = typeof event.payload === 'string'
+                ? JSON.parse(event.payload)
+                : event.payload;
+            
+            // Avoid duplicates
+            if (notifications.some(n => n.messageId === notification.messageId)) return;
+
+            notifications.push(notification);
+            addNotificationCard(notification);
+        } catch (err) {
+            console.error('Failed to handle add-notification:', err);
+        }
+    });
+
+    await listen('remove-notification', (event) => {
+        const notificationId = event.payload;
+        removeNotificationById(notificationId);
+    });
+}
+
+// Initialize
+loadInitialNotification();
+setupListeners();
+
+// Show window after content is fully painted (prevents flash)
+requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+        getCurrentWindow().show().then(() => getCurrentWindow().setFocus());
+    });
+});

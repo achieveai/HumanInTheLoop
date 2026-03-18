@@ -7,12 +7,12 @@
 html, body {
     height: 100%;
     overflow: hidden;
-    background: transparent;
+    background: white;
 }
 
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    background: transparent;
+    background: white;
     display: flex;
     justify-content: center;
     align-items: stretch;
@@ -26,7 +26,6 @@ body {
     width: 100%;
     height: 100vh;
     position: relative;
-    animation: slideIn 0.3s ease-out;
 }
 
 /* Custom title bar for dragging */
@@ -74,6 +73,7 @@ body {
     bottom: 72px;
     overflow-y: auto;
     padding: 8px 24px 16px;
+    animation: contentFadeIn 0.3s ease-out;
 }
 
 .dialog-footer {
@@ -85,6 +85,7 @@ body {
     border-top: 1px solid #e2e8f0;
     background: white;
     border-radius: 0 0 16px 16px;
+    animation: contentFadeIn 0.3s ease-out;
 }
 
 .dismissed-container {
@@ -94,12 +95,11 @@ body {
     max-width: 600px;
     width: 100%;
     padding: 32px;
-    animation: slideIn 0.3s ease-out;
 }
 
-@keyframes slideIn {
-    from { opacity: 0; transform: translateY(-20px); }
-    to { opacity: 1; transform: translateY(0); }
+@keyframes contentFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
 
 /* Loading state */
@@ -402,3 +402,64 @@ body {
 .sub-question .options-container { margin-bottom: 12px; }
 .sub-question .other-section { margin-bottom: 8px; }
 .sub-question .other-input { font-size: 14px; }
+
+/* ── Batch stepper / wizard UI */
+.stepper-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 14px;
+}
+
+.stepper-tab {
+    padding: 5px 14px;
+    border: 1.5px solid #cbd5e0;
+    border-radius: 20px;
+    background: white;
+    font-size: 12px;
+    font-weight: 500;
+    color: #4a5568;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: inherit;
+}
+
+.stepper-tab:hover { border-color: #667eea; color: #667eea; }
+
+.stepper-tab.active {
+    background: #667eea;
+    border-color: #667eea;
+    color: white;
+}
+
+.stepper-tab.answered {
+    background: #48bb78;
+    border-color: #48bb78;
+    color: white;
+}
+
+.stepper-tab.answered::after {
+    content: ' \2713';
+}
+
+.stepper-step-hidden {
+    display: none !important;
+}
+
+.stepper-footer {
+    display: flex;
+    gap: 12px;
+}
+
+.stepper-footer .button:last-child {
+    margin-left: auto;
+}
+
+@keyframes stepFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.stepper-body .sub-question:not(.stepper-step-hidden) {
+    animation: stepFadeIn 0.2s ease-out;
+}

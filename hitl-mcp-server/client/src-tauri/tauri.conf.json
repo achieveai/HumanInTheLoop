@@ -1,17 +1,16 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicbarker/tauri/dev/.schema/config.schema.json",
   "productName": "HITL Client",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "identifier": "com.hitl.client",
   "build": {
-    "frontendDist": "../src",
-    "devUrl": "http://localhost:1420"
+    "frontendDist": "../src"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://ntfy.sh https://*"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self' https://ntfy.sh https://*"
     }
   },
   "bundle": {
