@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
 import { loadConfig, saveConfig, generateDefaultConfig, getConfigPath } from './config.js';
+import { spawn } from 'child_process';
+import { existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
 const HELP = `
 hitl — Human-in-the-Loop MCP CLI
@@ -10,6 +14,7 @@ Usage:
   hitl config show         Print the current config
   hitl config set-topic <id>  Update the topic ID
   hitl test                Send a test question through ntfy
+  hitl client              Launch the HITL desktop client app
   hitl help                Show this help message
 `;
 
@@ -24,6 +29,8 @@ async function main() {
       return cmdConfig(args.slice(1));
     case 'test':
       return cmdTest();
+    case 'client':
+      return cmdClient();
     case 'help':
     case '--help':
     case '-h':
@@ -82,6 +89,22 @@ function cmdConfig(args: string[]) {
       console.log('Available: show, set-topic');
       process.exit(1);
   }
+}
+
+function cmdClient() {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  const exe = join(__dirname, 'bin', 'windows-x64', 'hitl-client.exe');
+
+  if (!existsSync(exe)) {
+    console.error('Client binary not found at:', exe);
+    console.error('The client app is only bundled for Windows.');
+    process.exit(1);
+  }
+
+  const child = spawn(exe, [], { detached: true, stdio: 'ignore' });
+  child.unref();
+  console.log('HITL Client launched.');
 }
 
 async function cmdTest() {
