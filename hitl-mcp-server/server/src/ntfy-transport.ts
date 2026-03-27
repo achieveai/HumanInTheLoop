@@ -1,4 +1,5 @@
 import type { QuestionMessage, AnswerMessage, HitlMessage, HitlConfig } from './types.js';
+import { encrypt, decrypt, isEncryptedEnvelope } from './crypto.js';
 
 /**
  * Transport layer for communicating with ntfy.sh.
@@ -22,12 +23,20 @@ export class NtfyTransport {
 
   /**
    * Publish any HITL message to the ntfy topic.
+   * If an encryption key is configured, the message payload is encrypted.
    */
   async publish(msg: HitlMessage): Promise<void> {
+    let body: string;
+    if (this.config.encryptionKey) {
+      body = encrypt(JSON.stringify(msg), this.config.encryptionKey);
+    } else {
+      body = JSON.stringify(msg);
+    }
+
     const response = await fetch(this.topicUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(msg),
+      body,
     });
 
     if (!response.ok) {
@@ -134,7 +143,25 @@ export class NtfyTransport {
             // ntfy wraps messages — the actual payload is in the 'message' field
             if (ntfyEvent.message) {
               try {
-                const hitlMsg = JSON.parse(ntfyEvent.message) as HitlMessage;
+                const parsed = JSON.parse(ntfyEvent.message);
+                let hitlMsg: HitlMessage;
+
+                if (isEncryptedEnvelope(parsed)) {
+                  if (!this.config.encryptionKey) {
+                    console.error('Received encrypted message but no encryptionKey configured — skipping');
+                    continue;
+                  }
+                  try {
+                    const decrypted = decrypt(ntfyEvent.message, this.config.encryptionKey);
+                    hitlMsg = JSON.parse(decrypted) as HitlMessage;
+                  } catch (decryptErr) {
+                    console.error('Failed to decrypt message:', decryptErr);
+                    continue;
+                  }
+                } else {
+                  hitlMsg = parsed as HitlMessage;
+                }
+
                 if (hitlMsg.type) {
                   onMessage(hitlMsg);
                 }

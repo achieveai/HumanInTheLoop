@@ -19,9 +19,12 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .icon(icon)
         .tooltip("HITL - Human in the Loop")
         .menu(&menu)
-        .on_menu_event(|app, event| match event.id.as_ref() {
+        .on_menu_event(|_app, event| match event.id.as_ref() {
             "quit" => {
-                app.exit(0);
+                // Use process::exit instead of app.exit() because the RunEvent::ExitRequested
+                // handler in main() calls prevent_exit() to keep the app alive when windows close.
+                // app.exit(0) would trigger that handler and get blocked.
+                std::process::exit(0);
             }
             _ => {}
         })

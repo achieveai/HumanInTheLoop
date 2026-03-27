@@ -137,6 +137,8 @@ export interface HitlConfig {
   deviceName: string;
   /** Whether to play notification sounds */
   soundEnabled: boolean;
+  /** Optional AES-256-GCM encryption key (64-char hex string) for encrypting messages */
+  encryptionKey?: string;
 }
 
 export const DEFAULT_NTFY_URL = 'https://ntfy.sh';

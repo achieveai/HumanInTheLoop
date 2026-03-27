@@ -127,6 +127,8 @@ pub struct HitlConfig {
     pub ntfy_url: String,
     pub device_name: String,
     pub sound_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encryption_key: Option<String>,
 }
 
 impl Default for HitlConfig {
@@ -138,6 +140,7 @@ impl Default for HitlConfig {
                 .map(|h| h.to_string_lossy().to_string())
                 .unwrap_or_else(|_| "unknown".to_string()),
             sound_enabled: true,
+            encryption_key: None,
         }
     }
 }

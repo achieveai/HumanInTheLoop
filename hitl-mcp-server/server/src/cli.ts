@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import crypto from 'crypto';
 import { loadConfig, saveConfig, generateDefaultConfig, getConfigPath } from './config.js';
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
@@ -46,7 +47,18 @@ async function main() {
 
 function cmdInit() {
   try {
-    loadConfig();
+    const existing = loadConfig();
+
+    // Backfill encryptionKey if missing
+    if (!existing.encryptionKey) {
+      existing.encryptionKey = crypto.randomBytes(32).toString('hex');
+      saveConfig(existing);
+      console.log(`Config at ${getConfigPath()} updated with encryption key.`);
+      console.log(`Encryption key: ${existing.encryptionKey}`);
+      console.log(`\nCopy this key to ~/.hitl/config.json on your other machines.`);
+      return;
+    }
+
     console.log(`Config already exists at ${getConfigPath()}`);
     console.log('Use "hitl config show" to view it, or delete the file to reinitialize.');
     return;
@@ -58,7 +70,10 @@ function cmdInit() {
   saveConfig(config);
   console.log(`Created config at ${getConfigPath()}`);
   console.log(`\nYour topic ID: ${config.topicId}`);
-  console.log(`\nCopy this topic ID to ~/.hitl/config.json on your other machines.`);
+  if (config.encryptionKey) {
+    console.log(`Encryption key: ${config.encryptionKey}`);
+  }
+  console.log(`\nCopy this config to ~/.hitl/config.json on your other machines.`);
   console.log(`Or run: hitl config set-topic ${config.topicId}`);
 }
 

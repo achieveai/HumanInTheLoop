@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod config;
+mod crypto;
 mod ntfy;
 mod sound;
 mod tray;
@@ -17,6 +18,7 @@ async fn submit_answer(
     other_text: Option<String>,
     skipped: bool,
     sub_answers: Option<Vec<SubAnswer>>,
+    encrypted: Option<bool>,
 ) -> Result<(), String> {
     let config = load_config().map_err(|e| e.to_string())?;
 
@@ -35,7 +37,7 @@ async fn submit_answer(
         sub_answers,
     };
 
-    ntfy::publish_answer(&config, &answer)
+    ntfy::publish_answer(&config, &answer, encrypted.unwrap_or(false))
         .await
         .map_err(|e| e.to_string())?;
 
@@ -44,7 +46,7 @@ async fn submit_answer(
 
 /// Tauri command: dismiss a notification from the frontend.
 #[tauri::command]
-async fn dismiss_notification(notification_id: String) -> Result<(), String> {
+async fn dismiss_notification(notification_id: String, encrypted: Option<bool>) -> Result<(), String> {
     let config = load_config().map_err(|e| e.to_string())?;
 
     let msg = DismissNotificationMessage {
@@ -58,7 +60,7 @@ async fn dismiss_notification(notification_id: String) -> Result<(), String> {
         dismissed_from: config.device_name.clone(),
     };
 
-    ntfy::publish_dismiss_notification(&config, &msg)
+    ntfy::publish_dismiss_notification(&config, &msg, encrypted.unwrap_or(false))
         .await
         .map_err(|e| e.to_string())?;
 

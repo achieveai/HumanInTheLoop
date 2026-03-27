@@ -16,6 +16,7 @@ async function init() {
     // Read question data from URL query parameter (set by Rust backend)
     const params = new URLSearchParams(window.location.search);
     const questionParam = params.get('question');
+    const wasEncrypted = params.get('encrypted') === 'true';
 
     if (questionParam) {
         try {
@@ -34,6 +35,7 @@ async function init() {
                             otherText: otherText || null,
                             skipped: false,
                             subAnswers: subAnswers || null,
+                            encrypted: wasEncrypted,
                         });
                         showSuccess(dialogContainer);
                         setTimeout(() => getCurrentWindow().close(), 2000);
@@ -49,6 +51,7 @@ async function init() {
                             otherText: null,
                             skipped: true,
                             subAnswers: null,
+                            encrypted: wasEncrypted,
                         });
                         showSuccess(dialogContainer, 'Question skipped');
                         setTimeout(() => getCurrentWindow().close(), 2000);

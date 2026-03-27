@@ -4,6 +4,7 @@ use reqwest::Client;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::config::load_config;
+use crate::crypto;
 use crate::types::{AnswerMessage, DismissNotificationMessage, HitlConfig, NotificationMessage, QuestionMessage};
 
 /// Start listening to ntfy for incoming question messages.
@@ -33,7 +34,7 @@ pub async fn subscribe_loop(app: AppHandle) {
     // Phase 1: Poll all cached messages once, then process
     eprintln!("Fetching cached messages to find pending questions...");
     let cached_body = fetch_cached_body(&base_url).await;
-    let answered_ids = extract_answered_ids(&cached_body);
+    let answered_ids = extract_answered_ids(&cached_body, &config);
     eprintln!("Found {} answered questions in cache", answered_ids.len());
 
     // Show any pending (unanswered) questions from cache
@@ -77,8 +78,31 @@ async fn fetch_cached_body(base_url: &str) -> String {
     response.text().await.unwrap_or_default()
 }
 
+/// Try to decrypt a raw message string.
+/// Returns Some((json_string, was_encrypted)) on success, or None if the message
+/// should be skipped (encrypted but no key, or decryption failed).
+fn try_decrypt(raw: &str, config: &HitlConfig) -> Option<(String, bool)> {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
+        if crypto::is_encrypted(&parsed) {
+            if let Some(ref key) = config.encryption_key {
+                match crypto::decrypt_value(&parsed, key) {
+                    Ok(decrypted) => return Some((decrypted, true)),
+                    Err(e) => {
+                        eprintln!("Failed to decrypt message: {}", e);
+                        return None;
+                    }
+                }
+            } else {
+                eprintln!("Received encrypted message but no encryptionKey configured — skipping");
+                return None;
+            }
+        }
+    }
+    Some((raw.to_string(), false))
+}
+
 /// Extract answered question IDs from a cached message body.
-fn extract_answered_ids(body: &str) -> HashSet<String> {
+fn extract_answered_ids(body: &str, config: &HitlConfig) -> HashSet<String> {
     let mut answered = HashSet::new();
     for line in body.lines() {
         let line = line.trim();
@@ -86,9 +110,11 @@ fn extract_answered_ids(body: &str) -> HashSet<String> {
 
         if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(line) {
             if let Some(msg_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
-                if let Ok(answer) = serde_json::from_str::<AnswerMessage>(msg_str) {
-                    if answer.msg_type == "answer" {
-                        answered.insert(answer.question_id.clone());
+                if let Some((decrypted, _)) = try_decrypt(msg_str, config) {
+                    if let Ok(answer) = serde_json::from_str::<AnswerMessage>(&decrypted) {
+                        if answer.msg_type == "answer" {
+                            answered.insert(answer.question_id.clone());
+                        }
                     }
                 }
             }
@@ -113,9 +139,11 @@ fn show_pending_from_cache(
         if line.is_empty() { continue; }
         if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(line) {
             if let Some(msg_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
-                if let Ok(dismiss) = serde_json::from_str::<DismissNotificationMessage>(msg_str) {
-                    if dismiss.msg_type == "dismiss_notification" {
-                        dismissed_notifications.insert(dismiss.notification_id.clone());
+                if let Some((decrypted, _)) = try_decrypt(msg_str, config) {
+                    if let Ok(dismiss) = serde_json::from_str::<DismissNotificationMessage>(&decrypted) {
+                        if dismiss.msg_type == "dismiss_notification" {
+                            dismissed_notifications.insert(dismiss.notification_id.clone());
+                        }
                     }
                 }
             }
@@ -129,10 +157,12 @@ fn show_pending_from_cache(
 
         if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(line) {
             if let Some(msg_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
-                if let Ok(question) = serde_json::from_str::<QuestionMessage>(msg_str) {
-                    if question.msg_type == "question" && !answered_ids.contains(&question.message_id) {
-                        eprintln!("Showing pending question from cache: {}", question.message_id);
-                        show_question(app, config, &question);
+                if let Some((decrypted, was_encrypted)) = try_decrypt(msg_str, config) {
+                    if let Ok(question) = serde_json::from_str::<QuestionMessage>(&decrypted) {
+                        if question.msg_type == "question" && !answered_ids.contains(&question.message_id) {
+                            eprintln!("Showing pending question from cache: {}", question.message_id);
+                            show_question(app, config, &question, was_encrypted);
+                        }
                     }
                 }
                 // We intentionally skip cached notifications — they're ephemeral
@@ -175,7 +205,9 @@ async fn subscribe_live(
 
             if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(&line) {
                 if let Some(message_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
-                    handle_live_message(app, config, message_str).await;
+                    if let Some((decrypted, was_encrypted)) = try_decrypt(message_str, config) {
+                        handle_live_message(app, config, &decrypted, was_encrypted).await;
+                    }
                 }
             }
         }
@@ -185,12 +217,12 @@ async fn subscribe_live(
 }
 
 /// Handle a live (new) message — show questions, dismiss on answers, show notifications.
-async fn handle_live_message(app: &AppHandle, config: &HitlConfig, raw: &str) {
+async fn handle_live_message(app: &AppHandle, config: &HitlConfig, raw: &str, was_encrypted: bool) {
     // Try to parse as a question
     if let Ok(question) = serde_json::from_str::<QuestionMessage>(raw) {
         if question.msg_type == "question" {
             eprintln!("Received question: {}", question.message_id);
-            show_question(app, config, &question);
+            show_question(app, config, &question, was_encrypted);
             return;
         }
     }
@@ -224,7 +256,12 @@ async fn handle_live_message(app: &AppHandle, config: &HitlConfig, raw: &str) {
                 crate::sound::play_notification();
             }
 
-            let notification_json = serde_json::to_string(&notification).unwrap_or_default();
+            // Build a payload that includes the encrypted flag for the frontend
+            let mut payload = serde_json::to_value(&notification).unwrap_or_default();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("_wasEncrypted".to_string(), serde_json::Value::Bool(was_encrypted));
+            }
+            let notification_json = serde_json::to_string(&payload).unwrap_or_default();
             let label = "notifications";
             let window = app.get_webview_window(label);
 
@@ -280,7 +317,7 @@ async fn handle_live_message(app: &AppHandle, config: &HitlConfig, raw: &str) {
 }
 
 /// Create and show a dialog window for a question.
-fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessage) {
+fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessage, encrypted: bool) {
     if config.sound_enabled {
         crate::sound::play_notification();
     }
@@ -289,7 +326,7 @@ fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessag
     let id_prefix_len = 8.min(question.message_id.len());
     let label = format!("dialog-{}", &question.message_id[..id_prefix_len]);
     let encoded = urlencoding::encode(&question_json);
-    let url_str = format!("index.html?question={}", encoded);
+    let url_str = format!("index.html?question={}&encrypted={}", encoded, encrypted);
 
     match tauri::WebviewWindowBuilder::new(
         app,
@@ -313,25 +350,30 @@ fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessag
 }
 
 /// Publish an answer message to ntfy.
+/// If `encrypted` is true and config has an encryption key, the message is encrypted.
 pub async fn publish_answer(
     config: &HitlConfig,
     answer: &AnswerMessage,
+    encrypted: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    publish_message(config, &serde_json::to_string(answer)?).await
+    publish_message(config, &serde_json::to_string(answer)?, encrypted).await
 }
 
 /// Publish a dismiss-notification message to ntfy.
+/// If `encrypted` is true and config has an encryption key, the message is encrypted.
 pub async fn publish_dismiss_notification(
     config: &HitlConfig,
     msg: &DismissNotificationMessage,
+    encrypted: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    publish_message(config, &serde_json::to_string(msg)?).await
+    publish_message(config, &serde_json::to_string(msg)?, encrypted).await
 }
 
-/// Publish a raw JSON message to ntfy.
+/// Publish a raw JSON message to ntfy, optionally encrypting it.
 async fn publish_message(
     config: &HitlConfig,
     body: &str,
+    encrypted: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let url = format!(
         "{}/{}",
@@ -339,11 +381,21 @@ async fn publish_message(
         config.topic_id
     );
 
+    let final_body = if encrypted {
+        if let Some(ref key) = config.encryption_key {
+            crypto::encrypt(body, key).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+        } else {
+            body.to_string()
+        }
+    } else {
+        body.to_string()
+    };
+
     let client = Client::new();
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .body(body.to_string())
+        .body(final_body)
         .send()
         .await?;
 

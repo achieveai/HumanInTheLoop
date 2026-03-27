@@ -1,6 +1,6 @@
 [package]
 name = "hitl-client"
-version = "2.5.0"
+version = "2.7.0"
 description = "Human-in-the-Loop cross-machine notification client"
 authors = ["HITL"]
 edition = "2021"
@@ -21,6 +21,8 @@ hostname = "0.4"
 futures-util = "0.3"
 bytes = "1"
 urlencoding = "2"
+aes-gcm = "0.10"
+base64 = "0.22"
 rodio = "0.19"
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }
 

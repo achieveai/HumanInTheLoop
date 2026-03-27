@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { homedir, hostname } from 'os';
 import path from 'path';
+import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import type { HitlConfig } from './types.js';
 import { DEFAULT_NTFY_URL } from './types.js';
@@ -33,6 +34,7 @@ export function loadConfig(): HitlConfig {
     ntfyUrl: parsed.ntfyUrl ?? DEFAULT_NTFY_URL,
     deviceName: parsed.deviceName || hostname(),
     soundEnabled: parsed.soundEnabled !== false,
+    encryptionKey: parsed.encryptionKey || undefined,
   };
 }
 
@@ -45,6 +47,7 @@ export function generateDefaultConfig(): HitlConfig {
     ntfyUrl: DEFAULT_NTFY_URL,
     deviceName: hostname(),
     soundEnabled: true,
+    encryptionKey: crypto.randomBytes(32).toString('hex'),
   };
 }
 

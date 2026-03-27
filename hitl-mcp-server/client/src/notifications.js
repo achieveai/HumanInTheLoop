@@ -100,8 +100,12 @@ async function dismissNotification(messageId, cardEl) {
     // Animate out
     cardEl.classList.add('dismissing');
 
+    // Check if this notification was received encrypted
+    const notification = notifications.find(n => n.messageId === messageId);
+    const encrypted = notification?._wasEncrypted || false;
+
     try {
-        await invoke('dismiss_notification', { notificationId: messageId });
+        await invoke('dismiss_notification', { notificationId: messageId, encrypted });
     } catch (err) {
         console.error('Failed to dismiss notification:', err);
     }
