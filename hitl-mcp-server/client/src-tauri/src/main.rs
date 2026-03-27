@@ -88,8 +88,11 @@ fn main() {
         .run(|_app, event| {
             // Prevent the app from exiting when the last window closes.
             // The tray icon keeps the app alive so it can receive new questions.
+            // But allow exit when the user clicks Quit in the tray menu.
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                api.prevent_exit();
+                if !tray::QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst) {
+                    api.prevent_exit();
+                }
             }
         });
 }

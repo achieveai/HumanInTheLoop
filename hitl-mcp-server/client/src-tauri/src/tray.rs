@@ -1,9 +1,14 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     AppHandle,
 };
+
+/// Flag set by the tray Quit handler so the ExitRequested handler in main()
+/// knows to allow the exit instead of calling prevent_exit().
+pub static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Set up the system tray icon and menu.
 pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
@@ -19,12 +24,10 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .icon(icon)
         .tooltip("HITL - Human in the Loop")
         .menu(&menu)
-        .on_menu_event(|_app, event| match event.id.as_ref() {
+        .on_menu_event(|app, event| match event.id.as_ref() {
             "quit" => {
-                // Use process::exit instead of app.exit() because the RunEvent::ExitRequested
-                // handler in main() calls prevent_exit() to keep the app alive when windows close.
-                // app.exit(0) would trigger that handler and get blocked.
-                std::process::exit(0);
+                QUIT_REQUESTED.store(true, Ordering::SeqCst);
+                app.exit(0);
             }
             _ => {}
         })
