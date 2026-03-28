@@ -109,9 +109,9 @@ IMPORTANT: When in doubt, ASK. Using this tool is far better than making incorre
               },
               timeout: {
                 type: 'number',
-                description: 'Timeout in milliseconds (default: no timeout)',
+                description: 'Timeout in milliseconds (default: 86400000 = 24 hours)',
                 minimum: 1000,
-                maximum: 3600000
+                maximum: 86400000
               }
             },
             required: ['question', 'options']
@@ -151,7 +151,7 @@ IMPORTANT: When in doubt, ASK. Using this tool is far better than making incorre
           allowMultiple: args.allowMultiple !== false,
           allowOther: args.allowOther !== false,
           context: args.context,
-          timeout: args.timeout
+          timeout: args.timeout || 86400000
         });
 
         // Helper function to strip (RECOMMENDED) markers from values
