@@ -24,6 +24,8 @@ urlencoding = "2"
 aes-gcm = "0.10"
 base64 = "0.22"
 rodio = "0.19"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [features]

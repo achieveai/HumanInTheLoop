@@ -5,9 +5,30 @@ on:
     tags:
       - 'v*'
 
+# NOTE: macOS builds produced here are UNSIGNED. On first launch users will see a
+# Gatekeeper warning ("cannot be opened because the developer cannot be verified")
+# and must right-click → Open, or run `xattr -dr com.apple.quarantine <app>`.
+# To ship signed + notarized builds, add the Apple signing secrets documented at
+# https://tauri.app/distribute/sign/macos/ and pass them through the env block below
+# (APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
+# APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID).
+
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows x64
+          - platform: windows-latest
+            rust-targets: ''
+            args: ''
+          # macOS universal (Apple Silicon + Intel in a single binary)
+          - platform: macos-latest
+            rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+            args: '--target universal-apple-darwin'
+
+    runs-on: ${{ matrix.platform }}
 
     steps:
       - name: Checkout
@@ -20,11 +41,14 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: client/src-tauri
+          key: ${{ matrix.platform }}
 
       - name: Install frontend dependencies
         working-directory: client
@@ -38,6 +62,7 @@ jobs:
           projectPath: client
           tagName: ${{ github.ref_name }}
           releaseName: 'HITL Client ${{ github.ref_name }}'
-          releaseBody: 'Download hitl-client.exe below to use the HITL desktop client.'
+          releaseBody: 'Download the HITL desktop client for your platform below — hitl-client.exe (Windows) or the .dmg (macOS).'
           releaseDraft: false
           prerelease: false
+          args: ${{ matrix.args }}

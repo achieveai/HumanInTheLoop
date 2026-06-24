@@ -2,9 +2,8 @@
 
 import crypto from 'crypto';
 import { loadConfig, saveConfig, generateDefaultConfig, getConfigPath } from './config.js';
-import { spawn } from 'child_process';
-import { existsSync } from 'fs';
-import { join, dirname } from 'path';
+import { findClientBinary, launchClient } from './setup.js';
+import { dirname } from 'path';
 import { fileURLToPath } from 'url';
 
 const HELP = `
@@ -107,19 +106,19 @@ function cmdConfig(args: string[]) {
 }
 
 function cmdClient() {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = dirname(__filename);
-  const exe = join(__dirname, 'bin', 'windows-x64', 'hitl-client.exe');
+  const serverDir = dirname(fileURLToPath(import.meta.url));
+  const binaryPath = findClientBinary(serverDir);
 
-  if (!existsSync(exe)) {
-    console.error('Client binary not found at:', exe);
-    console.error('The client app is only bundled for Windows.');
+  if (!binaryPath) {
+    console.error('HITL client binary not found for this platform.');
+    console.error('Install it from GitHub Releases:');
+    console.error('  https://github.com/achieveai/HumanInTheLoop/releases');
+    console.error('Or build from source: cd client && npm run build');
     process.exit(1);
   }
 
-  const child = spawn(exe, [], { detached: true, stdio: 'ignore' });
-  child.unref();
-  console.log('HITL Client launched.');
+  launchClient(binaryPath);
+  console.log(`HITL Client launched from ${binaryPath}`);
 }
 
 async function cmdTest() {

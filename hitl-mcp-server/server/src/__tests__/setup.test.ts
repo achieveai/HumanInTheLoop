@@ -10,6 +10,7 @@ jest.unstable_mockModule('fs', () => ({
   readFileSync: jest.fn(),
   writeFileSync: jest.fn(),
   mkdirSync: jest.fn(),
+  chmodSync: jest.fn(),
 }));
 
 // child_process
@@ -24,6 +25,7 @@ jest.unstable_mockModule('child_process', () => ({
 jest.unstable_mockModule('os', () => ({
   homedir: jest.fn(() => '/mock/home'),
   hostname: jest.fn(() => 'mock-host'),
+  arch: jest.fn(() => 'x64'),
 }));
 
 // config
@@ -95,9 +97,22 @@ describe('setup', () => {
     });
 
     it('prefers debug build over release when both exist', () => {
-      mockExistsSync.mockReturnValue(true); // all paths exist
+      // Both dev builds exist, but not the bundled binary (highest priority)
+      mockExistsSync.mockImplementation((p: string) =>
+        p.includes('debug') || p.includes('release')
+      );
       const result = findClientBinary('/mock/server/dist');
       expect(result).toContain('debug');
+    });
+
+    it('prefers the bundled binary over all other locations', () => {
+      mockExistsSync.mockReturnValue(true); // every candidate exists
+      const result = findClientBinary('/mock/server/dist');
+      // Only the bundled candidate lives under a "bin" dir; dev builds use
+      // "target/{debug,release}" and the home install uses ".hitl".
+      expect(result).toContain('bin');
+      expect(result).not.toContain('target');
+      expect(result).not.toContain('.hitl');
     });
   });
 
