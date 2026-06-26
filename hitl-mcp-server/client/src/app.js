@@ -61,9 +61,13 @@ async function init() {
                 },
             });
 
-            // Show window only after content is fully painted (prevents flash)
+            // Show window only after content is painted (prevents flash). On macOS
+            // WKWebView, requestAnimationFrame is paused while the window is hidden,
+            // so the rAF callback would never fire and show() would never run. Race
+            // it against a short timeout fallback (timers still fire while hidden).
             await new Promise(resolve => {
                 requestAnimationFrame(() => requestAnimationFrame(resolve));
+                setTimeout(resolve, 100);
             });
             await getCurrentWindow().show();
             await getCurrentWindow().setFocus();

@@ -12,9 +12,14 @@
       "Bash(node:*)",
       "Bash(echo $APPDATA)",
       "Bash(npm run test:dialog:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit -m 'fix: show window reliably on macOS WKWebView via timeout fallback *)",
+      "Bash(git push *)"
     ],
     "deny": [],
     "ask": []
-  }
+  },
+  "enabledMcpjsonServers": [
+    "hitl"
+  ]
 }
