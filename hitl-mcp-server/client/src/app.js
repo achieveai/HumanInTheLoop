@@ -70,7 +70,6 @@ async function init() {
                 setTimeout(resolve, 100);
             });
             await getCurrentWindow().show();
-            await getCurrentWindow().setFocus();
         } catch (err) {
             console.error('Failed to parse question from URL:', err);
             dialogContainer.innerHTML = '<p style="color:red;padding:24px;">Failed to load question data.</p>';

@@ -34,6 +34,10 @@ yarn-error.log*
 coverage/
 .nyc_output/
 
+# Playwright
+test-results/
+playwright-report/
+
 # Temporary files
 tmp/
 temp/

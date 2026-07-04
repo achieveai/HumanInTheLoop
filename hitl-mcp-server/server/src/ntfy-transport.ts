@@ -1,5 +1,6 @@
 import type { QuestionMessage, AnswerMessage, HitlMessage, HitlConfig } from './types.js';
 import { encrypt, decrypt, isEncryptedEnvelope } from './crypto.js';
+import { shouldChunk, splitIntoChunks } from './chunking.js';
 
 /**
  * Transport layer for communicating with ntfy.sh.
@@ -33,6 +34,18 @@ export class NtfyTransport {
       body = JSON.stringify(msg);
     }
 
+    if (!shouldChunk(body)) {
+      await this.publishRaw(body);
+      return;
+    }
+
+    for (const chunk of splitIntoChunks(body, msg.messageId)) {
+      await this.publishRaw(JSON.stringify(chunk));
+    }
+  }
+
+  /** POST a single raw body string to the ntfy topic. */
+  private async publishRaw(body: string): Promise<void> {
     const response = await fetch(this.topicUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

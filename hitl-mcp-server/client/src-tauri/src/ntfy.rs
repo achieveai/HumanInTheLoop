@@ -3,9 +3,10 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::chunking::ChunkAssembler;
 use crate::config::load_config;
 use crate::crypto;
-use crate::types::{AnswerMessage, DismissNotificationMessage, HitlConfig, NotificationMessage, QuestionMessage};
+use crate::types::{AnswerMessage, ChunkMessage, DismissNotificationMessage, HitlConfig, NotificationMessage, QuestionMessage};
 
 /// Start listening to ntfy for incoming question messages.
 /// First polls cached messages to find pending (unanswered) questions,
@@ -101,6 +102,25 @@ fn try_decrypt(raw: &str, config: &HitlConfig) -> Option<(String, bool)> {
     Some((raw.to_string(), false))
 }
 
+/// If `decrypted` is a chunk fragment, feed it to the assembler and only return
+/// Some(..) once its group is fully reassembled — re-running decryption on the
+/// recovered body, since it may itself be an encrypted envelope. Non-chunk
+/// messages pass through unchanged.
+fn resolve_chunked_message(
+    decrypted: &str,
+    was_encrypted: bool,
+    config: &HitlConfig,
+    assembler: &mut ChunkAssembler,
+) -> Option<(String, bool)> {
+    if let Ok(chunk) = serde_json::from_str::<ChunkMessage>(decrypted) {
+        if chunk.msg_type == "chunk" {
+            let reassembled = assembler.feed(chunk)?;
+            return try_decrypt(&reassembled, config);
+        }
+    }
+    Some((decrypted.to_string(), was_encrypted))
+}
+
 /// Extract answered question IDs from a cached message body.
 fn extract_answered_ids(body: &str, config: &HitlConfig) -> HashSet<String> {
     let mut answered = HashSet::new();
@@ -123,6 +143,31 @@ fn extract_answered_ids(body: &str, config: &HitlConfig) -> HashSet<String> {
     answered
 }
 
+/// Decrypt every cached line and reassemble any chunked messages, in order.
+fn decrypt_and_reassemble_cache(body: &str, config: &HitlConfig) -> Vec<(String, bool)> {
+    let mut assembler = ChunkAssembler::new();
+    let mut messages = Vec::new();
+
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+
+        if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(msg_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
+                if let Some((decrypted, was_encrypted)) = try_decrypt(msg_str, config) {
+                    if let Some(resolved) =
+                        resolve_chunked_message(&decrypted, was_encrypted, config, &mut assembler)
+                    {
+                        messages.push(resolved);
+                    }
+                }
+            }
+        }
+    }
+
+    messages
+}
+
 /// Show pending (unanswered) questions from the already-fetched cache body.
 fn show_pending_from_cache(
     app: &AppHandle,
@@ -132,42 +177,27 @@ fn show_pending_from_cache(
 ) {
     if body.is_empty() { return; }
 
+    let messages = decrypt_and_reassemble_cache(body, config);
+
     // First pass: collect dismissed notification IDs
     let mut dismissed_notifications: HashSet<String> = HashSet::new();
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() { continue; }
-        if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(msg_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
-                if let Some((decrypted, _)) = try_decrypt(msg_str, config) {
-                    if let Ok(dismiss) = serde_json::from_str::<DismissNotificationMessage>(&decrypted) {
-                        if dismiss.msg_type == "dismiss_notification" {
-                            dismissed_notifications.insert(dismiss.notification_id.clone());
-                        }
-                    }
-                }
+    for (decrypted, _) in &messages {
+        if let Ok(dismiss) = serde_json::from_str::<DismissNotificationMessage>(decrypted) {
+            if dismiss.msg_type == "dismiss_notification" {
+                dismissed_notifications.insert(dismiss.notification_id.clone());
             }
         }
     }
 
     // Second pass: show only pending questions and undismissed notifications
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() { continue; }
-
-        if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(msg_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
-                if let Some((decrypted, was_encrypted)) = try_decrypt(msg_str, config) {
-                    if let Ok(question) = serde_json::from_str::<QuestionMessage>(&decrypted) {
-                        if question.msg_type == "question" && !answered_ids.contains(&question.message_id) {
-                            eprintln!("Showing pending question from cache: {}", question.message_id);
-                            show_question(app, config, &question, was_encrypted);
-                        }
-                    }
-                }
-                // We intentionally skip cached notifications — they're ephemeral
+    for (decrypted, was_encrypted) in &messages {
+        if let Ok(question) = serde_json::from_str::<QuestionMessage>(decrypted) {
+            if question.msg_type == "question" && !answered_ids.contains(&question.message_id) {
+                eprintln!("Showing pending question from cache: {}", question.message_id);
+                show_question(app, config, &question, *was_encrypted);
             }
         }
+        // We intentionally skip cached notifications — they're ephemeral
     }
 }
 
@@ -190,6 +220,7 @@ async fn subscribe_live(
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    let mut assembler = ChunkAssembler::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -206,7 +237,11 @@ async fn subscribe_live(
             if let Ok(ntfy_event) = serde_json::from_str::<serde_json::Value>(&line) {
                 if let Some(message_str) = ntfy_event.get("message").and_then(|m| m.as_str()) {
                     if let Some((decrypted, was_encrypted)) = try_decrypt(message_str, config) {
-                        handle_live_message(app, config, &decrypted, was_encrypted).await;
+                        if let Some((final_body, final_encrypted)) =
+                            resolve_chunked_message(&decrypted, was_encrypted, config, &mut assembler)
+                        {
+                            handle_live_message(app, config, &final_body, final_encrypted).await;
+                        }
                     }
                 }
             }
@@ -270,7 +305,6 @@ async fn handle_live_message(app: &AppHandle, config: &HitlConfig, raw: &str, wa
                     eprintln!("Failed to emit add-notification: {}", e);
                 }
                 let _ = win.show();
-                let _ = win.set_focus();
             } else {
                 let encoded = urlencoding::encode(&notification_json);
                 let url_str = format!("notifications.html?notification={}", encoded);
@@ -287,7 +321,7 @@ async fn handle_live_message(app: &AppHandle, config: &HitlConfig, raw: &str, wa
                 .decorations(false)
                 .always_on_top(true)
                 .visible(false)
-                .focused(true)
+                .focused(false)
                 .build()
                 {
                     Ok(_) => eprintln!("Notifications window created"),
@@ -339,7 +373,7 @@ fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessag
     .decorations(false)
     .always_on_top(true)
     .visible(false)
-    .focused(true)
+    .focused(false)
     .build()
     {
         Ok(_) => eprintln!("Dialog window created: {}", label),

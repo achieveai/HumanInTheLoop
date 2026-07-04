@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod chunking;
 mod config;
 mod crypto;
 mod ntfy;

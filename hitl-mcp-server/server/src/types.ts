@@ -125,6 +125,27 @@ export interface DismissNotificationMessage extends BaseMessage {
 }
 
 // -----------------------------------------------------------
+// Transport-level chunking (for messages exceeding ntfy's size limit)
+// -----------------------------------------------------------
+
+/**
+ * A fragment of an oversized message body, published as its own ntfy message.
+ * Not part of the `HitlMessage` union — it's a transport wrapper that never
+ * survives past reassembly on the receiving side.
+ */
+export interface ChunkMessage extends BaseMessage {
+  type: 'chunk';
+  /** messageId of the original (pre-chunking) message this fragment belongs to */
+  groupId: string;
+  /** 0-based position of this fragment */
+  index: number;
+  /** Total number of fragments in the group */
+  total: number;
+  /** Slice of the base64-encoded original body */
+  data: string;
+}
+
+// -----------------------------------------------------------
 // Configuration (~/.hitl/config.json)
 // -----------------------------------------------------------
 

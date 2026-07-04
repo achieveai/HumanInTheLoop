@@ -119,6 +119,21 @@ pub struct DismissNotificationMessage {
     pub dismissed_from: String,
 }
 
+/// A fragment of an oversized message body, published as its own ntfy message.
+/// Transport-only wrapper — never survives past reassembly on the receiving side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChunkMessage {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub message_id: String,
+    pub timestamp: u64,
+    pub group_id: String,
+    pub index: usize,
+    pub total: usize,
+    pub data: String,
+}
+
 /// Application config from ~/.hitl/config.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
