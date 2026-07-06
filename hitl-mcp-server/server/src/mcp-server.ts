@@ -21,7 +21,7 @@ const TOOL_NAME = 'AskUserQuestion';
 const NOTIFY_TOOL_NAME = 'Notify';
 const SETUP_TOOL_NAME = 'setup';
 const SERVER_NAME = 'hitl-mcp-server';
-const SERVER_VERSION = '2.9.1';
+const SERVER_VERSION = '2.9.2';
 
 /** Directory where the compiled server JS lives (used for relative binary paths). */
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -145,7 +145,7 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
                   properties: {
                     question: {
                       type: 'string',
-                      description: 'The sub-question text (supports markdown)',
+                      description: 'The sub-question text (supports markdown). If omitted, falls back to the header text.',
                     },
                     header: {
                       type: 'string',
@@ -172,7 +172,7 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
                     allowMultiple: { type: 'boolean', default: false },
                     allowOther: { type: 'boolean', default: true },
                   },
-                  required: ['question', 'options'],
+                  required: ['options'],
                 },
                 minItems: 1,
                 maxItems: 4,
@@ -322,8 +322,8 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
         });
 
         const batchQuestions = hasBatchQuestions
-          ? (args.questions as SubQuestion[]).map((sq) => ({
-              question: sq.question,
+          ? (args.questions as Array<Partial<SubQuestion> & Pick<SubQuestion, 'options'>>).map((sq) => ({
+              question: sq.question || sq.header || 'Please choose an option:',
               header: sq.header,
               options: sq.options.map(mapOption),
               allowMultiple: sq.allowMultiple ?? false,
