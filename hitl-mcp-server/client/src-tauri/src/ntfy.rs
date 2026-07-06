@@ -304,7 +304,7 @@ async fn handle_live_message(app: &AppHandle, config: &HitlConfig, raw: &str, wa
                 if let Err(e) = win.emit("add-notification", &notification_json) {
                     eprintln!("Failed to emit add-notification: {}", e);
                 }
-                let _ = win.show();
+                let _ = crate::window_utils::show_window_no_activate(&win);
             } else {
                 let encoded = urlencoding::encode(&notification_json);
                 let url_str = format!("notifications.html?notification={}", encoded);

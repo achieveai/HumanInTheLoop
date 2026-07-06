@@ -1,6 +1,6 @@
 [package]
 name = "hitl-client"
-version = "2.9.2"
+version = "2.9.3"
 description = "Human-in-the-Loop cross-machine notification client"
 authors = ["HITL"]
 edition = "2021"
@@ -27,6 +27,7 @@ rodio = "0.19"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 [features]
 default = ["custom-protocol"]

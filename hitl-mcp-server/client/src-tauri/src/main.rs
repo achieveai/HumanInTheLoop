@@ -7,6 +7,7 @@ mod ntfy;
 mod sound;
 mod tray;
 mod types;
+mod window_utils;
 
 use config::load_config;
 use types::{AnswerMessage, DismissNotificationMessage, SubAnswer};
@@ -45,6 +46,12 @@ async fn submit_answer(
     Ok(())
 }
 
+/// Tauri command: show the calling window without letting it steal OS keyboard focus.
+#[tauri::command]
+fn show_no_activate(window: tauri::WebviewWindow) -> Result<(), String> {
+    window_utils::show_window_no_activate(&window).map_err(|e| e.to_string())
+}
+
 /// Tauri command: dismiss a notification from the frontend.
 #[tauri::command]
 async fn dismiss_notification(notification_id: String, encrypted: Option<bool>) -> Result<(), String> {
@@ -71,7 +78,7 @@ async fn dismiss_notification(notification_id: String, encrypted: Option<bool>) 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![submit_answer, dismiss_notification])
+        .invoke_handler(tauri::generate_handler![submit_answer, dismiss_notification, show_no_activate])
         .setup(|app| {
             // Setup system tray
             tray::setup_tray(app.handle())?;

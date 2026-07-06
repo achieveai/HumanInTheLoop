@@ -69,7 +69,7 @@ async function init() {
                 requestAnimationFrame(() => requestAnimationFrame(resolve));
                 setTimeout(resolve, 100);
             });
-            await getCurrentWindow().show();
+            await invoke('show_no_activate');
         } catch (err) {
             console.error('Failed to parse question from URL:', err);
             dialogContainer.innerHTML = '<p style="color:red;padding:24px;">Failed to load question data.</p>';

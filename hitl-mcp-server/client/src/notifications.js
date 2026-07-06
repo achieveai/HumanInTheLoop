@@ -186,6 +186,6 @@ setupListeners();
 // Show window after content is fully painted (prevents flash)
 requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-        getCurrentWindow().show();
+        invoke('show_no_activate');
     });
 });
