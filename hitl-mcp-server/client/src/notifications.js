@@ -145,7 +145,7 @@ function loadInitialNotification() {
     const notificationParam = params.get('notification');
     if (notificationParam) {
         try {
-            const notification = JSON.parse(decodeURIComponent(notificationParam));
+            const notification = JSON.parse(notificationParam);
             notifications.push(notification);
             addNotificationCard(notification);
         } catch (err) {
