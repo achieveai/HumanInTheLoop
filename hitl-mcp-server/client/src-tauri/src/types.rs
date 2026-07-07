@@ -15,6 +15,10 @@ pub struct DialogOption {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubQuestion {
+    /// Older/unpatched servers can publish a sub-question with this key
+    /// omitted entirely — tolerate that instead of failing the whole
+    /// message's deserialization silently.
+    #[serde(default)]
     pub question: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
@@ -157,5 +161,40 @@ impl Default for HitlConfig {
             sound_enabled: true,
             encryption_key: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn question_message_deserializes_when_sub_question_omits_question_field() {
+        // Real payload shape published by an unpatched (pre-2.9.2) server:
+        // each sub-question has no "question" key at all, only header/options.
+        let raw = r#"{
+            "type": "question",
+            "messageId": "21ba33d7-08a8-4761-9abf-5f4e6ba364b1",
+            "timestamp": 1,
+            "repo": null,
+            "context": "Hetzner FX reconciliation",
+            "question": "",
+            "options": [],
+            "allowMultiple": false,
+            "allowOther": true,
+            "timeout": 3600000,
+            "questions": [
+                {
+                    "header": "AP account",
+                    "options": [{"label": "A", "value": "a"}],
+                    "allowMultiple": false,
+                    "allowOther": true
+                }
+            ]
+        }"#;
+
+        let msg: QuestionMessage =
+            serde_json::from_str(raw).expect("must tolerate missing sub-question.question");
+        assert_eq!(msg.questions.unwrap()[0].question, "");
     }
 }

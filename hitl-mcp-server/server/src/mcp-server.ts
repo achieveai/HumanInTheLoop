@@ -21,7 +21,7 @@ const TOOL_NAME = 'AskUserQuestion';
 const NOTIFY_TOOL_NAME = 'Notify';
 const SETUP_TOOL_NAME = 'setup';
 const SERVER_NAME = 'hitl-mcp-server';
-const SERVER_VERSION = '2.9.4';
+const SERVER_VERSION = '2.9.5';
 
 /** Directory where the compiled server JS lives (used for relative binary paths). */
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
