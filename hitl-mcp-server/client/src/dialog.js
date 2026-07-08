@@ -38,7 +38,7 @@ function renderMarkdown(text, inline = false) {
 function buildOptionsHtml(options, inputType, groupName) {
     return options.map((opt, i) => `
         <div class="option" data-index="${i}">
-            <input type="${inputType}" name="${groupName}" id="${groupName}-${i}" value="${escapeHtml(opt.value)}">
+            <input type="${inputType}" name="${groupName}" id="${groupName}-${i}" value="${escapeHtml(opt.value || opt.label)}">
             <div class="option-content">
                 <div class="option-label">${renderMarkdown(opt.label, true)}</div>
                 ${opt.description ? `<div class="option-description">${renderMarkdown(opt.description)}</div>` : ''}
@@ -471,7 +471,7 @@ function collectBatchAnswers(container, subQuestions) {
         // Find preview of selected option
         let selectedPreview;
         if (selected.length > 0 && !sq.allowMultiple) {
-            const selectedOpt = sq.options.find(o => o.value === selected[0]);
+            const selectedOpt = sq.options.find(o => (o.value || o.label) === selected[0]);
             selectedPreview = selectedOpt?.preview;
         }
 

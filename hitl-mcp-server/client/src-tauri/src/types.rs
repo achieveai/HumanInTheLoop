@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DialogOption {
     pub label: String,
+    /// Agents often call the tool the way they call the built-in
+    /// AskUserQuestion (which has no `value` field), so options can arrive with
+    /// this key omitted entirely. Tolerate that instead of failing the whole
+    /// message's deserialization silently (which drops the popup). The frontend
+    /// falls back to `label` when `value` is empty.
+    #[serde(default)]
     pub value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -196,5 +202,60 @@ mod tests {
         let msg: QuestionMessage =
             serde_json::from_str(raw).expect("must tolerate missing sub-question.question");
         assert_eq!(msg.questions.unwrap()[0].question, "");
+    }
+
+    #[test]
+    fn question_message_deserializes_when_option_omits_value_field() {
+        // Real payload shape: an agent calls the tool the way it calls the
+        // built-in AskUserQuestion (which has no `value` field), so each option
+        // has only label/description and no "value" key at all. The Rust client
+        // must tolerate that instead of failing the whole message's
+        // deserialization silently (which drops the popup entirely).
+        let raw = r#"{
+            "type": "question",
+            "messageId": "21ba33d7-08a8-4761-9abf-5f4e6ba364b1",
+            "timestamp": 1,
+            "repo": null,
+            "context": "Audited review branches",
+            "question": "Delete the stale review branches?",
+            "options": [
+                {"label": "Delete the 2 stale branches", "description": "Notes already on main"},
+                {"label": "Leave them", "description": "Harmless but stale"}
+            ],
+            "allowMultiple": false,
+            "allowOther": true,
+            "timeout": 600000
+        }"#;
+
+        let msg: QuestionMessage =
+            serde_json::from_str(raw).expect("must tolerate an option with no `value` key");
+        assert_eq!(msg.options.len(), 2);
+        assert_eq!(msg.options[0].value, "");
+    }
+
+    #[test]
+    fn question_message_deserializes_when_batch_option_omits_value_field() {
+        // Same defect, one layer deeper: batch sub-question options omit `value`.
+        let raw = r#"{
+            "type": "question",
+            "messageId": "31ba33d7-08a8-4761-9abf-5f4e6ba364b2",
+            "timestamp": 1,
+            "repo": null,
+            "context": "batch",
+            "question": "",
+            "options": [],
+            "allowMultiple": false,
+            "allowOther": true,
+            "questions": [
+                {
+                    "question": "Pick one",
+                    "options": [{"label": "A"}, {"label": "B"}]
+                }
+            ]
+        }"#;
+
+        let msg: QuestionMessage =
+            serde_json::from_str(raw).expect("must tolerate a batch option with no `value` key");
+        assert_eq!(msg.questions.unwrap()[0].options[0].value, "");
     }
 }

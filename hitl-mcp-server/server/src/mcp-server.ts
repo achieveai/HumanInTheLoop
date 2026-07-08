@@ -21,7 +21,7 @@ const TOOL_NAME = 'AskUserQuestion';
 const NOTIFY_TOOL_NAME = 'Notify';
 const SETUP_TOOL_NAME = 'setup';
 const SERVER_NAME = 'hitl-mcp-server';
-const SERVER_VERSION = '2.9.5';
+const SERVER_VERSION = '2.9.6';
 
 /** Directory where the compiled server JS lives (used for relative binary paths). */
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -314,9 +314,15 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
 
         const repo = detectRepoContext();
 
-        const mapOption = (opt: { label: string; value: string; description?: string; preview?: string }) => ({
-          label: opt.label || opt.value,
-          value: opt.value,
+        const mapOption = (opt: { label?: string; value?: string; description?: string; preview?: string }) => ({
+          label: opt.label || opt.value || '',
+          // Backfill value from label when the LLM omits it (agents habitually
+          // call this tool like the built-in AskUserQuestion, which has no
+          // `value` field). Symmetric with the label fallback above. Without
+          // this, JSON.stringify drops the undefined `value` key and older
+          // clients fail to deserialize the whole message, silently dropping
+          // the popup.
+          value: opt.value ?? opt.label ?? '',
           description: opt.description,
           preview: opt.preview,
         });
