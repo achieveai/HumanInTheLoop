@@ -9,7 +9,8 @@
 //! location rather than of its contents, so a draft survives a revision.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -71,28 +72,68 @@ pub fn save(draft: &ReviewDraft) -> Result<(), String> {
     save_in(&dir, draft)
 }
 
-fn save_in(dir: &std::path::Path, draft: &ReviewDraft) -> Result<(), String> {
-    let key = draft_key(&draft.plan_id, &draft.review_id)
-        .ok_or_else(|| "draft has neither a planId nor a reviewId to file it under".to_string())?;
-    let path = draft_file(dir, &key);
+/// The directory `ensure_dir` has already created and locked down this run.
+///
+/// Creating it was costing a `create_dir_all` plus a `chmod` on every
+/// keystroke — on a roaming or network-mapped home directory that is not free.
+static ENSURED_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+fn ensure_dir(dir: &Path) -> Result<(), String> {
+    if ENSURED_DIR.lock().ok().and_then(|d| d.clone()).as_deref() == Some(dir) {
+        return Ok(());
+    }
 
     fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     restrict_dir(dir);
 
-    let json = serde_json::to_string(draft).map_err(|e| format!("could not serialize draft: {e}"))?;
+    if let Ok(mut ensured) = ENSURED_DIR.lock() {
+        *ensured = Some(dir.to_path_buf());
+    }
+    Ok(())
+}
 
-    // Temp-then-rename: a draft is saved on every keystroke, so a crash mid-write
-    // is a real possibility and a truncated file would lose everything rather
-    // than the last character. The temp name is unique because two review
-    // windows for the same plan would otherwise race on it.
+fn forget_ensured_dir() {
+    if let Ok(mut ensured) = ENSURED_DIR.lock() {
+        *ensured = None;
+    }
+}
+
+/// Temp-then-rename: a draft is saved on every keystroke, so a crash mid-write
+/// is a real possibility and a truncated file would lose everything rather than
+/// the last character. The temp name is unique because two review windows for
+/// the same plan would otherwise race on it — a `Uuid::new_v4()` is in-memory
+/// and costs nothing next to the write itself.
+fn write_atomically(dir: &Path, path: &Path, json: &str) -> std::io::Result<()> {
     let temp = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
-    fs::write(&temp, json.as_bytes()).map_err(|e| format!("could not write {}: {e}", temp.display()))?;
+    fs::write(&temp, json.as_bytes())?;
     restrict_file(&temp);
 
-    fs::rename(&temp, &path).map_err(|e| {
+    fs::rename(&temp, path).inspect_err(|_| {
         let _ = fs::remove_file(&temp);
-        format!("could not replace {}: {e}", path.display())
     })
+}
+
+fn save_in(dir: &Path, draft: &ReviewDraft) -> Result<(), String> {
+    let key = draft_key(&draft.plan_id, &draft.review_id)
+        .ok_or_else(|| "draft has neither a planId nor a reviewId to file it under".to_string())?;
+    let path = draft_file(dir, &key);
+    let json = serde_json::to_string(draft).map_err(|e| format!("could not serialize draft: {e}"))?;
+
+    ensure_dir(dir)?;
+
+    match write_atomically(dir, &path, &json) {
+        Ok(()) => Ok(()),
+        // The directory was there when we last looked and is not now. Caching
+        // that it exists must not turn a recoverable state into a review's
+        // worth of lost typing, so re-create it and try once more.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            forget_ensured_dir();
+            ensure_dir(dir)?;
+            write_atomically(dir, &path, &json)
+                .map_err(|e| format!("could not write {}: {e}", path.display()))
+        }
+        Err(e) => Err(format!("could not write {}: {e}", path.display())),
+    }
 }
 
 /// Load the draft filed for this plan, if there is one.
@@ -196,12 +237,18 @@ fn now_millis() -> u64 {
 /// Fired on every edit, so it must stay cheap and must never surface a dialog.
 /// The window treats failure as best-effort; the log is where a broken draft
 /// store becomes visible.
+///
+/// The write runs on the blocking pool. `async fn` alone would not move it —
+/// it would only relocate a synchronous `fs` call onto an async worker and
+/// stall it there, once per keystroke, for as long as the home directory takes
+/// to answer. There is deliberately no debouncing: dropping the last keystrokes
+/// before a close is the exact failure this feature exists to prevent.
 #[tauri::command]
 pub async fn save_review_draft(draft: ReviewDraft) -> Result<(), String> {
     let mut draft = draft;
     draft.saved_at = now_millis();
 
-    match save(&draft) {
+    match run_blocking(move || save(&draft)).await {
         Ok(()) => Ok(()),
         Err(e) => {
             log::warn!("Could not save the review draft: {}", e);
@@ -226,7 +273,8 @@ pub async fn clear_review_draft(
     let plan_id = plan_id.unwrap_or_default();
     let review_id = review_id.unwrap_or_default();
 
-    match clear(&plan_id, &review_id) {
+    let (p, r) = (plan_id.clone(), review_id.clone());
+    match run_blocking(move || clear(&p, &r)).await {
         Ok(()) => {
             log::info!("Cleared the draft for plan {:?} / review {:?}", plan_id, review_id);
             Ok(())
@@ -237,6 +285,17 @@ pub async fn clear_review_draft(
             log::warn!("Could not clear the review draft: {}", e);
             Err(e)
         }
+    }
+}
+
+/// Run a filesystem operation on the blocking pool.
+async fn run_blocking<F>(op: F) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String> + Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(op).await {
+        Ok(result) => result,
+        Err(e) => Err(format!("the draft store task did not run: {e}")),
     }
 }
 
@@ -562,6 +621,54 @@ mod tests {
         let dir = temp_dir("clear-unkeyed");
 
         assert!(clear_in(&dir, "", "").is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_vanished_drafts_directory_is_recreated_rather_than_losing_the_write() {
+        // The directory is created once and remembered, so a later write does
+        // not pay for create_dir_all + chmod. That cache must not turn a
+        // recoverable state into a review's worth of lost typing.
+        let dir = temp_dir("vanish");
+
+        save_in(&dir, &a_draft()).unwrap();
+        ensure_dir(&dir).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+
+        save_in(&dir, &a_draft()).unwrap();
+
+        assert_eq!(
+            load_in(&dir, "plan-abc", "rev-1").unwrap().overall_feedback,
+            "looks close"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_keystrokes_worth_of_saves_leaves_exactly_one_file() {
+        // The window saves per edit, so a leaked temp file per keystroke would
+        // fill the directory over a long review.
+        let dir = temp_dir("keystrokes");
+
+        for i in 0..50 {
+            save_in(
+                &dir,
+                &ReviewDraft {
+                    overall_feedback: "x".repeat(i),
+                    ..a_draft()
+                },
+            )
+            .unwrap();
+        }
+
+        let files: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
+        assert_eq!(files.len(), 1, "temp files must not accumulate");
+        assert_eq!(
+            load_in(&dir, "plan-abc", "rev-1").unwrap().overall_feedback.len(),
+            49
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
