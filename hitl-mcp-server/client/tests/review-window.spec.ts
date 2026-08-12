@@ -307,14 +307,40 @@ test.describe('Review states', () => {
     expect(draft.inlineComments[0]).toMatchObject({ startLine: 42, endLine: 47 });
   });
 
-  test('C-12: an ack of "lost" re-offers the draft rather than claiming success', async ({ page }) => {
-    await page.goto(url());
+  test('C-12: a submit that comes back "lost" re-offers the draft rather than claiming success', async ({ page }) => {
+    await page.goto(url('?status=lost'));
     await addComment(page, 42, 42, 'still here');
-    await page.evaluate(() => (window as any).__simulateAckLost('response attachment expired'));
+    await page.locator('#btn-approve').click();
 
+    // submit_plan_review resolved — but the agent will never read the response,
+    // so this is a failure wearing a success's clothes.
+    await expect(page.locator('.success-title')).toHaveCount(0);
     await expect(page.locator('#review-error')).toContainText('response attachment expired');
+    await expect(page.locator('#review-error')).toHaveAttribute('data-tone', 'error');
     await expect(page.locator('#btn-approve')).toBeEnabled();
     await expect(page.locator('.comment-card-list .comment-card-body')).toHaveText('still here');
+  });
+
+  test('a submit that comes back "unacknowledged" keeps everything and says so', async ({ page }) => {
+    await page.goto(url('?status=unacknowledged'));
+    await addComment(page, 42, 42, 'unconfirmed');
+    await page.locator('#overall-feedback').fill('some feedback');
+    await page.locator('#btn-approve').click();
+
+    // Published but unconfirmed is neither success nor failure — and warning
+    // tone matters, because colouring it red trains people to ignore red.
+    await expect(page.locator('.success-title')).toHaveCount(0);
+    await expect(page.locator('#review-error')).toContainText('has not confirmed');
+    await expect(page.locator('#review-error')).toHaveAttribute('data-tone', 'warning');
+    await expect(page.locator('#overall-feedback')).toHaveValue('some feedback');
+    await expect(page.locator('.comment-card-list .comment-card-body')).toHaveText('unconfirmed');
+    await expect(page.locator('#btn-approve')).toBeEnabled();
+  });
+
+  test('a submit that comes back "received" is the only one that shows success', async ({ page }) => {
+    await page.goto(url());
+    await page.locator('#btn-approve').click();
+    await expect(page.locator('.success-title')).toHaveText('Plan approved');
   });
 
   test('C-4: an expired plan gets a first-class panel, not a blank window', async ({ page }) => {
@@ -323,6 +349,24 @@ test.describe('Review states', () => {
     await expect(page.locator('.review-panel-title')).toHaveText('Plan expired');
     await expect(page.locator('.review-panel-detail')).toContainText('ask the agent to resend');
   });
+
+  // The rest of the _error.kind contract. A plan we cannot vouch for is never
+  // rendered — approving the wrong bytes is the failure this feature prevents.
+  for (const [kind, title] of [
+    ['hash_mismatch', 'Plan does not match its hash'],
+    ['decrypt', 'Could not decrypt the plan'],
+    ['corrupt', 'Plan is unreadable'],
+    ['missing', 'Plan content is missing'],
+    ['unavailable', 'Could not fetch the plan'],
+  ]) {
+    test(`_error.kind "${kind}" refuses visibly and shows no plan`, async ({ page }) => {
+      await page.goto(url(`?state=${kind}`));
+      await expect(page.locator(`.review-panel[data-state="${kind}"]`)).toBeVisible();
+      await expect(page.locator('.review-panel-title')).toHaveText(title);
+      await expect(page.locator('#review-pane-diff')).toHaveCount(0);
+      await expect(page.locator('#btn-approve')).toHaveCount(0);
+    });
+  }
 
   test('A-7: a too-new protocol version shows have-X / need-Y', async ({ page }) => {
     await page.goto(url('?state=upgrade-required&have=2&need=3'));

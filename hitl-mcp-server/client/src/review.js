@@ -158,7 +158,14 @@ export function sortComments(comments) {
  * Render a full-window state panel. Used for the states that arrive with no
  * reviewable body at all, so there is never a blank window (C-4, A-7).
  *
- * `state.kind` is one of 'expired' | 'upgrade-required' | 'error'.
+ * `state.kind` is either 'upgrade-required' (decided client-side from
+ * protocolVersion) or one of the `_error.kind` contract strings Rust sends:
+ * 'expired' | 'hash_mismatch' | 'decrypt' | 'corrupt' | 'missing' | 'unavailable'.
+ *
+ * Only 'expired' is the C-4 "ask the agent to resend" case. Every other kind is
+ * a visible refusal: the plan is not shown, because a plan we cannot vouch for
+ * is worse than no plan — approving the wrong bytes is the failure this whole
+ * feature exists to prevent.
  */
 export function renderReviewPanel(container, state) {
     const kind = state?.kind || 'error';
@@ -172,6 +179,29 @@ export function renderReviewPanel(container, state) {
         detail = detail || 'This review’s attachment is no longer on the server. '
             + 'ntfy keeps messages for 12 hours but their attachments for only 3 — '
             + 'ask the agent to resend the plan.';
+    } else if (kind === 'hash_mismatch') {
+        icon = '🛑';
+        title = 'Plan does not match its hash';
+        detail = 'The plan that arrived is not the plan the agent said it sent. '
+            + 'It has not been shown, and nothing can be approved from here. '
+            + 'Ask the agent to resend, and treat this as suspicious if it repeats.';
+    } else if (kind === 'decrypt') {
+        icon = '🔒';
+        title = 'Could not decrypt the plan';
+        detail = 'This plan was encrypted with a key this device does not have. '
+            + 'Check that both ends share the same HITL encryption key.';
+    } else if (kind === 'corrupt') {
+        icon = '🛑';
+        title = 'Plan is unreadable';
+        detail = detail || 'The plan arrived malformed and could not be parsed. Ask the agent to resend it.';
+    } else if (kind === 'missing') {
+        icon = '⌛';
+        title = 'Plan content is missing';
+        detail = detail || 'The review arrived without its plan body. Ask the agent to resend it.';
+    } else if (kind === 'unavailable') {
+        icon = '📡';
+        title = 'Could not fetch the plan';
+        detail = detail || 'The plan body could not be downloaded. Check your connection and ask the agent to resend.';
     } else if (kind === 'upgrade-required') {
         icon = '⬆️';
         title = 'Needs a newer HITL client';
@@ -693,10 +723,18 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     // ── banners, errors, drafts ──────────────────────────────────────────────
     function showError(message) {
         errorEl.textContent = message;
+        errorEl.dataset.tone = 'error';
+        errorEl.style.display = 'block';
+    }
+    /** Same slot, different tone: an in-flight submit, or a delivered-but-unconfirmed one. */
+    function showNotice(message, tone) {
+        errorEl.textContent = message;
+        errorEl.dataset.tone = tone;
         errorEl.style.display = 'block';
     }
     function clearError() {
         errorEl.textContent = '';
+        errorEl.dataset.tone = 'error';
         errorEl.style.display = 'none';
     }
     clearError();
@@ -732,10 +770,35 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     }
 
     // ── submit ───────────────────────────────────────────────────────────────
-    // C-6 / P3: app.js:42-44 caught a failed submit with only console.error, so
-    // the success screen still rendered and the window closed 2 s later, silently
-    // discarding the answer. Here a failed submit shows an error, keeps the
-    // window open, and preserves every typed comment.
+    // C-6 / P3: app.js caught a failed submit with only console.error, so the
+    // answer silently never left the machine. Here a failed submit shows an
+    // error, keeps the window open, and preserves every typed comment.
+    //
+    // `submit_plan_review` blocks for up to 30 s waiting for the agent's ack, so
+    // the outcome is three-valued and only one of them is success:
+    //   received       → the agent has it; safe to show the terminal screen.
+    //   lost           → published, but the agent will never read it. Re-offer.
+    //   unacknowledged → published, unconfirmed. Keep everything, say so plainly.
+    // A rejection means the publish itself failed and nothing was sent at all.
+    function applySubmitResult(result, verdict) {
+        const status = result?.status || 'received';
+        if (status === 'received') {
+            showSubmitted(container, verdict);
+            return;
+        }
+        submitting = false;
+        setControlsDisabled(false);
+        notifyDraft();
+        const because = result?.reason ? ` (${result.reason})` : '';
+        if (status === 'lost') {
+            showError(`The agent never received your review${because}. `
+                + 'Everything you typed is still here — submit again.');
+        } else {
+            showNotice(`Your review was sent but the agent has not confirmed it${because}. `
+                + 'Nothing here has been discarded. Wait for the agent, or submit again to re-send.', 'warning');
+        }
+    }
+
     async function submit(verdict) {
         if (submitting || resolved) return;
         const payload = {
@@ -751,9 +814,11 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         clearError();
         submitting = true;
         setControlsDisabled(true);
+        // The call can sit for 30 s. Without this the window looks frozen and
+        // the human starts clicking things that are already disabled.
+        showNotice('Sending your review and waiting for the agent to confirm…', 'pending');
         try {
-            await callbacks.onSubmit?.(payload);
-            showSubmitted(container, verdict);
+            applySubmitResult(await callbacks.onSubmit?.(payload), verdict);
         } catch (err) {
             submitting = false;
             setControlsDisabled(false);
@@ -768,9 +833,9 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         if (submitting || resolved) return;
         submitting = true;
         setControlsDisabled(true);
+        showNotice('Sending…', 'pending');
         try {
-            await callbacks.onSkip?.();
-            showSubmitted(container, 'skipped');
+            applySubmitResult(await callbacks.onSkip?.(), 'skipped');
         } catch (err) {
             submitting = false;
             setControlsDisabled(false);
@@ -810,18 +875,12 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
             resolved = true;
             setControlsDisabled(true);
             renderComposer();
+            // `reason` is a free string on the wire, so this reads it rather
+            // than switching on it exhaustively.
             showBanner('cancelled', reason === 'cancelled'
                 ? 'This review was cancelled. Your comments have been saved as a draft.'
                 : 'The agent exited before this review finished. Your comments have been saved as a draft.');
             notifyDraft();
-        },
-
-        /** A delivered response the server never read (ack status 'lost'). */
-        reoffer(message) {
-            resolved = false;
-            submitting = false;
-            setControlsDisabled(false);
-            showError(message || 'The agent never received your review. Everything you typed is still here — submit again.');
         },
 
         showError,

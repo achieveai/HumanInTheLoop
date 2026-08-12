@@ -404,6 +404,21 @@ button.comment-card-anchor {
     margin-bottom: 8px;
 }
 
+/* The same slot carries the in-flight and delivered-but-unconfirmed states.
+   submit_plan_review blocks up to 30 s waiting for the agent's ack, and neither
+   of those is a failure — colouring them red would train people to ignore red. */
+.review-error[data-tone="pending"] {
+    background: #ebf8ff;
+    border-color: #90cdf4;
+    color: #2c5282;
+}
+
+.review-error[data-tone="warning"] {
+    background: #fffaf0;
+    border-color: #fbd38d;
+    color: #975a16;
+}
+
 .review-feedback-label {
     display: block;
     font-size: 11px;

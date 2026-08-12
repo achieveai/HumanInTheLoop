@@ -23,7 +23,7 @@ async function stubTauri(page: Page, opts: InvokeStub) {
           }
           if (cmd === 'submit_plan_review') {
             if (o.failSubmit) return Promise.reject(new Error('ntfy publish failed'));
-            return Promise.resolve(o.submitResult ?? { status: 'received' });
+            return Promise.resolve(o.submitResult ?? { status: 'received', responseId: 'r1', reason: null });
           }
           return Promise.resolve();
         },
@@ -39,7 +39,7 @@ async function stubTauri(page: Page, opts: InvokeStub) {
   }, opts);
 }
 
-function samplePlan() {
+function samplePlan(overrides: Record<string, unknown> = {}) {
   const lines = ['# Plan', '', 'Step one.', 'Step two.', 'Step three.'];
   return {
     type: 'plan_review',
@@ -58,6 +58,10 @@ function samplePlan() {
       diff: ['--- plan.md', '+++ plan.md', `@@ -1,${lines.length} +1,${lines.length} @@`,
              ...lines.map(l => ` ${l}`)].join('\n'),
     },
+    _error: null,
+    _wasEncrypted: false,
+    _device: 'ThisBox',
+    ...overrides,
   };
 }
 
@@ -111,6 +115,16 @@ test.describe('review.html shell', () => {
     await expect(page.locator('#overall-feedback')).toHaveValue('needs work');
   });
 
+  test('encrypted is taken from _wasEncrypted, not the URL', async ({ page }) => {
+    await stubTauri(page, { payload: samplePlan({ _wasEncrypted: true }) });
+    await page.goto('/review.html');
+
+    await page.locator('#btn-approve').click();
+    const call = await page.evaluate(() =>
+      (window as any).__calls.find((c: any) => c.cmd === 'submit_plan_review'));
+    expect(call.args.encrypted).toBe(true);
+  });
+
   test('C-6: a rejected submit_plan_review keeps the window open with the draft', async ({ page }) => {
     await stubTauri(page, { payload: samplePlan(), failSubmit: true });
     await page.goto('/review.html');
@@ -140,7 +154,7 @@ test.describe('review.html shell', () => {
     expect(await page.evaluate(() => (window as any).__windowClosed)).toBeUndefined();
   });
 
-  test('D-3: review-cancelled shows "agent exited" and persists the draft', async ({ page }) => {
+  test('D-3: review-cancelled shows "agent exited" and keeps the typed comments', async ({ page }) => {
     await stubTauri(page, { payload: samplePlan() });
     await page.goto('/review.html');
 
@@ -150,15 +164,43 @@ test.describe('review.html shell', () => {
     await page.evaluate(() => (window as any).__emit('review-cancelled', { reviewId: 'rev-1', reason: 'agent_exited' }));
 
     await expect(page.locator('[data-banner="cancelled"]')).toContainText('agent exited');
-    const draftCall = await page.evaluate(() =>
-      (window as any).__calls.filter((c: any) => c.cmd === 'save_review_draft').pop());
-    expect(draftCall.args.draft.inlineComments[0]).toMatchObject({ startLine: 3, endLine: 3 });
+    // The comments stay on screen — that, not a persistence command, is what
+    // D-3 requires, and there is no save_review_draft command in the client.
+    await expect(page.locator('.comment-card-list .comment-card-body')).toHaveText('unsent');
+    expect(await page.evaluate(() => (window as any).__windowClosed)).toBeUndefined();
   });
 
   test('C-4: an expired payload renders the expired panel', async ({ page }) => {
-    await stubTauri(page, { payload: { state: 'expired' } });
+    await stubTauri(page, {
+      payload: samplePlan({ body: null, _error: { kind: 'expired', message: 'attachment gone' } }),
+    });
     await page.goto('/review.html');
     await expect(page.locator('.review-panel[data-state="expired"]')).toBeVisible();
+  });
+
+  test('a hash mismatch refuses visibly and renders no plan', async ({ page }) => {
+    await stubTauri(page, {
+      payload: samplePlan({ body: null, _error: { kind: 'hash_mismatch', message: 'sha256 differs' } }),
+    });
+    await page.goto('/review.html');
+
+    await expect(page.locator('.review-panel[data-state="hash_mismatch"]')).toBeVisible();
+    // Nothing approvable, and no plan text shown at all.
+    await expect(page.locator('#btn-approve')).toHaveCount(0);
+    await expect(page.locator('#review-pane-diff')).toHaveCount(0);
+    await expect(page.locator('body')).not.toContainText('Step one.');
+  });
+
+  test('A-7: a protocolVersion newer than this client shows have-X / need-Y', async ({ page }) => {
+    await stubTauri(page, { payload: samplePlan({ protocolVersion: 3 }) });
+    await page.goto('/review.html');
+
+    await expect(page.locator('.review-panel[data-state="upgrade-required"]')).toBeVisible();
+    await expect(page.locator('.review-panel-detail')).toContainText('version 3');
+    await expect(page.locator('.review-panel-detail')).toContainText('version 2');
+    // Checked before the body, because a newer wire format is exactly when our
+    // parsing cannot be trusted.
+    await expect(page.locator('#review-pane-diff')).toHaveCount(0);
   });
 
   test('a failed take_window_payload explains itself rather than leaving a blank window', async ({ page }) => {

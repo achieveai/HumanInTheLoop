@@ -161,6 +161,15 @@
         const name = params.get('fixture') || hash || 'default';
         const state = params.get('state');
         const failSubmit = params.get('fail') === '1';
+        // submit_plan_review resolves with {status, responseId, reason}; only
+        // 'received' is success. ?status= drives the other two.
+        const submitStatus = params.get('status') || 'received';
+        const submitResult = {
+            status: submitStatus,
+            responseId: 'resp-test',
+            reason: submitStatus === 'lost' ? 'response attachment expired'
+                : submitStatus === 'unacknowledged' ? 'no ack within 30s' : null,
+        };
 
         const container = document.getElementById('review-container');
 
@@ -180,11 +189,13 @@
                     console.log('[TEST] onSubmit:', payload);
                     if (failSubmit) throw new Error('ntfy publish failed (simulated)');
                     window.__lastSubmit = payload;
+                    return submitResult;
                 },
                 onSkip: async () => {
                     console.log('[TEST] onSkip');
                     if (failSubmit) throw new Error('ntfy publish failed (simulated)');
                     window.__lastSkip = true;
+                    return submitResult;
                 },
                 onDraftChange: (draft) => { window.__lastDraft = draft; },
             });
@@ -194,7 +205,6 @@
             // without a running Rust client.
             window.__simulateSuperseded = (device) => controller.setSuperseded(device);
             window.__simulateCancelled = (reason) => controller.setCancelled(reason);
-            window.__simulateAckLost = (reason) => controller.reoffer(reason);
         }
     </script>
 </body>

@@ -10,6 +10,9 @@ const container = document.getElementById('review-container');
 let controller = null;
 let reviewId = null;
 
+/** The wire protocol version this client understands (A-7). */
+const SUPPORTED_PROTOCOL_VERSION = 2;
+
 /**
  * The payload leaves the URL entirely (P7/C-10): the Rust side stashes it in
  * PayloadStore keyed by window label and we take it once, here.
@@ -36,80 +39,76 @@ async function init() {
         return;
     }
 
-    // States that arrive with no reviewable body at all.
-    if (message?.state === 'expired' || message?.state === 'upgrade-required' || message?.state === 'error') {
-        renderReviewPanel(container, { ...message, kind: message.state });
+    // A-7. Rust forwards the message whatever its version, so the have/need
+    // check is ours to make — and it has to come first, because a newer wire
+    // format is exactly the case where our parsing cannot be trusted.
+    const version = Number(message?.protocolVersion);
+    if (Number.isFinite(version) && version > SUPPORTED_PROTOCOL_VERSION) {
+        renderReviewPanel(container, {
+            kind: 'upgrade-required',
+            have: SUPPORTED_PROTOCOL_VERSION,
+            need: version,
+            displayPath: message?.displayPath,
+        });
+        await revealWindow(invoke);
+        return;
+    }
+
+    // Exactly one of `body` / `_error` is non-null. `_error.kind` is a stable
+    // contract string: expired · hash_mismatch · decrypt · corrupt · missing ·
+    // unavailable. Only `expired` is the "ask the agent to resend" case; the
+    // rest are refusals, and none of them may render a plan.
+    if (message?._error) {
+        renderReviewPanel(container, {
+            kind: message._error.kind || 'error',
+            message: message._error.message,
+            displayPath: message?.displayPath,
+        });
         await revealWindow(invoke);
         return;
     }
 
     reviewId = message?.messageId || null;
-    const wasEncrypted = new URLSearchParams(window.location.search).get('encrypted') === 'true';
+    const wasEncrypted = message?._wasEncrypted === true;
 
     controller = renderPlanReview(container, message, {
-        onSubmit: async (payload) => {
-            const result = await invoke('submit_plan_review', {
-                reviewId: payload.reviewId,
-                snapshotHash: payload.snapshotHash,
-                verdict: payload.verdict,
-                overallFeedback: payload.overallFeedback,
-                inlineComments: payload.inlineComments,
-                encrypted: wasEncrypted,
-            });
-            // C-12: the ack is what proves the server actually read the body.
-            // Response attachments expire in 3 h, so "the PUT succeeded" is not
-            // the same as "delivered" — treat 'lost' as a failed submit so the
-            // C-6 path keeps the window open with every comment intact.
-            if (result && result.status === 'lost') {
-                throw new Error(result.reason || 'the agent never received it.');
-            }
-            return result;
-        },
-        onSkip: async () => {
-            const result = await invoke('submit_plan_review', {
-                reviewId,
-                snapshotHash: message?.snapshotHash || '',
-                verdict: 'skipped',
-                overallFeedback: '',
-                inlineComments: [],
-                encrypted: wasEncrypted,
-            });
-            if (result && result.status === 'lost') {
-                throw new Error(result.reason || 'the agent never received it.');
-            }
-            return result;
-        },
-        onDraftChange: (draft) => {
-            // Best-effort: a client without the command must not break editing.
-            invoke('save_review_draft', { draft }).catch(() => {});
-        },
-        onOpenExternal: (url) => {
-            invoke('open_external', { url }).catch(err => console.error('open_external failed:', err));
-        },
+        // Returns {status, responseId, reason} — review.js decides what each
+        // status means. A rejection here is a publish that never left.
+        onSubmit: (payload) => invoke('submit_plan_review', {
+            reviewId: payload.reviewId,
+            snapshotHash: payload.snapshotHash,
+            verdict: payload.verdict,
+            overallFeedback: payload.overallFeedback,
+            inlineComments: payload.inlineComments,
+            encrypted: wasEncrypted,
+        }),
+        onSkip: () => invoke('submit_plan_review', {
+            reviewId,
+            snapshotHash: message?.snapshotHash || '',
+            verdict: 'skipped',
+            overallFeedback: '',
+            inlineComments: [],
+            encrypted: wasEncrypted,
+        }),
     });
 
     await revealWindow(invoke);
 
-    // Another device reviewed first (D-5/D-6). Do NOT close the window and do
-    // NOT destroy the draft — a 20-minute review must not vanish on a race.
+    // Another device reviewed first (D-5/D-6). Emitted only for another device —
+    // our own submission never self-fires. Do NOT close the window and do NOT
+    // destroy the draft: a 20-minute review must not vanish on a race.
     await listen('review-superseded', (event) => {
         const p = event.payload || {};
         if (p.reviewId && reviewId && p.reviewId !== reviewId) return;
-        controller?.setSuperseded(p.respondedFrom || p.device);
+        controller?.setSuperseded(p.respondedFrom);
     });
 
-    // The agent exited (D-3). Comments stay on screen and are persisted.
+    // The agent exited (D-3). Comments stay on screen. `reason` is a free
+    // string, not an enum — do not switch on it exhaustively.
     await listen('review-cancelled', (event) => {
         const p = event.payload || {};
         if (p.reviewId && reviewId && p.reviewId !== reviewId) return;
         controller?.setCancelled(p.reason);
-    });
-
-    // A late ack that downgrades a submit we already reported as sent.
-    await listen('review-ack', (event) => {
-        const p = event.payload || {};
-        if (p.reviewId && reviewId && p.reviewId !== reviewId) return;
-        if (p.status === 'lost') controller?.reoffer(p.reason);
     });
 }
 
