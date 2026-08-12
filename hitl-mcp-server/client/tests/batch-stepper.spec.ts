@@ -301,8 +301,10 @@ test.describe('Question payload comes from take_window_payload', () => {
     // query-string encoding, and never lands anywhere that logs URLs.
     expect(page.url()).not.toContain('question=');
 
-    // Taken exactly once — the store removes the entry on read.
-    expect(await page.evaluate(() => (window as any).__stagedPayload)).toBeUndefined();
+    // Taken without consuming — the entry stays for the window's lifetime so a
+    // reload can ask again.
+    expect(await page.evaluate(() => sessionStorage.getItem('__stagedPayload'))).not.toBeNull();
+    expect(await page.evaluate(() => Number(sessionStorage.getItem('__payloadReads')))).toBe(1);
   });
 
   test('a window with nothing staged explains itself instead of spinning forever', async ({ page }) => {
@@ -312,6 +314,26 @@ test.describe('Question payload comes from take_window_payload', () => {
     // indistinguishable from a hang — and the agent is blocked the whole time.
     await expect(page.locator('#dialog-container')).toContainText('Could not load the question');
     await expect(page.locator('.spinner')).toHaveCount(0);
+  });
+
+  test('the question survives a reload', async ({ page }) => {
+    // The shipping path, and the one with real users on it. A read-once store
+    // turned any refresh — or a WebView2 renderer crash and recover — into a
+    // permanently blank dialog with the question already consumed, while the
+    // agent stayed blocked waiting for an answer.
+    await page.goto('/test-harness.html?scenario=single&driver=app');
+    await expect(page.locator('.option')).not.toHaveCount(0);
+
+    await page.reload();
+
+    await expect(page.locator('.option')).not.toHaveCount(0);
+    await expect(page.locator('#dialog-container')).not.toContainText('Could not load the question');
+    expect(await page.evaluate(() => Number(sessionStorage.getItem('__payloadReads')))).toBe(2);
+
+    // And it still answers, rather than merely rendering.
+    await page.locator('.option').nth(1).click();
+    await page.locator('#btn-submit').click();
+    await expect(page.locator('.success-title')).toHaveText('Response submitted successfully!');
   });
 });
 

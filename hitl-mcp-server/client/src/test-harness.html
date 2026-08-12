@@ -22,14 +22,17 @@
                     if (failInvoke && cmd === 'submit_answer') {
                         return Promise.reject(new Error('ntfy publish failed (simulated)'));
                     }
-                    // Mirrors payload_store: staged by window label, taken once,
-                    // and a rejection when nothing was staged for this window.
+                    // Mirrors PayloadStore: staged once by window label and
+                    // read as many times as the frontend reloads. It used to
+                    // consume on first read, which left a refreshed dialog
+                    // permanently blank with its question already gone.
                     if (cmd === 'take_window_payload') {
-                        const staged = window.__stagedPayload;
-                        if (staged === undefined) {
+                        const staged = sessionStorage.getItem('__stagedPayload');
+                        if (staged === null) {
                             return Promise.reject(new Error('no payload staged for this window'));
                         }
-                        window.__stagedPayload = undefined;
+                        sessionStorage.setItem('__payloadReads',
+                            String(Number(sessionStorage.getItem('__payloadReads') || '0') + 1));
                         return Promise.resolve(staged);
                     }
                     return Promise.resolve();
@@ -173,11 +176,23 @@
         // and their failure paths — are what gets tested. The payload is staged
         // the way Rust stages it, over IPC rather than on the URL.
         if (params.get('driver') === 'app') {
-            const query = new URLSearchParams({ encrypted: 'false' });
+            // Keep the harness's own params so a reload re-enters this branch;
+            // app.js reads only `encrypted` and ignores the rest.
+            const query = new URLSearchParams({ driver: 'app', encrypted: 'false' });
+            if (params.get('scenario')) query.set('scenario', params.get('scenario'));
             if (params.get('fail') === '1') query.set('fail', '1');
-            // ?nopayload=1 leaves nothing staged, to exercise the load-failure path.
-            if (params.get('nopayload') !== '1') {
-                window.__stagedPayload = JSON.stringify(question);
+            if (params.get('nopayload') === '1') query.set('nopayload', '1');
+            // Staged once, before the window would exist. On a reload this is
+            // already present, so the read exercises a second read of one
+            // staged entry rather than a freshly re-staged one.
+            // ?nopayload=1 stages nothing, to exercise the load-failure path.
+            // The flag is separate from the entry and never cleared: staging
+            // happens once per window, not once per load. Guarding on the entry
+            // itself would refill the store on every reload and make the reload
+            // test pass even against a read-once store.
+            if (params.get('nopayload') !== '1' && sessionStorage.getItem('__payloadStaged') === null) {
+                sessionStorage.setItem('__payloadStaged', '1');
+                sessionStorage.setItem('__stagedPayload', JSON.stringify(question));
             }
             history.replaceState(null, '', `?${query.toString()}`);
             await import('./app.js');

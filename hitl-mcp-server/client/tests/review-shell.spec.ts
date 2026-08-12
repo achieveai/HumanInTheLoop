@@ -15,18 +15,40 @@ type InvokeStub = {
 };
 
 async function stubTauri(page: Page, opts: InvokeStub) {
-  await page.addInitScript((o: InvokeStub) => {
+  // A stage id per stubTauri call. addInitScript re-runs on every load, so
+  // without this the stub would re-fabricate the payload on reload and a
+  // reload test would pass even against a read-once store — proving nothing.
+  // Keyed instead, sessionStorage survives the reload the way PayloadStore
+  // survives it, and a later stubTauri call stages a genuinely new payload.
+  const stageId = `stage-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  await page.addInitScript((o: InvokeStub & { __stageId: string }) => {
     const w = window as any;
+    const KEY = `__payloadStore:${o.__stageId}`;
+    const READS = `__payloadReads:${o.__stageId}`;
+    // Separate from KEY and never cleared: staging must happen once per window,
+    // not once per load. Guarding on KEY alone would refill the store on every
+    // reload, which silently re-creates the read-once bug's escape hatch and
+    // makes the reload test pass against a consuming store.
+    const STAGED = `__payloadStaged:${o.__stageId}`;
     w.__calls = [];
     w.__listeners = {};
     w.__emit = (name: string, payload: unknown) => (w.__listeners[name] || []).forEach((h: any) => h({ payload }));
+    // Staged once, before the window exists — exactly like payload_store::put.
+    if (o.payload !== null && sessionStorage.getItem(STAGED) === null) {
+      sessionStorage.setItem(STAGED, '1');
+      sessionStorage.setItem(KEY, JSON.stringify(o.payload));
+    }
+    w.__payloadReads = () => Number(sessionStorage.getItem(READS) || '0');
     w.__TAURI__ = {
       core: {
         invoke: (cmd: string, args: unknown) => {
           w.__calls.push({ cmd, args });
           if (cmd === 'take_window_payload') {
-            if (o.payload === null) return Promise.reject(new Error('no payload for this window'));
-            return Promise.resolve(JSON.stringify(o.payload));
+            const staged = sessionStorage.getItem(KEY);
+            if (staged === null) return Promise.reject(new Error('no payload for this window'));
+            // Non-consuming: the entry stays for the window's lifetime.
+            sessionStorage.setItem(READS, String(Number(sessionStorage.getItem(READS) || '0') + 1));
+            return Promise.resolve(staged);
           }
           if (cmd === 'submit_plan_review') {
             if (o.failSubmit) return Promise.reject(new Error('ntfy publish failed'));
@@ -52,7 +74,7 @@ async function stubTauri(page: Page, opts: InvokeStub) {
       },
       window: { getCurrentWindow: () => ({ close: () => { w.__windowClosed = true; } }) },
     };
-  }, opts);
+  }, { ...opts, __stageId: stageId });
 }
 
 function samplePlan(overrides: Record<string, unknown> = {}) {
@@ -287,6 +309,38 @@ test.describe('review.html shell', () => {
 
     await expect(page.locator('.review-panel[data-state="error"]')).toBeVisible();
     await expect(page.locator('.review-panel-detail')).toContainText('no payload for this window');
+  });
+
+  test('the plan survives a reload', async ({ page }) => {
+    // The payload used to be consumed on first read, so a refresh, a devtools
+    // reload or a WebView2 renderer crash left the window permanently on the
+    // error panel with the plan already gone. On master the payload was in the
+    // URL and a reload recovered by itself.
+    //
+    // Scope, so this is not read as more than it is: this covers the frontend
+    // half — that review-app.js re-requests on every load and renders what it
+    // gets. That the *store* is non-consuming is Rust's, and is unit-tested in
+    // payload_store.rs. The stub models a store rather than re-fabricating the
+    // payload, so this fails if the frontend stops re-requesting.
+    await stubTauri(page, { payload: samplePlan() });
+    await page.goto('/review.html');
+    await expect(page.locator('.review-path')).toHaveText('docs/plan.md');
+    expect(await page.evaluate(() => (window as any).__payloadReads())).toBe(1);
+
+    await page.reload();
+
+    await expect(page.locator('#review-pane-diff')).toBeVisible();
+    await expect(page.locator('.review-path')).toHaveText('docs/plan.md');
+    await expect(page.locator('.review-panel[data-state="error"]')).toHaveCount(0);
+    // The second read is the whole point: it happened, and it returned content.
+    expect(await page.evaluate(() => (window as any).__payloadReads())).toBe(2);
+
+    // Still fully usable, not just rendered.
+    await page.locator('.diff-row[data-side="new"][data-line="3"]').click();
+    await page.locator('#comment-input').fill('works after a reload');
+    await page.locator('#comment-add').click();
+    await page.locator('#btn-approve').click();
+    await expect(page.locator('.success-title')).toHaveText('Plan approved');
   });
 });
 
