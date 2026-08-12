@@ -1,0 +1,209 @@
+import { createHash } from 'crypto';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, unlinkSync } from 'fs';
+import { homedir } from 'os';
+import path from 'path';
+import { resolveRepoRoot, normalizePath, toRepoRelative } from './git-context.js';
+
+/**
+ * On-disk revision history for reviewed plans.
+ *
+ *   ~/.hitl/plans/<sha256(identityKey)>/<sha256(normalizedPath)>/
+ *     latest.json          {displayPath, digest, revision, createdAt}
+ *     objects/<sha256>     immutable content, one file per unique revision
+ *     drafts/<planId>.json in-flight comments — written by the client, not here
+ *
+ * Deliberately lock-free. Two MCP server processes reviewing the same plan can
+ * race `latest.json`, but `objects/<sha256>` is content-addressed and immutable,
+ * so a lost race costs cosmetic staleness (whose revision is called "latest"),
+ * never corruption. Last writer wins.
+ *
+ * Crash safety is the atomic temp-file + rename on `latest.json` (B-9): the
+ * object lands first, then the pointer flips in one operation, so an
+ * interrupted write leaves the previous `latest.json` byte-identical.
+ */
+
+/** The trusted contents of `latest.json`. */
+export interface SnapshotMeta {
+  /** Repo-relative display path — never absolute (F-9). */
+  displayPath: string;
+  /** Bare lowercase sha256 hex of the content. `snapshotHash` prefixes it with 'sha256:'. */
+  digest: string;
+  revision: number;
+  /** Unix millis. */
+  createdAt: number;
+}
+
+/** Where a given plan file's history lives, and how it is named on the wire. */
+export interface PlanIdentity {
+  /** Stable across revisions; keys drafts. */
+  planId: string;
+  /** Absolute directory holding latest.json / objects / drafts. */
+  dir: string;
+  /** Repo-relative when the plan is inside a repo, else just the basename (F-9). */
+  displayPath: string;
+  /** Absolute repo root, or null when the plan is not in a work tree. */
+  repoRoot: string | null;
+  /** The resolved, symlink-free plan path this identity describes. */
+  resolvedPath: string;
+}
+
+/** Outcome of recording a revision. */
+export interface RecordedRevision {
+  revision: number;
+  /** Bare sha256 hex of the content just recorded. */
+  digest: string;
+  isNewPlan: boolean;
+  /** The revision this one supersedes, or null on a first review. */
+  previous: SnapshotMeta | null;
+  /** Content of `previous`, or null when there is none / the object is missing. */
+  previousContent: string | null;
+}
+
+/** Root of the snapshot store. Overridable so tests never touch a real home dir. */
+export function getPlansRoot(): string {
+  return path.join(process.env.HITL_HOME ?? path.join(homedir(), '.hitl'), 'plans');
+}
+
+const DIR_MODE = 0o700;
+const FILE_MODE = 0o600;
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+/**
+ * Locate a plan file's history directory and its display name.
+ *
+ * Identity is keyed on the repo root when there is one, else on the containing
+ * directory — so the same relative path in two different repos gets two
+ * identities (B-7), while two spellings of one Windows path collapse to one
+ * (B-10). Git is resolved from the plan's own directory, never `process.cwd()`,
+ * because the plan usually lives in a sibling repo (B-6).
+ */
+export function resolvePlanIdentity(resolvedPath: string): PlanIdentity {
+  const normalizedPath = normalizePath(resolvedPath);
+  const dirName = path.dirname(resolvedPath);
+  const repoRoot = resolveRepoRoot(dirName);
+  const identityKey = repoRoot ?? normalizePath(dirName);
+
+  const identityHash = sha256Hex(identityKey);
+  const pathHash = sha256Hex(normalizedPath);
+
+  return {
+    planId: sha256Hex(`${identityHash}:${pathHash}`),
+    dir: path.join(getPlansRoot(), identityHash, pathHash),
+    displayPath: repoRoot ? toRepoRelative(repoRoot, resolvedPath) : path.basename(resolvedPath),
+    repoRoot,
+    resolvedPath,
+  };
+}
+
+/**
+ * Validate a raw `latest.json` body before anything trusts it.
+ *
+ * Returns null — never a partially-trusted object — when the digest is not 64
+ * lowercase hex, the revision is not a positive integer, `createdAt` is zero,
+ * or the recorded `displayPath` names a different file than the one being
+ * reviewed. A rejected pointer degrades to "no history", which restarts the
+ * revision count rather than diffing against something unverified.
+ */
+export function parseLatest(raw: string, expectedDisplayPath: string): SnapshotMeta | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+
+  const { displayPath, digest, revision, createdAt } = parsed as Record<string, unknown>;
+
+  if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) return null;
+  if (typeof revision !== 'number' || !Number.isInteger(revision) || revision < 1) return null;
+  if (typeof createdAt !== 'number' || createdAt <= 0) return null;
+  if (typeof displayPath !== 'string' || displayPath !== expectedDisplayPath) return null;
+
+  return { displayPath, digest, revision, createdAt };
+}
+
+/** Read and validate `latest.json`, or null when absent or untrustworthy. */
+export function readLatest(identity: PlanIdentity): SnapshotMeta | null {
+  const file = path.join(identity.dir, 'latest.json');
+  if (!existsSync(file)) return null;
+
+  try {
+    return parseLatest(readFileSync(file, 'utf8'), identity.displayPath);
+  } catch {
+    return null;
+  }
+}
+
+/** Read a stored revision by digest, or null when the object is missing. */
+export function readObject(identity: PlanIdentity, digest: string): string | null {
+  const file = path.join(identity.dir, 'objects', digest);
+  if (!existsSync(file)) return null;
+
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record `content` as the next revision of this plan.
+ *
+ * Byte-identical content still advances the revision: a resubmit is a distinct
+ * review event, and the human must still be able to select every line of an
+ * unchanged plan (B-3). The object is written before the pointer flips, so a
+ * crash between the two leaves an orphaned object rather than a dangling
+ * `latest.json`.
+ */
+export function recordRevision(identity: PlanIdentity, content: string): RecordedRevision {
+  mkdirSync(path.join(identity.dir, 'objects'), { recursive: true, mode: DIR_MODE });
+  // The client writes drafts here; the directory is part of the layout either way.
+  mkdirSync(path.join(identity.dir, 'drafts'), { recursive: true, mode: DIR_MODE });
+
+  const previous = readLatest(identity);
+  const previousContent = previous ? readObject(identity, previous.digest) : null;
+
+  const digest = sha256Hex(content);
+  const objectFile = path.join(identity.dir, 'objects', digest);
+  if (!existsSync(objectFile)) {
+    writeAtomic(objectFile, content);
+  }
+
+  const meta: SnapshotMeta = {
+    displayPath: identity.displayPath,
+    digest,
+    revision: (previous?.revision ?? 0) + 1,
+    createdAt: Date.now(),
+  };
+  writeAtomic(path.join(identity.dir, 'latest.json'), JSON.stringify(meta, null, 2) + '\n');
+
+  return {
+    revision: meta.revision,
+    digest,
+    isNewPlan: previous === null,
+    previous,
+    previousContent,
+  };
+}
+
+/**
+ * Write via a temp file in the same directory, then rename over the target.
+ *
+ * `renameSync` maps to MoveFileEx with MOVEFILE_REPLACE_EXISTING on Windows, so
+ * replacing an existing destination is atomic there too. The temp file is
+ * removed on failure so a full disk cannot leave debris behind.
+ */
+function writeAtomic(file: string, contents: string): void {
+  const tmp = `${file}.tmp`;
+  try {
+    writeFileSync(tmp, contents, { encoding: 'utf8', mode: FILE_MODE });
+    renameSync(tmp, file);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    throw err;
+  }
+}
