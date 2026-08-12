@@ -103,7 +103,26 @@ async function init() {
         // Returning the promise lets review.js fall back to loading in place if
         // the OS hand-off fails, instead of a click that does nothing.
         onOpenExternal: (url) => invoke('open_external', { url }),
+        // Fired only on status === 'received'. A stale draft is a minor
+        // annoyance, so a failure here is not fatal — but it is reported on the
+        // success screen rather than swallowed.
+        onReceived: () => {
+            invoke('clear_review_draft', {
+                planId: message?.planId || '',
+                reviewId,
+            }).catch(err => {
+                console.error('clear_review_draft failed:', err);
+                controller?.noteDraftClearFailed();
+            });
+        },
     });
+
+    // The draft is exposed on the controller but nothing restores it unless we
+    // do it here. `_draft` is null when there is nothing to restore, including
+    // when a saved draft turned out to be empty.
+    if (message?._draft) {
+        controller.restoreDraft(message._draft);
+    }
 
     await revealWindow(invoke);
 

@@ -490,6 +490,18 @@ button.comment-card-anchor {
 .success-title { font-size: 20px; color: #2d3748; margin-bottom: 8px; }
 .success-subtitle { color: #718096; }
 
+/* A confirmed submit whose draft could not be cleared. Not an error — the
+   review landed — so it sits under the success text rather than shouting. */
+.success-note {
+    margin-top: 12px;
+    color: #975a16;
+    background: #fffaf0;
+    border: 1px solid #fbd38d;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+}
+
 /* ── rendered markdown ──────────────────────────────────────────────────── */
 
 .md-content { line-height: 1.6; }

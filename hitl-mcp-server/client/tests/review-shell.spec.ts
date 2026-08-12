@@ -10,6 +10,7 @@ type InvokeStub = {
   failSubmit?: boolean;
   submitResult?: unknown;
   failDraftSave?: boolean;
+  failDraftClear?: boolean;
   failOpenExternal?: boolean;
 };
 
@@ -33,6 +34,9 @@ async function stubTauri(page: Page, opts: InvokeStub) {
           }
           if (cmd === 'save_review_draft' && o.failDraftSave) {
             return Promise.reject(new Error('disk full'));
+          }
+          if (cmd === 'clear_review_draft' && o.failDraftClear) {
+            return Promise.reject(new Error('draft file locked'));
           }
           if (cmd === 'open_external' && o.failOpenExternal) {
             return Promise.reject(new Error('no handler registered'));
@@ -283,5 +287,120 @@ test.describe('review.html shell', () => {
 
     await expect(page.locator('.review-panel[data-state="error"]')).toBeVisible();
     await expect(page.locator('.review-panel-detail')).toContainText('no payload for this window');
+  });
+});
+
+// ─── Draft persistence ───────────────────────────────────────────────────────
+
+const savedDraft = {
+  reviewId: 'rev-1',
+  planId: 'plan-1',
+  snapshotHash: 'sha256:abc',
+  overallFeedback: 'picking this up again',
+  inlineComments: [
+    { path: 'docs/plan.md', startLine: 4, endLine: 4, side: 'new', comment: 'from yesterday' },
+  ],
+  savedAt: 1786543402123,
+};
+
+test.describe('Draft restore and clear', () => {
+  test('_draft is restored into the feedback box and the comment list', async ({ page }) => {
+    await stubTauri(page, { payload: samplePlan({ _draft: savedDraft }) });
+    await page.goto('/review.html');
+
+    await expect(page.locator('#overall-feedback')).toHaveValue('picking this up again');
+    await expect(page.locator('.comment-card-list .comment-card-body')).toHaveText('from yesterday');
+    // And it goes back out on submit, anchored where it was.
+    await page.locator('#btn-approve').click();
+    const call = await page.evaluate(() =>
+      (window as any).__calls.find((c: any) => c.cmd === 'submit_plan_review'));
+    expect(call.args.inlineComments).toEqual([
+      { path: 'docs/plan.md', startLine: 4, endLine: 4, side: 'new', comment: 'from yesterday' },
+    ]);
+  });
+
+  test('a null _draft restores nothing and shows no notice', async ({ page }) => {
+    await stubTauri(page, { payload: samplePlan({ _draft: null }) });
+    await page.goto('/review.html');
+
+    await expect(page.locator('#overall-feedback')).toHaveValue('');
+    await expect(page.locator('.comment-card-list')).toHaveCount(0);
+    await expect(page.locator('#review-error')).toBeHidden();
+  });
+
+  test('a changed plan restores prose but says why the comments are gone', async ({ page }) => {
+    // Rust drops inlineComments when the snapshot hash moved: line anchors
+    // against changed content would point at different text.
+    await stubTauri(page, {
+      payload: samplePlan({
+        snapshotHash: 'sha256:NEW',
+        _draft: { ...savedDraft, snapshotHash: 'sha256:abc', inlineComments: [] },
+      }),
+    });
+    await page.goto('/review.html');
+
+    await expect(page.locator('#overall-feedback')).toHaveValue('picking this up again');
+    await expect(page.locator('.comment-card-list')).toHaveCount(0);
+    // Vanishing without explanation reads as a bug and costs trust in the draft.
+    await expect(page.locator('#review-error')).toContainText('The plan changed');
+    await expect(page.locator('#review-error')).toHaveAttribute('data-tone', 'warning');
+  });
+
+  test('clear_review_draft fires on a received submit, keyed by plan and review', async ({ page }) => {
+    await stubTauri(page, { payload: samplePlan({ _draft: savedDraft }) });
+    await page.goto('/review.html');
+
+    await page.locator('#btn-approve').click();
+    await expect(page.locator('.success-title')).toBeVisible();
+
+    const call = await page.evaluate(() =>
+      (window as any).__calls.find((c: any) => c.cmd === 'clear_review_draft'));
+    expect(call.args).toEqual({ planId: 'plan-1', reviewId: 'rev-1' });
+  });
+
+  // The one that deletes someone's work if it goes wrong: on 'lost' and
+  // 'unacknowledged' the persisted draft is the only surviving copy.
+  for (const status of ['lost', 'unacknowledged']) {
+    test(`clear_review_draft never fires on "${status}"`, async ({ page }) => {
+      await stubTauri(page, {
+        payload: samplePlan({ _draft: savedDraft }),
+        submitResult: { status, responseId: 'r1', reason: 'no ack' },
+      });
+      await page.goto('/review.html');
+
+      await page.locator('#btn-approve').click();
+      await expect(page.locator('#review-error')).toBeVisible();
+      await expect(page.locator('.success-title')).toHaveCount(0);
+
+      const cleared = await page.evaluate(() =>
+        (window as any).__calls.some((c: any) => c.cmd === 'clear_review_draft'));
+      expect(cleared).toBe(false);
+      // The work is still on screen as well as on disk.
+      await expect(page.locator('.comment-card-list .comment-card-body')).toHaveText('from yesterday');
+    });
+  }
+
+  test('clear_review_draft never fires when the publish itself failed', async ({ page }) => {
+    await stubTauri(page, { payload: samplePlan({ _draft: savedDraft }), failSubmit: true });
+    await page.goto('/review.html');
+
+    await page.locator('#btn-approve').click();
+    await expect(page.locator('#review-error')).toContainText('Submit failed');
+
+    const cleared = await page.evaluate(() =>
+      (window as any).__calls.some((c: any) => c.cmd === 'clear_review_draft'));
+    expect(cleared).toBe(false);
+  });
+
+  test('a failed clear is reported on the success screen, not swallowed', async ({ page }) => {
+    await stubTauri(page, { payload: samplePlan({ _draft: savedDraft }), failDraftClear: true });
+    await page.goto('/review.html');
+
+    await page.locator('#btn-approve').click();
+
+    // The review did land, so this is a note under the success screen rather
+    // than an error — but it is said out loud.
+    await expect(page.locator('.success-title')).toHaveText('Plan approved');
+    await expect(page.locator('.success-note')).toContainText('could not be cleared');
   });
 });

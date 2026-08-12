@@ -175,6 +175,9 @@ test.describe('Range selection and comments', () => {
   });
 
   test('I-2: find-in-page locates and highlights a match', async ({ page }) => {
+    // runFind only fires on the input event, so a fill that lands before the
+    // rows are in the DOM would search an empty pane and never re-run.
+    await expect(row(page, 42)).toBeVisible();
     await page.locator('#review-find-input').fill('bullet item on line 42');
     await expect(page.locator('.diff-row.is-find-current')).toHaveAttribute('data-line', '42');
     await expect(page.locator('#review-find-count')).toHaveText('1/1');

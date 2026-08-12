@@ -232,6 +232,7 @@ export function renderReviewPanel(container, state) {
  *        onSkip() → Promise
  *        onCancel() → Promise            (human closes / cancels the review)
  *        onDraftChange(draft)            (optional, fired on every edit)
+ *        onReceived()                    (optional, fired only on a confirmed submit)
  *        onOpenExternal(url)             (optional, click-to-load image fallback)
  * @returns a controller for the states that arrive after first paint.
  */
@@ -804,6 +805,9 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
             : result?.status === 'lost' ? 'lost'
             : 'unacknowledged';
         if (status === 'received') {
+            // Only here. On 'lost' or 'unacknowledged' the persisted draft is
+            // the only surviving copy of the reviewer's work.
+            try { callbacks.onReceived?.(); } catch (err) { console.error('onReceived failed:', err); }
             showSubmitted(container, verdict);
             return;
         }
@@ -920,6 +924,27 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
             feedbackEl.value = draft.overallFeedback || '';
             comments = (draft.inlineComments || []).map(c => ({ id: nextCommentId(), ...c }));
             rerenderComments();
+            // On a snapshot-hash mismatch the saved inline comments are dropped
+            // deliberately: line anchors against changed content would attach
+            // the reviewer's words to different text. Prose survives because it
+            // is not anchored. Say so — comments disappearing with no
+            // explanation reads as a bug and costs trust in the whole draft.
+            if (draft.snapshotHash && snapshotHash && draft.snapshotHash !== snapshotHash) {
+                showNotice('The plan changed since you last worked on this review. Your overall '
+                    + 'feedback was restored, but your inline comments were not — their line '
+                    + 'anchors no longer point at the same text.', 'warning');
+            }
+        },
+
+        /** The submit was acknowledged; the shell may drop any persisted draft. */
+        noteDraftClearFailed() {
+            const panel = container.querySelector('.success-container') || container;
+            if (panel.querySelector('.success-note')) return;
+            const note = document.createElement('p');
+            note.className = 'success-note';
+            note.textContent = 'Your review was received, but the saved draft could not be cleared — '
+                + 'you may be offered it again next time this plan comes round.';
+            panel.appendChild(note);
         },
     };
 }
