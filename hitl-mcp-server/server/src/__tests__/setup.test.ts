@@ -43,6 +43,21 @@ jest.unstable_mockModule('../config.js', () => ({
   loadConfig: jest.fn(),
 }));
 
+// host-settings
+type AutoBackgroundStatusMock = {
+  active: boolean;
+  activeInEnv: boolean;
+  configuredForRestart: boolean;
+};
+const mockDetectAutoBackgroundStatus = jest.fn<() => AutoBackgroundStatusMock>();
+const mockBuildAutoBackgroundRemediationText = jest.fn<() => string>();
+jest.unstable_mockModule('../host-settings.js', () => ({
+  detectAutoBackgroundStatus: mockDetectAutoBackgroundStatus,
+  buildAutoBackgroundRemediationText: mockBuildAutoBackgroundRemediationText,
+  AUTO_BACKGROUND_ENV_KEY: 'CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS',
+  AUTO_BACKGROUND_TARGET_VALUE: '0',
+}));
+
 // Dynamically import the module under test AFTER mocks are registered
 const { performSetup, isProcessRunning, findClientBinary, launchClient } = await import('../setup.js');
 
@@ -51,6 +66,14 @@ describe('setup', () => {
     jest.clearAllMocks();
     mockGetConfigPath.mockReturnValue('/mock/home/.hitl/config.json');
     mockGenerateDefaultConfig.mockReturnValue({ topicId: 'hitl-test-uuid' });
+    // Default: guard already active, so existing performSetup tests that
+    // don't care about this step see a clean, non-warning result.
+    mockDetectAutoBackgroundStatus.mockReturnValue({
+      active: true,
+      activeInEnv: true,
+      configuredForRestart: false,
+    });
+    mockBuildAutoBackgroundRemediationText.mockReturnValue('mock remediation text');
   });
 
   // ---- isProcessRunning ----
@@ -171,9 +194,10 @@ describe('setup', () => {
       const result: SetupResult = await performSetup('/mock/server/dist');
 
       expect(result.success).toBe(true);
-      expect(result.steps).toHaveLength(2);
+      expect(result.steps).toHaveLength(3);
       expect(result.steps[0].status).toBe('ok');
-      expect(result.steps[1].status).toBe('already_running');
+      const clientStep = result.steps.find((s) => s.step === 'client');
+      expect(clientStep?.status).toBe('already_running');
 
       Object.defineProperty(process, 'platform', { value: originalPlatform });
     });
@@ -248,6 +272,74 @@ describe('setup', () => {
       const clientStep = result.steps.find((s) => s.step === 'client');
       expect(clientStep?.status).toBe('error');
       expect(clientStep?.message).toContain('ENOENT');
+    });
+
+    // ---- auto-background-env diagnostic step ----
+    describe('auto-background-env diagnostic step', () => {
+      it('reports ok when the guard is already active', async () => {
+        mockExistsSync.mockReturnValue(true); // config exists, client not running below
+        mockExecSync.mockImplementation(() => { throw new Error('not found'); });
+        mockDetectAutoBackgroundStatus.mockReturnValue({
+          active: true,
+          activeInEnv: true,
+          configuredForRestart: false,
+        });
+
+        const result = await performSetup('/mock/server/dist');
+
+        const step = result.steps.find((s) => s.step === 'auto-background-env');
+        expect(step?.status).toBe('ok');
+        expect(mockBuildAutoBackgroundRemediationText).not.toHaveBeenCalled();
+      });
+
+      it('reports warning with remediation text when the guard is inactive, without failing setup', async () => {
+        // Config exists, client already running — the only failure mode left
+        // to isolate is the diagnostic step itself.
+        mockExistsSync.mockImplementation((p: string) => p.endsWith('config.json'));
+        const originalPlatform = process.platform;
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        mockExecSync.mockReturnValue('hitl-client.exe  1234 Console');
+
+        mockDetectAutoBackgroundStatus.mockReturnValue({
+          active: false,
+          activeInEnv: false,
+          configuredForRestart: false,
+        });
+        mockBuildAutoBackgroundRemediationText.mockReturnValue('mock remediation text');
+
+        const result = await performSetup('/mock/server/dist');
+
+        const step = result.steps.find((s) => s.step === 'auto-background-env');
+        expect(step?.status).toBe('warning');
+        expect(step?.message).toBe('mock remediation text');
+        // Non-fatal: overall success is unaffected by this diagnostic alone.
+        expect(result.success).toBe(true);
+
+        Object.defineProperty(process, 'platform', { value: originalPlatform });
+      });
+
+      it('never writes to host settings as part of default setup', async () => {
+        mockExistsSync.mockImplementation((p: string) => p.endsWith('config.json'));
+        const originalPlatform = process.platform;
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        mockExecSync.mockReturnValue('hitl-client.exe  1234 Console');
+        mockDetectAutoBackgroundStatus.mockReturnValue({
+          active: false,
+          activeInEnv: false,
+          configuredForRestart: false,
+        });
+
+        await performSetup('/mock/server/dist');
+
+        // setup.ts must only read/diagnose — never call writeFileSync itself
+        // for host settings. The only fs writer available to it is the
+        // (mocked) writeFileSync from the fs module, which performSetup
+        // should never invoke for this step.
+        const mockWriteFileSync = (await import('fs')).writeFileSync as unknown as jest.Mock;
+        expect(mockWriteFileSync).not.toHaveBeenCalled();
+
+        Object.defineProperty(process, 'platform', { value: originalPlatform });
+      });
     });
   });
 });

@@ -3,11 +3,12 @@ import { execSync, spawn } from 'child_process';
 import { homedir, arch } from 'os';
 import path from 'path';
 import { saveConfig, generateDefaultConfig, getConfigPath } from './config.js';
+import { detectAutoBackgroundStatus, buildAutoBackgroundRemediationText } from './host-settings.js';
 
 /** Result of a single setup step. */
 export interface SetupStepResult {
   step: string;
-  status: 'ok' | 'created' | 'launched' | 'already_running' | 'not_found' | 'error';
+  status: 'ok' | 'created' | 'launched' | 'already_running' | 'not_found' | 'error' | 'warning';
   message: string;
 }
 
@@ -174,8 +175,9 @@ function buildNotFoundMessage(serverDir: string): string {
 /**
  * Perform the full HITL client setup:
  *   1. Ensure ~/.hitl/config.json exists
- *   2. Check if the client process is running
- *   3. Find and launch the client binary if needed
+ *   2. Non-fatal diagnostic: warn if the auto-background env guard isn't active
+ *   3. Check if the client process is running
+ *   4. Find and launch the client binary if needed
  *
  * @param serverDir - The directory of the running server JS (used to resolve relative binary paths)
  */
@@ -202,14 +204,30 @@ export async function performSetup(serverDir: string): Promise<SetupResult> {
     }
   }
 
-  // Step 2: Check if client is already running
+  // Step 2 (non-fatal diagnostic): warn if the auto-background env guard
+  // isn't active, so a blocking HITL call can't get yanked into the
+  // background before the human answers. This never flips overallSuccess —
+  // it's advisory only, and setup never writes to the host settings file
+  // itself; the user (or a future explicit command) applies the fix.
+  const autoBackgroundStatus = detectAutoBackgroundStatus();
+  steps.push({
+    step: 'auto-background-env',
+    status: autoBackgroundStatus.active ? 'ok' : 'warning',
+    message: autoBackgroundStatus.active
+      ? `Auto-background guard is active (${
+          autoBackgroundStatus.activeInEnv ? 'current session' : 'configured for next restart'
+        })`
+      : buildAutoBackgroundRemediationText(),
+  });
+
+  // Step 3: Check if client is already running
   const binaryName = process.platform === 'win32' ? 'hitl-client.exe' : 'hitl-client';
   if (isProcessRunning(binaryName)) {
     steps.push({ step: 'client', status: 'already_running', message: 'HITL client is already running' });
     return { success: overallSuccess, steps, summary: formatSummary(steps) };
   }
 
-  // Step 3: Find and launch binary
+  // Step 4: Find and launch binary
   const binaryPath = findClientBinary(serverDir);
   if (!binaryPath) {
     overallSuccess = false;
