@@ -25,6 +25,8 @@ aes-gcm = "0.10"
 base64 = "0.22"
 sha2 = "0.10"
 flate2 = "1"
+# `std` gates set_boxed_logger, which logging.rs uses to install the file logger.
+log = { version = "0.4", features = ["std"] }
 rodio = "0.19"
 
 [target.'cfg(windows)'.dependencies]

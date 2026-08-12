@@ -18,7 +18,7 @@ pub async fn subscribe_loop(app: AppHandle) {
     let config = match load_config() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("HITL config error: {}", e);
+            log::error!("HITL config error: {}", e);
             return;
         }
     };
@@ -36,22 +36,22 @@ pub async fn subscribe_loop(app: AppHandle) {
         .as_secs();
 
     // Phase 1: Poll all cached messages once, then process
-    eprintln!("Fetching cached messages to find pending questions...");
+    log::info!("Fetching cached messages to find pending questions...");
     let cached_body = fetch_cached_body(&base_url).await;
     let answered_ids = extract_answered_ids(&cached_body, &config);
-    eprintln!("Found {} answered questions in cache", answered_ids.len());
+    log::info!("Found {} answered questions in cache", answered_ids.len());
 
     // Show any pending (unanswered) questions from cache
     show_pending_from_cache(&app, &config, &cached_body, &answered_ids).await;
 
     // Phase 2: Subscribe to live messages (from just before cache poll to avoid gaps)
     let live_url = format!("{}/json?since={}", base_url, since_ts);
-    eprintln!("Subscribing to live ntfy messages: {}", live_url);
+    log::info!("Subscribing to live ntfy messages: {}", live_url);
 
     loop {
         match subscribe_live(&app, &config, &live_url).await {
-            Ok(()) => eprintln!("ntfy stream ended, reconnecting in 5s..."),
-            Err(e) => eprintln!("ntfy error: {}, reconnecting in 5s...", e),
+            Ok(()) => log::warn!("ntfy stream ended, reconnecting in 5s..."),
+            Err(e) => log::warn!("ntfy error: {}, reconnecting in 5s...", e),
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
@@ -70,11 +70,11 @@ async fn fetch_cached_body(base_url: &str) -> String {
     {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
-            eprintln!("Cache poll returned {}", r.status());
+            log::warn!("Cache poll returned {}", r.status());
             return String::new();
         }
         Err(e) => {
-            eprintln!("Cache poll failed: {}", e);
+            log::warn!("Cache poll failed: {}", e);
             return String::new();
         }
     };
@@ -92,12 +92,12 @@ fn try_decrypt(raw: &str, config: &HitlConfig) -> Option<(String, bool)> {
                 match crypto::decrypt_value(&parsed, key) {
                     Ok(decrypted) => return Some((decrypted, true)),
                     Err(e) => {
-                        eprintln!("Failed to decrypt message: {}", e);
+                        log::warn!("Failed to decrypt message: {}", e);
                         return None;
                     }
                 }
             } else {
-                eprintln!("Received encrypted message but no encryptionKey configured — skipping");
+                log::warn!("Received encrypted message but no encryptionKey configured — skipping");
                 return None;
             }
         }
@@ -298,7 +298,7 @@ async fn dispatch_message(
     let env = match serde_json::from_str::<MessageEnvelope>(raw) {
         Ok(env) => env,
         Err(e) => {
-            eprintln!("Undecodable message envelope: {}", e);
+            log::warn!("Undecodable message envelope: {}", e);
             return;
         }
     };
@@ -307,7 +307,7 @@ async fn dispatch_message(
         // The visible "needs a newer HITL client" panel lands with the review
         // window. Until then this is at least named in the log rather than
         // dropped on the floor.
-        eprintln!(
+        log::warn!(
             "Message {} declares protocolVersion {} but this client supports {} — ignoring",
             env.message_id,
             env.version(),
@@ -323,13 +323,13 @@ async fn dispatch_message(
                     if answered_ids.contains(&question.message_id) {
                         return;
                     }
-                    eprintln!("Showing pending question from cache: {}", question.message_id);
+                    log::info!("Showing pending question from cache: {}", question.message_id);
                 } else {
-                    eprintln!("Received question: {}", question.message_id);
+                    log::info!("Received question: {}", question.message_id);
                 }
                 show_question(app, config, &question, was_encrypted);
             }
-            Err(e) => eprintln!("question {} parse failed: {}", env.message_id, e),
+            Err(e) => log::error!("question {} parse failed: {}", env.message_id, e),
         },
 
         "answer" => {
@@ -341,13 +341,13 @@ async fn dispatch_message(
             }
             match serde_json::from_str::<AnswerMessage>(raw) {
                 Ok(answer) => {
-                    eprintln!(
+                    log::info!(
                         "Received answer for question {}: from {}",
                         answer.question_id, answer.responded_from
                     );
 
                     if let Err(e) = app.emit("dismiss-question", &answer) {
-                        eprintln!("Failed to emit dismiss-question: {}", e);
+                        log::error!("Failed to emit dismiss-question: {}", e);
                     }
 
                     let label = format!(
@@ -358,7 +358,7 @@ async fn dispatch_message(
                         let _ = window.close();
                     }
                 }
-                Err(e) => eprintln!("answer {} parse failed: {}", env.message_id, e),
+                Err(e) => log::error!("answer {} parse failed: {}", env.message_id, e),
             }
         }
 
@@ -369,7 +369,7 @@ async fn dispatch_message(
             }
             match serde_json::from_str::<NotificationMessage>(raw) {
                 Ok(notification) => show_notification(app, config, &notification, was_encrypted),
-                Err(e) => eprintln!("notification {} parse failed: {}", env.message_id, e),
+                Err(e) => log::error!("notification {} parse failed: {}", env.message_id, e),
             }
         }
 
@@ -379,25 +379,25 @@ async fn dispatch_message(
             }
             match serde_json::from_str::<DismissNotificationMessage>(raw) {
                 Ok(dismiss) => {
-                    eprintln!(
+                    log::info!(
                         "Received dismiss for notification {}: from {}",
                         dismiss.notification_id, dismiss.dismissed_from
                     );
 
                     if let Some(win) = app.get_webview_window("notifications") {
                         if let Err(e) = win.emit("remove-notification", &dismiss.notification_id) {
-                            eprintln!("Failed to emit remove-notification: {}", e);
+                            log::error!("Failed to emit remove-notification: {}", e);
                         }
                     }
                 }
-                Err(e) => eprintln!("dismiss_notification {} parse failed: {}", env.message_id, e),
+                Err(e) => log::error!("dismiss_notification {} parse failed: {}", env.message_id, e),
             }
         }
 
         // The plan-review types. S0 lands the wire contract and this routing;
         // the handlers land with the review window. Named in the log so a
         // message arriving against a build without them is visible.
-        "plan_review" | "plan_review_ack" | "cancel_review" => eprintln!(
+        "plan_review" | "plan_review_ack" | "cancel_review" => log::warn!(
             "Received {} {} (protocolVersion {}, {} payload) — no handler in this build",
             env.msg_type,
             env.message_id,
@@ -409,7 +409,7 @@ async fn dispatch_message(
         // Never a warning.
         "plan_review_response" | "chunk" => {}
 
-        other => eprintln!(
+        other => log::warn!(
             "Unrecognized message type '{}' (id {})",
             other, env.message_id
         ),
@@ -423,7 +423,7 @@ fn show_notification(
     notification: &NotificationMessage,
     was_encrypted: bool,
 ) {
-    eprintln!("Received notification: {}", notification.message_id);
+    log::info!("Received notification: {}", notification.message_id);
 
     if config.sound_enabled {
         crate::sound::play_notification();
@@ -439,7 +439,7 @@ fn show_notification(
 
     if let Some(win) = app.get_webview_window(label) {
         if let Err(e) = win.emit("add-notification", &notification_json) {
-            eprintln!("Failed to emit add-notification: {}", e);
+            log::error!("Failed to emit add-notification: {}", e);
         }
         let _ = crate::window_utils::show_window_no_activate(&win);
         return;
@@ -459,8 +459,8 @@ fn show_notification(
         .focused(false)
         .build()
     {
-        Ok(_) => eprintln!("Notifications window created"),
-        Err(e) => eprintln!("Failed to create notifications window: {}", e),
+        Ok(_) => log::info!("Notifications window created"),
+        Err(e) => log::error!("Failed to create notifications window: {}", e),
     }
 }
 
@@ -491,8 +491,8 @@ fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessag
     .focused(false)
     .build()
     {
-        Ok(_) => eprintln!("Dialog window created: {}", label),
-        Err(e) => eprintln!("Failed to create dialog window: {}", e),
+        Ok(_) => log::info!("Dialog window created: {}", label),
+        Err(e) => log::error!("Failed to create dialog window: {}", e),
     }
 }
 

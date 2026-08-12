@@ -27,18 +27,18 @@ pub fn play_notification() {
         let volume = if is_local_console() { 0.4 } else { 0.25 };
 
         let Ok((_stream, stream_handle)) = OutputStream::try_default() else {
-            eprintln!("Failed to open audio output");
+            log::warn!("Failed to open audio output");
             return;
         };
 
         let Ok(sink) = Sink::try_new(&stream_handle) else {
-            eprintln!("Failed to create audio sink");
+            log::warn!("Failed to create audio sink");
             return;
         };
 
         let cursor = Cursor::new(NOTIFICATION_WAV);
         let Ok(source) = Decoder::new(cursor) else {
-            eprintln!("Failed to decode notification sound");
+            log::warn!("Failed to decode notification sound");
             return;
         };
 

@@ -3,6 +3,7 @@
 mod chunking;
 mod config;
 mod crypto;
+mod logging;
 mod ntfy;
 mod payload;
 mod payload_store;
@@ -78,6 +79,11 @@ async fn dismiss_notification(notification_id: String, encrypted: Option<bool>) 
 }
 
 fn main() {
+    // First statement: nothing before this point can be diagnosed, and
+    // #![windows_subsystem = "windows"] means stderr is not an option.
+    logging::init();
+    log::info!("HITL client {} starting", env!("CARGO_PKG_VERSION"));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(payload_store::PayloadStore::default())
