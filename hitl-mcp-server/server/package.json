@@ -44,11 +44,13 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "diff": "^5.2.2",
     "eventsource": "^2.0.2",
     "uuid": "^9.0.0"
   },
   "devDependencies": {
     "@jest/globals": "^29.7.0",
+    "@types/diff": "^5.2.3",
     "@types/eventsource": "^1.1.15",
     "@types/node": "^20.0.0",
     "@types/uuid": "^9.0.0",
