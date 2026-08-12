@@ -93,11 +93,10 @@ pub async fn subscribe_loop(app: AppHandle) {
         config.topic_id
     );
 
-    // Capture timestamp before cache poll so live subscription covers the gap
-    let since_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    // Monotonic, and started before the cache poll so the live subscription
+    // covers the gap. Deliberately not a wall-clock timestamp: ntfy resolves
+    // the relative `since` against its own clock, so ours never enters into it.
+    let started = std::time::Instant::now();
 
     // Phase 1: Poll all cached messages once, then process
     log::info!("Fetching cached messages to find pending questions...");
@@ -125,12 +124,13 @@ pub async fn subscribe_loop(app: AppHandle) {
     let mut state = LiveState {
         assembler: ChunkAssembler::new(),
         seen,
-        last_event_ts: since_ts,
+        started,
+        last_event_ts: None,
     };
     log::info!("Subscribing to live ntfy messages from {}", base_url);
 
     loop {
-        let live_url = format!("{}/json?since={}", base_url, state.last_event_ts);
+        let live_url = format!("{}/json?since={}", base_url, state.since_param());
         match subscribe_live(&app, &config, &live_url, &mut state).await {
             Ok(()) => log::warn!("ntfy stream ended, reconnecting in 5s..."),
             Err(e) => log::warn!("ntfy error: {}, reconnecting in 5s...", e),
@@ -295,8 +295,65 @@ impl SeenIds {
 struct LiveState {
     assembler: ChunkAssembler,
     seen: SeenIds,
-    /// Highest ntfy event time processed. Each reconnect resumes from here.
-    last_event_ts: u64,
+    /// When this client started subscribing. Monotonic, so it is unaffected by
+    /// an NTP correction or a suspend/resume.
+    started: std::time::Instant,
+    /// Highest event time actually observed — **ntfy's clock, never ours**.
+    /// `None` until an event arrives.
+    last_event_ts: Option<u64>,
+}
+
+impl LiveState {
+    /// The `since=` value for the next subscribe.
+    fn since_param(&self) -> String {
+        since_param(self.last_event_ts, self.started.elapsed().as_secs())
+    }
+
+    fn observe(&mut self, event_time: u64) {
+        if event_time == 0 {
+            return; // an event ntfy gave no time for tells us nothing
+        }
+        if self.last_event_ts.is_none_or(|ts| event_time > ts) {
+            self.last_event_ts = Some(event_time);
+        }
+    }
+}
+
+/// How far before the subscription's start to resume from, covering the cache
+/// poll that happens first.
+const RESUME_MARGIN_SECS: u64 = 10;
+
+/// Nothing older than the ntfy cache window is retrievable anyway.
+const RESUME_MAX_SECS: u64 = 12 * 60 * 60;
+
+/// Build the `since=` query value without ever mixing two clocks.
+///
+/// The old code seeded this from the **local** wall clock and then `max()`-ed
+/// it against ntfy's **server** timestamps. A laptop running five minutes fast
+/// pinned the value in the future permanently: every `max` kept the local seed,
+/// and on the first reconnect ntfy was asked for messages newer than a time
+/// that had not happened yet, so everything published during the disconnect was
+/// never delivered. Invisible until exactly the moment it mattered.
+///
+/// So: once an event has been seen, resume from that event's own server
+/// timestamp. Until then, hand ntfy a *relative* duration and let it resolve
+/// against the only clock that matters — its own.
+fn since_param(last_event_ts: Option<u64>, elapsed_secs: u64) -> String {
+    match last_event_ts {
+        Some(ts) => ts.to_string(),
+        None => format!("{}s", (elapsed_secs + RESUME_MARGIN_SECS).min(RESUME_MAX_SECS)),
+    }
+}
+
+/// Clip a string to `max_chars` characters without splitting one.
+///
+/// `String::truncate` counts bytes and panics if the cut lands inside a
+/// character. The strings clipped here are relay-supplied error bodies — a
+/// localized proxy error page is exactly the input that carries a multi-byte
+/// character, and the panic would land inside `submit_plan_review`, leaving the
+/// review window stuck on "submitting…" with the human's comments unrecoverable.
+fn clip_chars(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
 }
 
 /// The first 8 characters of an id, on a char boundary, prefixed for the window
@@ -439,7 +496,7 @@ async fn subscribe_live(
             if let Some(event) = parse_ntfy_event(&line) {
                 // Advance before dispatching: a message that fails to decode is
                 // still a message we do not want re-delivered on every retry.
-                state.last_event_ts = state.last_event_ts.max(event.time);
+                state.observe(event.time);
                 app.state::<tray::AppState>().mark_message();
 
                 if let Some((decrypted, was_encrypted)) = try_decrypt(&event.message, config) {
@@ -1486,8 +1543,7 @@ async fn publish_review_response(
         // Deliberately not parsed: an oversized header is answered by nginx
         // with HTML, not ntfy's {code,http,error,link} envelope, and a JSON
         // parse error on top of the real failure helps nobody.
-        let mut body = sent.text().await.unwrap_or_default();
-        body.truncate(200);
+        let body = clip_chars(&sent.text().await.unwrap_or_default(), 200);
         return Err(format!("ntfy attachment upload failed: {status} — {body}").into());
     }
 
@@ -1874,6 +1930,82 @@ mod tests {
 
     fn envelope(version: u32, msg_type: &str) -> VersionVerdict {
         version_verdict(version, msg_type)
+    }
+
+    #[test]
+    fn the_resume_point_never_mixes_the_local_clock_with_ntfys() {
+        // Before any event, resume is a duration ntfy resolves against its own
+        // clock — our wall clock never enters the request at all.
+        assert_eq!(since_param(None, 0), "10s");
+        assert_eq!(since_param(None, 5), "15s");
+
+        // Once an event has arrived, resume from its own server timestamp.
+        assert_eq!(since_param(Some(1_786_543_402), 9_999), "1786543402");
+    }
+
+    #[test]
+    fn a_fast_local_clock_cannot_pin_the_resume_point_in_the_future() {
+        // The defect: seeding from local wall-clock time and max()-ing against
+        // server timestamps. A laptop five minutes fast kept its own seed
+        // forever, so after a reconnect ntfy was asked for messages newer than
+        // a moment that had not happened yet — and everything published during
+        // the disconnect was never delivered.
+        let mut state = LiveState {
+            assembler: ChunkAssembler::new(),
+            seen: SeenIds::with_capacity(4),
+            started: std::time::Instant::now(),
+            last_event_ts: None,
+        };
+
+        // Server time, five minutes "behind" a fast local clock.
+        state.observe(1_786_543_000);
+        assert_eq!(state.since_param(), "1786543000");
+
+        // A later server event advances it; an earlier one does not rewind it.
+        state.observe(1_786_543_402);
+        assert_eq!(state.since_param(), "1786543402");
+        state.observe(1_786_542_000);
+        assert_eq!(state.since_param(), "1786543402");
+    }
+
+    #[test]
+    fn an_event_with_no_time_leaves_the_resume_point_alone() {
+        let mut state = LiveState {
+            assembler: ChunkAssembler::new(),
+            seen: SeenIds::with_capacity(4),
+            started: std::time::Instant::now(),
+            last_event_ts: None,
+        };
+
+        state.observe(0);
+        assert!(state.last_event_ts.is_none(), "0 is absence, not an instant");
+        assert!(state.since_param().ends_with('s'), "still relative");
+    }
+
+    #[test]
+    fn a_long_disconnect_before_any_event_is_capped_at_the_cache_window() {
+        // Nothing older than ntfy's cache is retrievable, so asking for a week
+        // only makes the URL silly.
+        assert_eq!(since_param(None, 7 * 24 * 3600), format!("{RESUME_MAX_SECS}s"));
+    }
+
+    #[test]
+    fn clipping_an_error_body_never_splits_a_character() {
+        // The sibling of the window_label byte-slice panic. A localized proxy
+        // error page with a multi-byte character straddling the cut used to
+        // panic inside submit_plan_review, stranding the review window on
+        // "submitting…" with the typed comments lost.
+        let multibyte = "é".repeat(300);
+        assert_eq!(clip_chars(&multibyte, 200).chars().count(), 200);
+
+        // A cut landing mid-character in byte space is the case that panicked.
+        let straddling = format!("{}日本語", "a".repeat(199));
+        assert_eq!(clip_chars(&straddling, 200), format!("{}日", "a".repeat(199)));
+
+        // Shorter than the limit, and empty, both pass through untouched.
+        assert_eq!(clip_chars("short", 200), "short");
+        assert_eq!(clip_chars("", 200), "");
+        assert_eq!(clip_chars("日本語", 0), "");
     }
 
     #[test]
