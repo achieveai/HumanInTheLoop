@@ -30,6 +30,19 @@ use crate::types::PlanPayloadRef;
 /// server/src/payload.ts.
 pub const PLAN_INLINE_THRESHOLD_BYTES: usize = 2048;
 
+/// Hard ceiling on what one payload may decompress to.
+///
+/// gzip reaches ~1000:1 on repetitive input, so an attachment of a few hundred
+/// KB can expand to hundreds of MB. `read_to_string` on a `GzDecoder` grows its
+/// buffer until the stream ends, so without a ceiling the decompressed size is
+/// chosen by whoever produced the payload, not by us.
+///
+/// The server refuses plans over `PLAN_MAX_BYTES` (1 MB, `plan-file.ts`) and a
+/// body carries at most a plan plus its diff, so 16 MB is roughly 8x the
+/// largest legitimate payload — wide enough that no real plan is ever refused,
+/// small enough that the worst case is a transient 16 MB allocation.
+pub const MAX_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
+
 /// Why a payload could not be turned back into its body.
 ///
 /// Each variant maps to a distinct thing the review window must say. A hash
@@ -43,6 +56,9 @@ pub enum PayloadError {
     Decrypt(String),
     Base64(String),
     Gunzip(String),
+    /// The payload decompresses to more than `MAX_DECOMPRESSED_BYTES`. Refused
+    /// without ever holding the full expansion.
+    TooLarge { limit: usize },
     HashMismatch { expected: String, actual: String },
     Json(String),
     /// The ref said `inline` but carried no `data`, or said `attachment` and
@@ -57,6 +73,10 @@ impl std::fmt::Display for PayloadError {
             PayloadError::Decrypt(e) => write!(f, "failed to decrypt plan payload: {e}"),
             PayloadError::Base64(e) => write!(f, "plan payload is not valid base64: {e}"),
             PayloadError::Gunzip(e) => write!(f, "failed to gunzip plan payload: {e}"),
+            PayloadError::TooLarge { limit } => write!(
+                f,
+                "plan payload decompresses to more than the {limit}-byte limit"
+            ),
             PayloadError::HashMismatch { expected, actual } => write!(
                 f,
                 "plan payload hash mismatch: expected {expected}, got {actual}"
@@ -131,6 +151,10 @@ pub fn encode_payload<T: Serialize>(
 ///
 /// Verifies `expected_hash` before decompressing, so a truncated or tampered
 /// body surfaces as a refusal rather than a half-rendered plan.
+///
+/// Decompression stops at `MAX_DECOMPRESSED_BYTES`. The hash covers the
+/// *compressed* plaintext, so it says nothing about how far that expands — a
+/// payload can hash correctly and still be a bomb.
 pub fn decode_payload<T: DeserializeOwned>(
     cipher: &str,
     key_hex: Option<&str>,
@@ -157,10 +181,23 @@ pub fn decode_payload<T: DeserializeOwned>(
         .decode(plaintext.as_bytes())
         .map_err(|e| PayloadError::Base64(e.to_string()))?;
 
-    let mut json = String::new();
+    // Read one byte past the ceiling: if it arrives, the payload is over the
+    // limit and we refuse without ever having held the full expansion.
+    let mut raw = Vec::new();
     GzDecoder::new(&gzipped[..])
-        .read_to_string(&mut json)
+        .take(MAX_DECOMPRESSED_BYTES as u64 + 1)
+        .read_to_end(&mut raw)
         .map_err(|e| PayloadError::Gunzip(e.to_string()))?;
+
+    if raw.len() > MAX_DECOMPRESSED_BYTES {
+        return Err(PayloadError::TooLarge {
+            limit: MAX_DECOMPRESSED_BYTES,
+        });
+    }
+
+    // Checked after the size test, so a bomb whose cut lands mid-character is
+    // still reported as oversized rather than as invalid UTF-8.
+    let json = String::from_utf8(raw).map_err(|e| PayloadError::Gunzip(e.to_string()))?;
 
     serde_json::from_str(&json).map_err(|e| PayloadError::Json(e.to_string()))
 }
@@ -282,6 +319,67 @@ mod tests {
             decode_payload::<PlanReviewBody>(&not_gzip, None, &sha256_hex(&not_gzip)).unwrap_err();
 
         assert!(matches!(err, PayloadError::Gunzip(_)), "{err}");
+    }
+
+    /// H4. The hash covers the *compressed* plaintext, so a payload can verify
+    /// perfectly and still expand without bound — `read_to_string` on a
+    /// `GzDecoder` grows until the stream ends. gzip reaches ~1000:1 on
+    /// repetitive input, so a few KB on the wire was hundreds of MB in memory.
+    #[test]
+    fn refuses_a_payload_that_expands_past_the_ceiling() {
+        let bomb = "a".repeat(MAX_DECOMPRESSED_BYTES + 1024);
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(bomb.as_bytes()).unwrap();
+        let gzipped = encoder.finish().unwrap();
+
+        let plaintext = BASE64.encode(&gzipped);
+        assert!(
+            plaintext.len() < 128 * 1024,
+            "the bomb should be small on the wire, was {} bytes",
+            plaintext.len()
+        );
+
+        // Hashes correctly — the refusal has to come from the size cap, not
+        // from integrity checking.
+        let err =
+            decode_payload::<PlanReviewBody>(&plaintext, None, &sha256_hex(&plaintext)).unwrap_err();
+
+        assert!(matches!(err, PayloadError::TooLarge { .. }), "{err}");
+    }
+
+    /// Pins the *reason* for the ceiling rather than the number: it has to stay
+    /// clear of the largest body the server can legitimately produce, so
+    /// tightening it fails here instead of turning real plans into refusals.
+    #[test]
+    fn the_decompression_ceiling_clears_the_largest_plan_the_server_can_send() {
+        // server/src/plan-file.ts PLAN_MAX_BYTES.
+        const PLAN_MAX_BYTES: usize = 1024 * 1024;
+        // A body carries a plan plus its diff, and JSON escaping can roughly
+        // double a pathological string.
+        let worst_case_body = PLAN_MAX_BYTES * 2 * 2;
+
+        assert!(
+            MAX_DECOMPRESSED_BYTES >= worst_case_body * 2,
+            "ceiling {} leaves no margin over a {}-byte worst-case body",
+            MAX_DECOMPRESSED_BYTES,
+            worst_case_body
+        );
+    }
+
+    #[test]
+    fn a_plan_at_the_servers_size_limit_still_round_trips() {
+        let content = "# Plan\n".to_string() + &"a line of plan text\n".repeat(55_000);
+        assert!(content.len() >= 1024 * 1024, "not actually a max-size plan");
+
+        let body = PlanReviewBody {
+            content: content.clone(),
+            diff: String::new(),
+        };
+        let encoded = encode_payload(&body, Some(KEY)).unwrap();
+        let back: PlanReviewBody =
+            decode_payload(&encoded.cipher, Some(KEY), &encoded.payload_ref.content_hash).unwrap();
+
+        assert_eq!(back.content, content);
     }
 
     // --- Cross-language fixture: produced by TypeScript, decoded here ---

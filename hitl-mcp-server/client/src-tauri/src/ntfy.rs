@@ -846,7 +846,10 @@ impl ReviewBodyError {
             ReviewBodyError::Payload(PayloadError::Decrypt(_)) => "decrypt",
             ReviewBodyError::Payload(PayloadError::MissingData) => "missing",
             ReviewBodyError::Payload(
-                PayloadError::Base64(_) | PayloadError::Gunzip(_) | PayloadError::Json(_),
+                PayloadError::Base64(_)
+                | PayloadError::Gunzip(_)
+                | PayloadError::Json(_)
+                | PayloadError::TooLarge { .. },
             ) => "corrupt",
         }
     }
@@ -2191,6 +2194,10 @@ mod tests {
             (ReviewBodyError::Payload(PayloadError::Gunzip("x".into())), "corrupt"),
             (ReviewBodyError::Payload(PayloadError::Base64("x".into())), "corrupt"),
             (ReviewBodyError::Payload(PayloadError::Json("x".into())), "corrupt"),
+            (
+                ReviewBodyError::Payload(PayloadError::TooLarge { limit: 1 }),
+                "corrupt",
+            ),
             (ReviewBodyError::Payload(PayloadError::MissingData), "missing"),
             (ReviewBodyError::NoAttachment, "missing"),
             (ReviewBodyError::Network("timeout".into()), "unavailable"),
