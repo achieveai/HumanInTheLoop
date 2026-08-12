@@ -2,6 +2,17 @@
 
 This repository contains the Human-in-the-Loop MCP Server implementation for enabling AI agents to request human input through interactive dialogs.
 
+## 🛠️ What Agents Can Do
+
+| Tool | Purpose |
+|---|---|
+| `AskUserQuestion` | Ask a question (or up to 4 at once) and block until a human answers on any of their devices |
+| `ReviewPlan` | Send a markdown plan for **line-anchored review** — the human comments on specific line ranges and returns a verdict; re-running it shows a diff against what they reviewed last time |
+| `Notify` | Push a status update to every device without blocking |
+| `setup` | Create the config and launch the tray client on this machine |
+
+Blocking calls emit progress heartbeats every 15 seconds, but **how long they may block is decided by your MCP host**: hosts that do not opt into `resetTimeoutOnProgress` cancel the request after the SDK default of 60 seconds. See [Blocking and host timeouts](./hitl-mcp-server/README.md#blocking-and-host-timeouts).
+
 ## 📦 Package Information
 
 The main package is available on npm as:
