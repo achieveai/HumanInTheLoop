@@ -11,7 +11,13 @@ import {
   AbortedWaitError,
   X_MESSAGE_MAX_BYTES,
 } from '../ntfy-transport.js';
-import type { HitlConfig, AnswerMessage, PlanReviewMessage } from '../types.js';
+import type {
+  HitlConfig,
+  AnswerMessage,
+  AnyHitlMessage,
+  PlanReviewMessage,
+  PlanReviewResponseMessage,
+} from '../types.js';
 import { PROTOCOL_VERSION } from '../types.js';
 
 const CONFIG: HitlConfig = {
@@ -475,7 +481,71 @@ describe('NtfyTransport', () => {
 
     await expect(wait).rejects.toThrow(/Transport closed/);
   });
+
+  it('gives a late second submission to the watcher, never to the winner (D-5)', async () => {
+    globalThis.fetch = jest.fn(async (url: unknown) => {
+      if (String(url).includes('poll=1')) return pollResponse([]);
+      return openStream([
+        reviewResponseEvent('review-1', 'resp-phone'),
+        reviewResponseEvent('review-1', 'resp-laptop'),
+      ]);
+    }) as unknown as typeof fetch;
+
+    transport = new NtfyTransport(CONFIG, FAST);
+    const seen: string[] = [];
+    const matches = (msg: AnyHitlMessage) =>
+      msg.type === 'plan_review_response' && msg.reviewId === 'review-1';
+
+    const stop = transport.watch('late:review-1', matches, (r) => seen.push(r.msg.messageId));
+    const winner = await transport.waitFor<PlanReviewResponseMessage>(
+      'plan_review_response:review-1',
+      matches
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    stop();
+
+    // The waiter consumes the first; only the loser reaches the watcher.
+    expect(winner.msg.messageId).toBe('resp-phone');
+    expect(seen).toEqual(['resp-laptop']);
+  });
+
+  it('stops delivering and drops its subscription hold once released', async () => {
+    let streamSignal: AbortSignal | undefined;
+    globalThis.fetch = jest.fn(async (url: unknown, init: unknown) => {
+      if (String(url).includes('poll=1')) return pollResponse([]);
+      streamSignal = (init as RequestInit).signal ?? undefined;
+      return openStream([]);
+    }) as unknown as typeof fetch;
+
+    transport = new NtfyTransport(CONFIG, FAST);
+    const stop = transport.watch('late:review-1', () => true, () => {});
+
+    // A watcher alone keeps the stream open — that is the point of holding it
+    // past the wait.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(streamSignal?.aborted).toBe(false);
+
+    stop();
+    stop(); // Idempotent: a double release must not unbalance the ref count.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(streamSignal?.aborted).toBe(true);
+  });
 });
+
+function reviewResponseEvent(reviewId: string, id: string, time = 1_700_000_000): string {
+  const msg: PlanReviewResponseMessage = {
+    type: 'plan_review_response',
+    messageId: id,
+    timestamp: 1_700_000_000_000,
+    protocolVersion: PROTOCOL_VERSION,
+    reviewId,
+    respondedFrom: 'Kay9',
+    verdict: 'approved',
+    snapshotHash: `sha256:${'b'.repeat(64)}`,
+    body: { kind: 'inline', contentHash: 'c'.repeat(64), contentLength: 12, data: 'PAYLOAD' },
+  };
+  return JSON.stringify({ id, time, event: 'message', message: JSON.stringify(msg) });
+}
 
 function planReviewMessage(): PlanReviewMessage {
   return {

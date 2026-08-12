@@ -47,6 +47,12 @@ const SERVER_NAME = 'hitl-mcp-server';
 /** Interval between progress notifications that keep a blocked MCP call alive. */
 const HEARTBEAT_INTERVAL_MS = 15_000;
 
+/**
+ * How long to keep listening for a second device's submission after a review
+ * has already been answered, so the loser is told rather than left hanging.
+ */
+const LATE_RESPONSE_WINDOW_MS = 45_000;
+
 /** Directory where the compiled server JS lives (used for relative binary paths). */
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -590,6 +596,26 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
     );
 
     const stopHeartbeat = this.startHeartbeat(extra);
+
+    // Watch for a second device submitting after the first one already won.
+    // Registered before the wait so there is no window in which a late
+    // response goes unnoticed; `watch` only sees what no waiter consumed, so
+    // the winning response never reaches it (D-5).
+    const stopWatchingLateResponses = this.transport.watch(
+      `late_response:${reviewId}`,
+      (msg) => msg.type === 'plan_review_response' && msg.reviewId === reviewId,
+      (received) => {
+        const late = received.msg as PlanReviewResponseMessage;
+        console.error(`Review ${reviewId} already resolved; telling ${late.respondedFrom} it was lost.`);
+        void this.publishAck(
+          reviewId,
+          late.messageId,
+          'lost',
+          'This review had already been submitted from another device.'
+        );
+      }
+    );
+
     try {
       await this.transport.publishPlan(
         reviewMsg,
@@ -603,8 +629,12 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
       );
 
       const result = await this.consumeReviewResponse(reviewMsg, response, attachment);
+      // Stay attached briefly so a submit that lost the race still gets told,
+      // rather than the losing client sitting on a 30 s ack timeout.
+      this.releaseLater(stopWatchingLateResponses);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (error) {
+      stopWatchingLateResponses();
       if (error instanceof McpError) throw error;
       console.error('ReviewPlan error:', error);
       throw new McpError(
@@ -618,6 +648,15 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
       this.outstandingReviews.delete(reviewId);
       this.transport.pending.clear(reviewId);
     }
+  }
+
+  /**
+   * Drop a subscription hold after the late-response window.
+   *
+   * The timer is unref'd so it can never be the reason the process stays alive.
+   */
+  private releaseLater(release: () => void): void {
+    setTimeout(release, LATE_RESPONSE_WINDOW_MS).unref?.();
   }
 
   /**

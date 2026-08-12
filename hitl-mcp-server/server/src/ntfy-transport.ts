@@ -300,6 +300,11 @@ interface Waiter {
   reject: (err: unknown) => void;
 }
 
+interface Watcher {
+  match: MessageMatcher;
+  handle: (received: ReceivedMessage) => void;
+}
+
 /** Cap on remembered messageIds. Only guards against a reconnect replaying events. */
 const SEEN_IDS_LIMIT = 512;
 
@@ -315,6 +320,7 @@ const SEEN_IDS_LIMIT = 512;
 export class NtfyTransport {
   private config: HitlConfig;
   private waiters = new Map<string, Waiter>();
+  private watchers = new Map<string, Watcher>();
   private subscriptionAbort: AbortController | null = null;
   private subscriptionRefs = 0;
   /** Unix seconds. Where a reconnect resumes from. */
@@ -574,6 +580,28 @@ export class NtfyTransport {
   }
 
   /**
+   * Observe matching messages without consuming them, until the returned
+   * function is called.
+   *
+   * Unlike a waiter, a watcher fires repeatedly and only sees what no waiter
+   * took — which is exactly the shape of "a second device submitted after the
+   * first one already won" (D-5). It holds the subscription open while
+   * registered.
+   */
+  watch(key: string, match: MessageMatcher, handle: (received: ReceivedMessage) => void): () => void {
+    this.watchers.set(key, { match, handle });
+    this.acquireSubscription();
+
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.watchers.delete(key);
+      this.releaseSubscription();
+    };
+  }
+
+  /**
    * Subscribe and wait for an answer to a specific question.
    *
    * A thin wrapper over waitFor so the shipping AskUserQuestion path behaves
@@ -686,6 +714,11 @@ export class NtfyTransport {
         return;
       }
     }
+
+    // Only what no waiter claimed reaches the watchers.
+    for (const watcher of [...this.watchers.values()]) {
+      if (watcher.match(received.msg)) watcher.handle(received);
+    }
   }
 
   /**
@@ -793,6 +826,7 @@ export class NtfyTransport {
     this.subscriptionAbort?.abort();
     this.subscriptionAbort = null;
     this.subscriptionRefs = 0;
+    this.watchers.clear();
 
     const waiters = [...this.waiters.values()];
     this.waiters.clear();
