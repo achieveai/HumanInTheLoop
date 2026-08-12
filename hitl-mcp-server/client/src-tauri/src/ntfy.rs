@@ -6,10 +6,12 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::chunking::ChunkAssembler;
 use crate::config::load_config;
 use crate::crypto;
+use crate::payload::{self, PayloadError};
+use crate::payload_store;
 use crate::types::{
     AnswerMessage, AttachmentRef, CancelReviewMessage, ChunkMessage, DismissNotificationMessage,
-    HitlConfig, MessageEnvelope, NotificationMessage, PlanReviewResponseMessage, QuestionMessage,
-    SUPPORTED_PROTOCOL_VERSION,
+    HitlConfig, MessageEnvelope, NotificationMessage, PlanPayloadRef, PlanReviewBody,
+    PlanReviewMessage, PlanReviewResponseMessage, QuestionMessage, SUPPORTED_PROTOCOL_VERSION,
 };
 
 /// How many recently-dispatched message IDs to remember for reconnect de-dup.
@@ -539,13 +541,33 @@ async fn dispatch_message(
         // The plan-review types. S0 lands the wire contract and this routing;
         // the handlers land with the review window. Named in the log so a
         // message arriving against a build without them is visible.
-        "plan_review" | "plan_review_ack" => log::warn!(
+        "plan_review_ack" => log::warn!(
             "Received {} {} (protocolVersion {}, {} payload) — no handler in this build",
             env.msg_type,
             env.message_id,
             env.version(),
             if attachment.is_some() { "attachment" } else { "inline" }
         ),
+
+        "plan_review" => match serde_json::from_str::<PlanReviewMessage>(raw) {
+            Ok(review) => {
+                if let Origin::Cache { answered_ids } = origin {
+                    if answered_ids.contains(&review.message_id) {
+                        return;
+                    }
+                    log::info!("Showing pending review from cache: {}", review.message_id);
+                } else {
+                    log::info!(
+                        "Received plan_review {} (revision {}, {})",
+                        review.message_id,
+                        review.revision,
+                        review.display_path
+                    );
+                }
+                handle_plan_review(app, config, &review, was_encrypted, attachment).await;
+            }
+            Err(e) => log::error!("plan_review {} parse failed: {}", env.message_id, e),
+        },
 
         // Somebody finished this review — possibly on another device.
         //
@@ -629,6 +651,237 @@ fn notify_review_window<T: serde::Serialize + Clone>(
     }
 }
 
+/// Why a plan body could not be produced for the review window.
+///
+/// Every variant has to reach the human as words. A review that renders as a
+/// blank window is indistinguishable from a client that is simply broken, and
+/// the agent is blocked on the other end either way.
+#[derive(Debug)]
+enum ReviewBodyError {
+    /// The attachment URL could not be fetched at all.
+    Network(String),
+    /// The reference said `attachment` but the ntfy event carried no metadata,
+    /// so there is nothing to fetch.
+    NoAttachment,
+    Payload(PayloadError),
+}
+
+impl ReviewBodyError {
+    /// Stable discriminant for the window's error panel. The strings are a
+    /// contract with `review.js`, not a log format.
+    fn kind(&self) -> &'static str {
+        match self {
+            ReviewBodyError::Network(_) => "unavailable",
+            ReviewBodyError::NoAttachment => "missing",
+            ReviewBodyError::Payload(PayloadError::Expired) => "expired",
+            ReviewBodyError::Payload(PayloadError::HashMismatch { .. }) => "hash_mismatch",
+            ReviewBodyError::Payload(PayloadError::Decrypt(_)) => "decrypt",
+            ReviewBodyError::Payload(PayloadError::MissingData) => "missing",
+            ReviewBodyError::Payload(
+                PayloadError::Base64(_) | PayloadError::Gunzip(_) | PayloadError::Json(_),
+            ) => "corrupt",
+        }
+    }
+}
+
+impl std::fmt::Display for ReviewBodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReviewBodyError::Network(e) => write!(f, "could not fetch the plan attachment: {e}"),
+            ReviewBodyError::NoAttachment => write!(
+                f,
+                "the plan says its body is an attachment but the message carried no attachment"
+            ),
+            ReviewBodyError::Payload(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Download an ntfy attachment as a string.
+///
+/// A 404 is the expected outcome, not an anomaly: ntfy expires attachments
+/// after 3 h but keeps messages for 12 h, and `show_pending_from_cache` polls
+/// `since=all` on every client start. Any review older than 3 h replays against
+/// a dead URL.
+async fn download_attachment(url: &str) -> Result<String, ReviewBodyError> {
+    let response = Client::new()
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| ReviewBodyError::Network(e.to_string()))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND
+        || response.status() == reqwest::StatusCode::GONE
+    {
+        return Err(ReviewBodyError::Payload(PayloadError::Expired));
+    }
+    if !response.status().is_success() {
+        return Err(ReviewBodyError::Network(format!(
+            "ntfy returned {}",
+            response.status()
+        )));
+    }
+
+    response
+        .text()
+        .await
+        .map_err(|e| ReviewBodyError::Network(e.to_string()))
+}
+
+/// Fetch (if needed), decrypt, gunzip and hash-verify a plan-review body.
+async fn download_and_decode(
+    body_ref: Option<&PlanPayloadRef>,
+    attachment: Option<&AttachmentRef>,
+    config: &HitlConfig,
+) -> Result<PlanReviewBody, ReviewBodyError> {
+    let body_ref = body_ref.ok_or(ReviewBodyError::Payload(PayloadError::MissingData))?;
+
+    let cipher = if body_ref.kind == "attachment" {
+        let attachment = attachment.ok_or(ReviewBodyError::NoAttachment)?;
+        download_attachment(&attachment.url).await?
+    } else {
+        body_ref
+            .data
+            .clone()
+            .ok_or(ReviewBodyError::Payload(PayloadError::MissingData))?
+    };
+
+    payload::decode_payload(cipher.trim(), config.encryption_key.as_deref(), &body_ref.content_hash)
+        .map_err(ReviewBodyError::Payload)
+}
+
+/// Resolve a plan-review body and raise its window.
+///
+/// The window opens either way. A failure to decode is rendered as a named
+/// state — "the plan expired, ask the agent to resend" — never as nothing.
+async fn handle_plan_review(
+    app: &AppHandle,
+    config: &HitlConfig,
+    review: &PlanReviewMessage,
+    was_encrypted: bool,
+    attachment: Option<AttachmentRef>,
+) {
+    let decoded =
+        download_and_decode(review.body.as_ref(), attachment.as_ref(), config).await;
+
+    if let Err(e) = &decoded {
+        log::warn!(
+            "plan_review {} body unavailable ({}): {}",
+            review.message_id,
+            e.kind(),
+            e
+        );
+    }
+
+    show_review(app, config, review, decoded, was_encrypted);
+}
+
+/// Build the JSON the review window reads via `take_window_payload`.
+///
+/// The wire message's `body` is a `PlanPayloadRef` describing where the payload
+/// lives; the window has no use for that, so it is replaced in place with the
+/// decoded `{content, diff}` — or with `null` plus a populated `_error`.
+fn review_window_payload(
+    review: &PlanReviewMessage,
+    decoded: &Result<PlanReviewBody, ReviewBodyError>,
+    was_encrypted: bool,
+    device_name: &str,
+) -> String {
+    let mut payload = serde_json::to_value(review).unwrap_or_default();
+
+    if let Some(obj) = payload.as_object_mut() {
+        match decoded {
+            Ok(body) => {
+                obj.insert("body".into(), serde_json::to_value(body).unwrap_or_default());
+                obj.insert("_error".into(), serde_json::Value::Null);
+            }
+            Err(e) => {
+                obj.insert("body".into(), serde_json::Value::Null);
+                obj.insert(
+                    "_error".into(),
+                    serde_json::json!({ "kind": e.kind(), "message": e.to_string() }),
+                );
+            }
+        }
+        obj.insert("_wasEncrypted".into(), serde_json::Value::Bool(was_encrypted));
+        obj.insert("_device".into(), serde_json::Value::String(device_name.to_string()));
+    }
+
+    serde_json::to_string(&payload).unwrap_or_default()
+}
+
+/// Create and show the review window for a plan.
+///
+/// Deliberately unlike `show_question`: a review is read for minutes, not
+/// glanced at, so it is large, decorated (which is what gives it find-in-page)
+/// and explicitly NOT always-on-top.
+fn show_review(
+    app: &AppHandle,
+    config: &HitlConfig,
+    review: &PlanReviewMessage,
+    decoded: Result<PlanReviewBody, ReviewBodyError>,
+    was_encrypted: bool,
+) {
+    let label = window_label("review", &review.message_id);
+
+    // The cache replay and the live stream overlap by design, so the same
+    // review can arrive twice. Raising the existing window is right; rebuilding
+    // it would discard whatever the human has already typed.
+    if let Some(window) = app.get_webview_window(&label) {
+        log::info!("Review window {} is already open", label);
+        let _ = crate::window_utils::show_window_no_activate(&window);
+        return;
+    }
+
+    if config.sound_enabled {
+        crate::sound::play_notification();
+    }
+
+    payload_store::put(
+        app,
+        &label,
+        review_window_payload(review, &decoded, was_encrypted, &config.device_name),
+    );
+
+    let title = if review.display_path.is_empty() {
+        "Plan review".to_string()
+    } else {
+        format!("Plan review — {}", review.display_path)
+    };
+
+    match tauri::WebviewWindowBuilder::new(
+        app,
+        &label,
+        tauri::WebviewUrl::App("review.html".into()),
+    )
+    .title(title)
+    .inner_size(1280.0, 900.0)
+    .min_inner_size(720.0, 520.0)
+    .center()
+    .resizable(true)
+    // Decorated and not on top, both opposite to show_question: a review window
+    // is worked in alongside an editor, and decorations are what give the
+    // webview its find-in-page.
+    .decorations(true)
+    .always_on_top(false)
+    .visible(false)
+    .focused(false)
+    .build()
+    {
+        Ok(window) => {
+            log::info!("Review window created: {}", label);
+            if let Err(e) = crate::window_utils::show_window_no_activate(&window) {
+                log::error!("Failed to show review window {}: {}", label, e);
+            }
+        }
+        Err(e) => {
+            // The payload would otherwise sit in the store forever.
+            app.state::<payload_store::PayloadStore>().take(&label);
+            log::error!("Failed to create review window: {}", e);
+        }
+    }
+}
+
 /// Show (or update) the notifications window for an incoming notification.
 fn show_notification(
     app: &AppHandle,
@@ -685,8 +938,12 @@ fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessag
 
     let question_json = serde_json::to_string(question).unwrap_or_default();
     let label = window_label("dialog", &question.message_id);
-    let encoded = urlencoding::encode(&question_json);
-    let url_str = format!("index.html?question={}&encrypted={}", encoded, encrypted);
+
+    // The whole question used to be URL-encoded into the query string, which
+    // does not survive a large payload and leaks content into anything that
+    // logs URLs. `encrypted` stays on the URL: it is a flag, not content.
+    payload_store::put(app, &label, question_json);
+    let url_str = format!("index.html?encrypted={}", encrypted);
 
     match tauri::WebviewWindowBuilder::new(
         app,
@@ -704,7 +961,10 @@ fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessag
     .build()
     {
         Ok(_) => log::info!("Dialog window created: {}", label),
-        Err(e) => log::error!("Failed to create dialog window: {}", e),
+        Err(e) => {
+            app.state::<payload_store::PayloadStore>().take(&label);
+            log::error!("Failed to create dialog window: {}", e);
+        }
     }
 }
 
@@ -930,5 +1190,163 @@ mod tests {
         );
 
         assert!(extract_answered_ids(&body, &HitlConfig::default()).contains("q-1"));
+    }
+
+    // --- Review window payload (W2.2 / W2.3 / C-2 / C-4) ---
+
+    fn a_review() -> PlanReviewMessage {
+        serde_json::from_str(
+            r#"{"type":"plan_review","messageId":"rev-12345678","timestamp":7,
+                "protocolVersion":2,"context":"c","summary":"s","displayPath":"docs/plan.md",
+                "planId":"p1","revision":2,"isNewPlan":false,"snapshotHash":"sha256:aa",
+                "body":{"kind":"attachment","contentHash":"bb","contentLength":9}}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn review_payload_replaces_the_body_ref_with_the_decoded_body() {
+        let decoded = Ok(PlanReviewBody {
+            content: "# Plan\nline two\n".to_string(),
+            diff: "@@ -1 +1 @@\n".to_string(),
+        });
+
+        let json: serde_json::Value =
+            serde_json::from_str(&review_window_payload(&a_review(), &decoded, true, "Kay9"))
+                .unwrap();
+
+        // The window has no use for a PlanPayloadRef; it needs the plan.
+        assert_eq!(json["body"]["content"], "# Plan\nline two\n");
+        assert_eq!(json["body"]["diff"], "@@ -1 +1 @@\n");
+        assert!(json["body"].get("contentHash").is_none());
+        assert_eq!(json["_error"], serde_json::Value::Null);
+        assert_eq!(json["_wasEncrypted"], true);
+        assert_eq!(json["_device"], "Kay9");
+        // Metadata the window renders around the plan must survive intact.
+        assert_eq!(json["revision"], 2);
+        assert_eq!(json["displayPath"], "docs/plan.md");
+        assert_eq!(json["snapshotHash"], "sha256:aa");
+    }
+
+    #[test]
+    fn review_payload_names_an_expired_attachment_rather_than_going_blank() {
+        // Guaranteed to happen: attachments live 3 h, messages 12 h, and the
+        // cache is replayed with since=all on every client start.
+        let decoded = Err(ReviewBodyError::Payload(PayloadError::Expired));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&review_window_payload(&a_review(), &decoded, true, "Kay9"))
+                .unwrap();
+
+        assert_eq!(json["body"], serde_json::Value::Null);
+        assert_eq!(json["_error"]["kind"], "expired");
+        assert!(!json["_error"]["message"].as_str().unwrap().is_empty());
+        // The window still gets everything it needs to say WHICH plan expired.
+        assert_eq!(json["displayPath"], "docs/plan.md");
+        assert_eq!(json["messageId"], "rev-12345678");
+    }
+
+    #[test]
+    fn review_body_error_kinds_are_distinct_and_stable() {
+        // These strings are a contract with review.js, not a log format.
+        let cases: Vec<(ReviewBodyError, &str)> = vec![
+            (ReviewBodyError::Payload(PayloadError::Expired), "expired"),
+            (
+                ReviewBodyError::Payload(PayloadError::HashMismatch {
+                    expected: "a".into(),
+                    actual: "b".into(),
+                }),
+                "hash_mismatch",
+            ),
+            (ReviewBodyError::Payload(PayloadError::Decrypt("x".into())), "decrypt"),
+            (ReviewBodyError::Payload(PayloadError::Gunzip("x".into())), "corrupt"),
+            (ReviewBodyError::Payload(PayloadError::Base64("x".into())), "corrupt"),
+            (ReviewBodyError::Payload(PayloadError::Json("x".into())), "corrupt"),
+            (ReviewBodyError::Payload(PayloadError::MissingData), "missing"),
+            (ReviewBodyError::NoAttachment, "missing"),
+            (ReviewBodyError::Network("timeout".into()), "unavailable"),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.kind(), expected, "{error}");
+            assert!(!error.to_string().is_empty(), "every state needs words");
+        }
+    }
+
+    #[tokio::test]
+    async fn decode_refuses_a_tampered_body_instead_of_rendering_half_a_plan() {
+        let body = PlanReviewBody {
+            content: "# Plan".to_string(),
+            diff: String::new(),
+        };
+        let encoded = payload::encode_payload(&body, None).unwrap();
+
+        let body_ref = PlanPayloadRef {
+            kind: "inline".to_string(),
+            data: Some(encoded.cipher.clone()),
+            content_hash: "0".repeat(64), // not the hash of anything we sent
+            content_length: encoded.payload_ref.content_length,
+        };
+
+        let err = download_and_decode(Some(&body_ref), None, &HitlConfig::default())
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.kind(), "hash_mismatch");
+    }
+
+    #[tokio::test]
+    async fn decode_reports_missing_data_rather_than_an_empty_plan() {
+        let config = HitlConfig::default();
+
+        // No body ref at all.
+        assert_eq!(
+            download_and_decode(None, None, &config).await.unwrap_err().kind(),
+            "missing"
+        );
+
+        // kind=inline but no data.
+        let no_data = PlanPayloadRef {
+            kind: "inline".to_string(),
+            data: None,
+            content_hash: String::new(),
+            content_length: 0,
+        };
+        assert_eq!(
+            download_and_decode(Some(&no_data), None, &config).await.unwrap_err().kind(),
+            "missing"
+        );
+
+        // kind=attachment but the event carried no attachment metadata.
+        let no_attachment = PlanPayloadRef {
+            kind: "attachment".to_string(),
+            data: None,
+            content_hash: String::new(),
+            content_length: 0,
+        };
+        assert_eq!(
+            download_and_decode(Some(&no_attachment), None, &config).await.unwrap_err().kind(),
+            "missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn decode_round_trips_an_inline_body() {
+        let body = PlanReviewBody {
+            content: "# Plan\r\nCRLF must survive\r\n".to_string(),
+            diff: "@@\n".to_string(),
+        };
+        let encoded = payload::encode_payload(&body, None).unwrap();
+
+        let decoded = download_and_decode(
+            Some(&encoded.payload_ref),
+            None,
+            &HitlConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(decoded.content, "# Plan\r\nCRLF must survive\r\n");
+        assert_eq!(decoded.diff, "@@\n");
     }
 }
