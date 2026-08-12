@@ -50,8 +50,13 @@ pub async fn subscribe_loop(app: AppHandle) {
     let answered_ids = extract_answered_ids(&cached_body, &config);
     log::info!("Found {} settled questions and reviews in cache", answered_ids.len());
 
+    // One de-dup set for both phases. The cache replay and the live stream
+    // overlap by design, so a question seen in the cache must not re-dispatch
+    // the moment the subscription opens.
+    let mut seen = SeenIds::with_capacity(SEEN_ID_CAPACITY);
+
     // Show any pending (unanswered) questions from cache
-    show_pending_from_cache(&app, &config, &cached_body, &answered_ids).await;
+    show_pending_from_cache(&app, &config, &cached_body, &answered_ids, &mut seen).await;
 
     // Phase 2: Subscribe to live messages (from just before cache poll to avoid gaps)
     //
@@ -64,7 +69,7 @@ pub async fn subscribe_loop(app: AppHandle) {
     // the group could never complete.
     let mut state = LiveState {
         assembler: ChunkAssembler::new(),
-        seen: SeenIds::with_capacity(SEEN_ID_CAPACITY),
+        seen,
         last_event_ts: since_ts,
     };
     log::info!("Subscribing to live ntfy messages from {}", base_url);
@@ -320,6 +325,7 @@ async fn show_pending_from_cache(
     config: &HitlConfig,
     body: &str,
     answered_ids: &HashSet<String>,
+    seen: &mut SeenIds,
 ) {
     if body.is_empty() { return; }
 
@@ -330,7 +336,7 @@ async fn show_pending_from_cache(
             &decrypted,
             was_encrypted,
             attachment,
-            Origin::Cache { answered_ids },
+            Origin::Cache { answered_ids, seen },
         )
         .await;
     }
@@ -416,7 +422,25 @@ enum Origin<'a> {
     /// `seen` suppresses the redelivery a reconnect necessarily produces:
     /// `since=` is inclusive, so the boundary event arrives again every time.
     Live { seen: &'a mut SeenIds },
-    Cache { answered_ids: &'a HashSet<String> },
+    Cache {
+        answered_ids: &'a HashSet<String>,
+        seen: &'a mut SeenIds,
+    },
+}
+
+impl Origin<'_> {
+    /// The de-dup set, whichever origin this is.
+    ///
+    /// Both arms carry the same set. De-dup that depended on which origin a
+    /// message arrived from left the cache path with none at all — and the
+    /// cache can hold the same messageId twice, because a publish whose
+    /// response was lost gets retried against an ntfy that already stored it.
+    fn seen(&mut self) -> &mut SeenIds {
+        match self {
+            Origin::Live { seen } => seen,
+            Origin::Cache { seen, .. } => seen,
+        }
+    }
 }
 
 /// Route one decrypted, fully-reassembled message to its handler.
@@ -441,15 +465,13 @@ async fn dispatch_message(
         }
     };
 
-    if let Origin::Live { ref mut seen } = origin {
-        if !seen.insert(&env.message_id) {
-            log::debug!(
-                "Skipping {} {} — already dispatched this run",
-                env.msg_type,
-                env.message_id
-            );
-            return;
-        }
+    if !origin.seen().insert(&env.message_id) {
+        log::debug!(
+            "Skipping {} {} — already dispatched this run",
+            env.msg_type,
+            env.message_id
+        );
+        return;
     }
 
     match version_verdict(env.version(), &env.msg_type) {
@@ -482,7 +504,7 @@ async fn dispatch_message(
     match env.msg_type.as_str() {
         "question" => match serde_json::from_str::<QuestionMessage>(raw) {
             Ok(question) => {
-                if let Origin::Cache { answered_ids } = origin {
+                if let Origin::Cache { answered_ids, .. } = origin {
                     if answered_ids.contains(&question.message_id) {
                         return;
                     }
@@ -572,7 +594,7 @@ async fn dispatch_message(
 
         "plan_review" => match serde_json::from_str::<PlanReviewMessage>(raw) {
             Ok(review) => {
-                if let Origin::Cache { answered_ids } = origin {
+                if let Origin::Cache { answered_ids, .. } = origin {
                     if answered_ids.contains(&review.message_id) {
                         return;
                     }
@@ -1102,12 +1124,26 @@ fn show_notification(
 
 /// Create and show a dialog window for a question.
 fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessage, encrypted: bool) {
+    let label = window_label("dialog", &question.message_id);
+
+    // The same reasoning as show_review, and it applies just as hard here: the
+    // cache replay and the live stream overlap by design, and the cache itself
+    // can hold the same messageId twice. Rebuilding is not merely wasteful —
+    // the failed build's cleanup below would take the payload back out of the
+    // store while the first window's webview is still loading and about to
+    // read it, leaving a permanent "could not load the question" panel on a
+    // question nothing can now answer.
+    if let Some(window) = app.get_webview_window(&label) {
+        log::info!("Dialog window {} is already open", label);
+        let _ = crate::window_utils::show_window_no_activate(&window);
+        return;
+    }
+
     if config.sound_enabled {
         crate::sound::play_notification();
     }
 
     let question_json = serde_json::to_string(question).unwrap_or_default();
-    let label = window_label("dialog", &question.message_id);
 
     // The whole question used to be URL-encoded into the query string, which
     // does not survive a large payload and leaks content into anything that
@@ -1772,6 +1808,39 @@ mod tests {
 
     fn envelope(version: u32, msg_type: &str) -> VersionVerdict {
         version_verdict(version, msg_type)
+    }
+
+    #[test]
+    fn a_duplicate_message_is_dispatched_once_whichever_origin_it_arrives_from() {
+        // The shipping AskUserQuestion break. De-dup used to apply only to the
+        // live stream, so two identical events in the ntfy cache produced two
+        // synchronous show_question calls microseconds apart. The second one's
+        // failed window build tore the payload back out of the store while the
+        // first window's webview was still loading — leaving a dead dialog on
+        // a question nothing could then answer.
+        let mut seen = SeenIds::with_capacity(8);
+        let answered = HashSet::new();
+
+        {
+            let mut cache = Origin::Cache {
+                answered_ids: &answered,
+                seen: &mut seen,
+            };
+            assert!(cache.seen().insert("q-1"), "first sighting dispatches");
+            assert!(
+                !cache.seen().insert("q-1"),
+                "a duplicate inside the cache must not dispatch twice"
+            );
+        }
+
+        // Same set carries into the live phase: the cache replay and the
+        // subscription overlap by design, so the handover must not re-dispatch.
+        let mut live = Origin::Live { seen: &mut seen };
+        assert!(
+            !live.seen().insert("q-1"),
+            "the cache/live overlap must not re-dispatch"
+        );
+        assert!(live.seen().insert("q-2"), "an unrelated message still dispatches");
     }
 
     #[test]
