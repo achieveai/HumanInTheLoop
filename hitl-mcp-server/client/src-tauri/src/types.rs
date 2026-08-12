@@ -531,6 +531,33 @@ mod tests {
     }
 
     #[test]
+    fn question_message_deserializes_when_timeout_is_absent() {
+        // The server used to publish `timeout: 3600000` on every question
+        // message; that field was removed. Every v2.9.6 client already
+        // installed in the field must still parse a question that omits the
+        // key entirely, or the popup silently never appears (the same class
+        // of failure this module already pins tolerance fixes for). This
+        // guarantee rests entirely on `timeout` staying `Option<u64>` — pin
+        // it so a change back to a required `u64` breaks here, not silently
+        // in the field.
+        let raw = r#"{
+            "type": "question",
+            "messageId": "21ba33d7-08a8-4761-9abf-5f4e6ba364b1",
+            "timestamp": 1,
+            "repo": null,
+            "context": "Hetzner FX reconciliation",
+            "question": "Proceed with the migration?",
+            "options": [{"label": "Yes", "value": "yes"}],
+            "allowMultiple": false,
+            "allowOther": true
+        }"#;
+
+        let msg: QuestionMessage =
+            serde_json::from_str(raw).expect("must tolerate a question with no timeout key");
+        assert_eq!(msg.timeout, None);
+    }
+
+    #[test]
     fn question_message_deserializes_when_option_omits_value_field() {
         // Real payload shape: an agent calls the tool the way it calls the
         // built-in AskUserQuestion (which has no `value` field), so each option
