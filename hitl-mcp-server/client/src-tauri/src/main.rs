@@ -4,6 +4,8 @@ mod chunking;
 mod config;
 mod crypto;
 mod ntfy;
+mod payload;
+mod payload_store;
 mod sound;
 mod tray;
 mod types;
@@ -78,7 +80,8 @@ async fn dismiss_notification(notification_id: String, encrypted: Option<bool>) 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![submit_answer, dismiss_notification, show_no_activate])
+        .manage(payload_store::PayloadStore::default())
+        .invoke_handler(tauri::generate_handler![submit_answer, dismiss_notification, show_no_activate, payload_store::take_window_payload])
         .setup(|app| {
             // Setup system tray
             tray::setup_tray(app.handle())?;
