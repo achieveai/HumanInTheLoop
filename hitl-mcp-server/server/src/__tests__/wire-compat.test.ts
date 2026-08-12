@@ -1,6 +1,10 @@
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 import { randomBytes } from 'crypto';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import path from 'path';
 import { NtfyTransport } from '../ntfy-transport.js';
+import { HumanInTheLoopServer } from '../mcp-server.js';
 import { decrypt, isEncryptedEnvelope } from '../crypto.js';
 import type {
   QuestionMessage,
@@ -21,12 +25,16 @@ import type {
  * So: no protocolVersion in their emitted JSON, no gzip, no re-encoding.
  *
  * `answer` and `dismiss_notification` travel the other way in production — the
- * Rust client publishes them and this server only parses them — so their
- * *emitted* format is the client's contract, pinned in
- * `client/src-tauri/src/types.rs`. They are still published through
- * `NtfyTransport.publish` here, because what this file guards is that `publish`
- * is transparent for every member of the `HitlMessage` union, not just the two
- * the server happens to send.
+ * Rust client publishes them and this server only parses them. They are still
+ * published through `NtfyTransport.publish` here, because what this file guards
+ * is that `publish` is transparent for every member of the `HitlMessage` union,
+ * not just the two the server happens to send.
+ *
+ * Their *emitted* bytes are not pinned anywhere. `types.rs` pins how all four
+ * shapes deserialize; `publish_answer` / `publish_dismiss_notification` in
+ * `ntfy.rs` call `serde_json::to_string` with no golden-byte test near them.
+ * That gap belongs in `client/src-tauri/`, not here — do not read this file as
+ * covering it.
  */
 const CONFIG: HitlConfig = {
   topicId: 'topic-under-test',
@@ -217,5 +225,98 @@ describe('shipping message wire format', () => {
       expect(JSON.parse(body).type).toBe('chunk');
       expect(JSON.parse(body).groupId).toBe(huge.messageId);
     }
+  });
+});
+
+/**
+ * The tests above hand `publish` a finished message, so they pin serialization.
+ * They cannot see a field dropped where the message is *built* — which is where
+ * `timeout` was actually lost (`mcp-server.ts:424`). The annotation on
+ * `questionMsg` makes a missing *required* field a compile error, so the live
+ * gap is optional fields, and `timeout` was optional.
+ *
+ * This drives the real AskUserQuestion path and compares against the same
+ * `GOLDEN_QUESTION` literal. There is deliberately no second copy of the bytes.
+ */
+describe('question construction', () => {
+  const realFetch = globalThis.fetch;
+  const originalHome = process.env.HITL_HOME;
+  let home: string;
+  let bodies: string[];
+  let server: HumanInTheLoopServer;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), 'hitl-wire-compat-'));
+    process.env.HITL_HOME = home;
+
+    bodies = [];
+    globalThis.fetch = jest.fn(async (_url: unknown, init: unknown) => {
+      bodies.push((init as { body: string }).body);
+      return { ok: true, status: 200, statusText: 'OK' } as Response;
+    }) as unknown as typeof fetch;
+
+    server = new HumanInTheLoopServer(CONFIG);
+    // Not the subject here, and there is no client binary in a temp home.
+    (server as unknown as { requireClient: () => void }).requireClient = () => {};
+  });
+
+  afterEach(() => {
+    (server as unknown as { transport: { close: () => void } }).transport.close();
+    globalThis.fetch = realFetch;
+    if (originalHome === undefined) delete process.env.HITL_HOME;
+    else process.env.HITL_HOME = originalHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it('builds a question whose bytes are the frozen bytes', async () => {
+    // The tool handler is registered on the SDK Server rather than exposed as a
+    // method, so this reaches for it directly. An in-memory client pair would
+    // be the public route, but it also means a 60 s SDK request timeout with
+    // nothing to cancel it.
+    const handlers = (
+      server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
+    ).server._requestHandlers;
+    const callTool = handlers.get('tools/call') as (
+      req: unknown,
+      extra: unknown
+    ) => Promise<unknown>;
+
+    // Aborted up front: the publish happens before the wait, so the bytes are
+    // captured and then `waitForAnswer` rejects instead of parking forever.
+    await expect(
+      callTool(
+        {
+          method: 'tools/call',
+          params: {
+            name: 'AskUserQuestion',
+            arguments: {
+              context: 'ctx',
+              question: 'Proceed?',
+              options: [{ label: 'Yes', value: 'yes' }],
+              allowMultiple: false,
+              allowOther: true,
+            },
+          },
+        },
+        { signal: AbortSignal.abort() }
+      )
+    ).rejects.toThrow();
+
+    expect(bodies).toHaveLength(1);
+
+    // Three values cannot be frozen — a uuid, a clock reading, and whatever
+    // repo the suite happens to run in. Substituting them *into the golden
+    // literal* keeps the comparison over the whole byte string, so a dropped,
+    // added or reordered field still fails.
+    const emitted = bodies[0];
+    const live = JSON.parse(emitted) as { messageId: string; timestamp: number; repo: unknown };
+    const expected = GOLDEN_QUESTION.replace(
+      '"21ba33d7-08a8-4761-9abf-5f4e6ba364b1"',
+      JSON.stringify(live.messageId)
+    )
+      .replace('1700000000000', String(live.timestamp))
+      .replace('"repo":null', `"repo":${JSON.stringify(live.repo)}`);
+
+    expect(emitted).toBe(expected);
   });
 });
