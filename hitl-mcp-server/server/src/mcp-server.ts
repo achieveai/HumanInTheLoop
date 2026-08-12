@@ -10,6 +10,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
+import { realpathSync } from 'fs';
 import path from 'path';
 import type {
   QuestionMessage,
@@ -24,6 +25,7 @@ import type {
   PlanReviewResponseBody,
   PlanReviewAckMessage,
   CancelReviewMessage,
+  HitlConfig,
 } from './types.js';
 import { PROTOCOL_VERSION } from './types.js';
 import { NtfyTransport, AttachmentExpiredError } from './ntfy-transport.js';
@@ -64,14 +66,17 @@ function describeError(err: unknown): string {
 /** The SDK's per-request context: progress token, sendNotification, abort signal. */
 type RequestExtra = Parameters<Parameters<Server['setRequestHandler']>[1]>[1];
 
-class HumanInTheLoopServer {
+export class HumanInTheLoopServer {
   private server: Server;
   private transport: NtfyTransport;
-  private config = loadConfig();
+  private config: HitlConfig;
   /** reviewIds still waiting on a human, so a graceful exit can release them (D-3). */
   private outstandingReviews = new Set<string>();
 
-  constructor() {
+  /** `config` is injectable so a test can construct a server without a real ~/.hitl. */
+  constructor(config: HitlConfig = loadConfig()) {
+    this.config = config;
+
     this.server = new Server(
       { name: SERVER_NAME, version: SERVER_VERSION },
       { capabilities: { tools: {} } }
@@ -760,7 +765,8 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
    * to is a permanent silent hang — the agent blocks and the human never sees a
    * window to explain why (A-10).
    */
-  private requireClient(): void {    const result = ensureClientRunning(SERVER_DIR);
+  private requireClient(): void {
+    const result = ensureClientRunning(SERVER_DIR);
     if (!result.ok) {
       throw new McpError(
         ErrorCode.InternalError,
@@ -849,8 +855,29 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
   }
 }
 
-const server = new HumanInTheLoopServer();
-server.run().catch((error) => {
-  console.error('Server error:', error);
-  process.exit(1);
-});
+/**
+ * True when this file is what node was asked to run, rather than something
+ * another module imported.
+ *
+ * Compared through realpath because npm installs the `bin` entry as a symlink:
+ * `process.argv[1]` is then the link in `node_modules/.bin`, not this file. If
+ * the comparison cannot be made at all we boot — failing to start a server
+ * someone asked for is far worse than starting one nobody wanted.
+ */
+function isDirectlyExecuted(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return true;
+  }
+}
+
+if (isDirectlyExecuted()) {
+  const server = new HumanInTheLoopServer();
+  server.run().catch((error) => {
+    console.error('Server error:', error);
+    process.exit(1);
+  });
+}
