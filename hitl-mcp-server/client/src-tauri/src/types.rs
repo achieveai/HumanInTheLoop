@@ -534,6 +534,39 @@ mod tests {
     }
 
     #[test]
+    fn envelope_routes_every_shipping_message_shape_as_version_1() {
+        // The four types that predate protocolVersion must keep flowing through
+        // the envelope-first gate untouched. A new server that changed their
+        // wire format would decrypt fine on an installed client, fail every
+        // parse, and hang the agent forever — so this pins the shapes we know
+        // are on the wire today, including the three that already caused
+        // silent drops (2.9.2, 2.9.5, 2.9.6).
+        let shipping = [
+            (r#"{"type":"question","messageId":"q1","timestamp":1,"repo":null,"context":"c",
+                 "question":"?","options":[],"allowMultiple":false,"allowOther":true}"#, "question"),
+            (r#"{"type":"answer","messageId":"a1","questionId":"q1","timestamp":1,
+                 "respondedFrom":"laptop","selectedValues":["yes"],"skipped":false}"#, "answer"),
+            (r#"{"type":"notification","messageId":"n1","timestamp":1,"title":"t","body":"b"}"#,
+             "notification"),
+            (r#"{"type":"dismiss_notification","messageId":"d1","timestamp":1,
+                 "notificationId":"n1","dismissedFrom":"phone"}"#, "dismiss_notification"),
+            (r#"{"type":"chunk","messageId":"c1-chunk-0","timestamp":1,"groupId":"c1",
+                 "index":0,"total":2,"data":"eyJ0"}"#, "chunk"),
+        ];
+
+        for (raw, expected_type) in shipping {
+            let env: MessageEnvelope = serde_json::from_str(raw)
+                .unwrap_or_else(|e| panic!("shipping {expected_type} must parse as an envelope: {e}"));
+            assert_eq!(env.msg_type, expected_type);
+            assert_eq!(env.protocol_version, None, "{expected_type} must not carry a version");
+            assert!(
+                env.version() <= SUPPORTED_PROTOCOL_VERSION,
+                "{expected_type} must not trip the upgrade-required branch"
+            );
+        }
+    }
+
+    #[test]
     fn envelope_treats_an_absent_protocol_version_as_1() {
         // Every shipping message looks like this. It must never trip the
         // "too new, upgrade required" branch.
