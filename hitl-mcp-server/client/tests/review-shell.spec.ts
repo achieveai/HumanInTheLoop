@@ -403,4 +403,36 @@ test.describe('Draft restore and clear', () => {
     await expect(page.locator('.success-title')).toHaveText('Plan approved');
     await expect(page.locator('.success-note')).toContainText('could not be cleared');
   });
+
+  test('a draft written by one window is restored by the next, unchanged', async ({ page }) => {
+    // The real round trip. The two ends are separate code paths — currentDraft()
+    // writes and restoreDraft() reads — so injecting a hand-written fixture
+    // would not catch the two drifting apart. This feeds the actual saved
+    // object back in.
+    await stubTauri(page, { payload: samplePlan() });
+    await page.goto('/review.html');
+
+    await page.locator('#overall-feedback').fill('half-finished thought');
+    await page.locator('.diff-row[data-side="new"][data-line="3"]').click();
+    await page.locator('#comment-input').fill('come back to this');
+    await page.locator('#comment-add').click();
+
+    const written = await page.evaluate(() =>
+      (window as any).__calls.filter((c: any) => c.cmd === 'save_review_draft').pop().args.draft);
+    expect(written.inlineComments).toEqual([
+      { path: 'docs/plan.md', startLine: 3, endLine: 3, side: 'new', comment: 'come back to this' },
+    ]);
+
+    // Close the window and open a new one carrying exactly what was saved.
+    await stubTauri(page, { payload: samplePlan({ _draft: written }) });
+    await page.goto('/review.html');
+
+    await expect(page.locator('#overall-feedback')).toHaveValue('half-finished thought');
+    await expect(page.locator('.comment-card-list .comment-card-body')).toHaveText('come back to this');
+    // Same hash, so nothing was dropped and there is nothing to warn about.
+    await expect(page.locator('#review-error')).toBeHidden();
+    // And the anchor still points where it did.
+    await expect(page.locator('.diff-row[data-side="new"][data-line="3"]'))
+      .toHaveAttribute('aria-describedby', /comment-/);
+  });
 });
