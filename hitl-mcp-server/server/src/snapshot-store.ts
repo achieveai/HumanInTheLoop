@@ -1,4 +1,4 @@
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, unlinkSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
@@ -196,14 +196,62 @@ export function recordRevision(identity: PlanIdentity, content: string): Recorde
  * `renameSync` maps to MoveFileEx with MOVEFILE_REPLACE_EXISTING on Windows, so
  * replacing an existing destination is atomic there too. The temp file is
  * removed on failure so a full disk cannot leave debris behind.
+ *
+ * The temp name must be unique per write, not per target. A shared name lets a
+ * second writer append into the first one's half-written file and then rename
+ * the torn result into place — which is precisely the corruption this function
+ * claims to prevent, and it is reproducible with two concurrent writers.
+ *
+ * Rename can also fail with EPERM on Windows when another process has the
+ * destination open for reading, which is ordinary here: every ReviewPlan reads
+ * `latest.json`. That is transient, so `renameWithRetry` absorbs it.
  */
 function writeAtomic(file: string, contents: string): void {
-  const tmp = `${file}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   try {
     writeFileSync(tmp, contents, { encoding: 'utf8', mode: FILE_MODE });
-    renameSync(tmp, file);
+    renameWithRetry(tmp, file);
   } catch (err) {
     try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
     throw err;
   }
+}
+
+/**
+ * Rename, tolerating Windows sharing violations.
+ *
+ * `MoveFileEx` fails with ERROR_ACCESS_DENIED (EPERM) while another process
+ * holds the destination open, and every ReviewPlan reads `latest.json`, so this
+ * collides in ordinary use rather than only under stress. It is transient, so
+ * it is retried with jitter — without the jitter two writers that collided once
+ * retry in lockstep and collide again. Anything that is not a sharing violation
+ * is a real failure and is raised immediately.
+ */
+const RENAME_RETRY_BUDGET_MS = 5_000;
+
+function renameWithRetry(from: string, to: string): void {
+  const started = Date.now();
+  let delay = 2;
+  for (;;) {
+    try {
+      renameSync(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      const transient = code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
+      if (!transient || Date.now() - started >= RENAME_RETRY_BUDGET_MS) throw err;
+      sleepSync(delay + Math.floor(Math.random() * delay));
+      delay = Math.min(delay * 2, 250);
+    }
+  }
+}
+
+/**
+ * Block for `ms`, without an event-loop turn.
+ *
+ * The whole store is synchronous so that a snapshot is durable before the
+ * caller can act on it; a promise here would let a second write interleave.
+ */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }

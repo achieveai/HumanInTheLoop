@@ -1,8 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { execSync } from 'child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, realpathSync } from 'fs';
+import { execSync, spawn } from 'child_process';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  realpathSync,
+  existsSync,
+  chmodSync,
+} from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import {
   resolvePlanIdentity,
   recordRevision,
@@ -141,14 +151,90 @@ describe('snapshot store', () => {
     const latestFile = path.join(identity.dir, 'latest.json');
     const before = readFileSync(latestFile, 'utf8');
 
-    // A directory where the temp file must go makes writeFileSync fail mid-record.
-    mkdirSync(`${latestFile}.tmp`, { recursive: true });
-    expect(() => recordRevision(identity, 'next\n')).toThrow();
-    rmSync(`${latestFile}.tmp`, { recursive: true, force: true });
+    // Deny the write the way each platform actually denies it: POSIX checks
+    // the directory when the temp file is created, Windows checks the
+    // destination when the rename tries to replace it.
+    const onWindows = process.platform === 'win32';
+    const deny = () =>
+      onWindows ? chmodSync(latestFile, 0o444) : chmodSync(identity.dir, 0o500);
+    const allow = () =>
+      onWindows ? chmodSync(latestFile, 0o666) : chmodSync(identity.dir, 0o700);
+
+    deny();
+    try {
+      expect(() => recordRevision(identity, 'next\n')).toThrow();
+    } finally {
+      allow();
+    }
 
     expect(readFileSync(latestFile, 'utf8')).toBe(before);
     expect(readLatest(identity)?.revision).toBe(1);
   });
+
+  it('never renames a torn latest.json into place under concurrent writers (C2)', async () => {
+    const planPath = planAt(work);
+    const identity = resolvePlanIdentity(planPath);
+    recordRevision(identity, 'seed\n');
+
+    // Two real processes: the temp file used to be named after its target, and
+    // nothing but a distinct name keeps one writer out of the other's
+    // half-written file. Reading between writes is what catches a tear.
+    const storePath = path.resolve(process.cwd(), 'src/snapshot-store.ts');
+    expect(existsSync(storePath)).toBe(true);
+
+    const worker = `
+      const store = await import(${JSON.stringify(pathToFileURL(storePath).href)});
+      const identity = store.resolvePlanIdentity(${JSON.stringify(planPath)});
+      for (let i = 0; i < 150; i++) {
+        store.recordRevision(identity, 'writer-' + process.argv[2] + '-' + i + '\\n');
+      }
+    `;
+    const spawnWriter = (tag: string) =>
+      spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', worker, tag], {
+        cwd: process.cwd(),
+        env: { ...process.env, HITL_HOME: home },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+
+    const latestFile = path.join(identity.dir, 'latest.json');
+    const writers = [spawnWriter('a'), spawnWriter('b')];
+    const stderr: string[] = [];
+    writers.forEach((w) => w.stderr?.on('data', (d: Buffer) => stderr.push(d.toString())));
+
+    let running = writers.length;
+    const finished = Promise.all(
+      writers.map(
+        (w) => new Promise<void>((resolve) => w.on('exit', () => { running--; resolve(); }))
+      )
+    );
+
+    const torn: string[] = [];
+    const deadline = Date.now() + 30_000;
+    while (running > 0 && Date.now() < deadline) {
+      try {
+        const raw = readFileSync(latestFile, 'utf8');
+        const parsed = JSON.parse(raw) as { digest?: unknown; revision?: unknown };
+        if (typeof parsed.digest !== 'string' || typeof parsed.revision !== 'number') torn.push(raw);
+      } catch (err) {
+        // The pointer is replaced, never removed, so even ENOENT would be a
+        // tear. EPERM is Windows' transient sharing violation on the reader.
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') torn.push(String(err));
+      }
+      // A 1 ms pause between reads, not a tight loop. On Windows a reader that
+      // reopens the destination immediately and forever starves the rename no
+      // matter how long the retry budget is — that measures the OS, not this
+      // code. Real readers are occasional; tearing is still caught because the
+      // window is wide compared to a millisecond.
+      await new Promise((r) => setTimeout(r, 1));
+    }
+
+    writers.forEach((w) => w.kill());
+    await finished;
+
+    expect(stderr.join('')).toBe('');
+    expect(torn).toEqual([]);
+  }, 60_000);
 
   it('rejects a corrupt latest.json instead of trusting it', () => {
     const identity = resolvePlanIdentity(planAt(work));

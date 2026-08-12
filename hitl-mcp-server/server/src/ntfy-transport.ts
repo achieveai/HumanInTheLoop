@@ -237,9 +237,15 @@ export class PendingStore {
    * Find a still-unanswered review of the same plan at the same content hash,
    * left behind by this or an earlier process. Reusing its reviewId means a
    * review window that is still open on the human's device resolves this call.
+   *
+   * Entries this process is *currently* waiting on are excluded. Those are not
+   * abandoned work to resume, they are a concurrent call — handing back its
+   * reviewId would point two live waits at one response.
    */
   findResumableReview(planId: string, snapshotHash: string): PendingEntry | undefined {
+    const stillWaiting = new Set(this.entries.map((e) => e.id));
     for (const entry of this.readAll()) {
+      if (stillWaiting.has(entry.id)) continue;
       if (entry.kind === 'plan_review' && entry.planId === planId && entry.snapshotHash === snapshotHash) {
         return entry;
       }
@@ -295,18 +301,43 @@ export interface ReceivedMessage<T extends AnyHitlMessage = AnyHitlMessage> {
 export type MessageMatcher = (msg: AnyHitlMessage) => boolean;
 
 interface Waiter {
+  /** Only for diagnostics; two waiters may legitimately share one. */
+  key: string;
   match: MessageMatcher;
   resolve: (received: ReceivedMessage) => void;
   reject: (err: unknown) => void;
 }
 
 interface Watcher {
+  key: string;
   match: MessageMatcher;
   handle: (received: ReceivedMessage) => void;
 }
 
 /** Cap on remembered messageIds. Only guards against a reconnect replaying events. */
 const SEEN_IDS_LIMIT = 512;
+
+/** A bounded FIFO set of messageIds, so a long-lived process cannot grow one without limit. */
+class RecentIds {
+  private set = new Set<string>();
+  private order: string[] = [];
+
+  constructor(private readonly limit: number) {}
+
+  has(id: string): boolean {
+    return this.set.has(id);
+  }
+
+  add(id: string): void {
+    if (this.set.has(id)) return;
+    this.set.add(id);
+    this.order.push(id);
+    if (this.order.length > this.limit) {
+      const evicted = this.order.shift();
+      if (evicted) this.set.delete(evicted);
+    }
+  }
+}
 
 /**
  * Transport layer for communicating with ntfy.sh.
@@ -319,14 +350,26 @@ const SEEN_IDS_LIMIT = 512;
  */
 export class NtfyTransport {
   private config: HitlConfig;
-  private waiters = new Map<string, Waiter>();
-  private watchers = new Map<string, Watcher>();
+  /**
+   * Registrations are keyed by a private counter, never by the caller's key.
+   *
+   * Two calls can legitimately arrive on the same key — two ReviewPlan calls
+   * that resolve to the same reviewId, most obviously. Keying the map by the
+   * caller's string let the second `set` silently displace the first, leaving
+   * a promise nobody could ever settle, and let either one's cleanup delete
+   * the other's live registration.
+   */
+  private waiters = new Map<number, Waiter>();
+  private watchers = new Map<number, Watcher>();
+  private nextRegistrationId = 1;
   private subscriptionAbort: AbortController | null = null;
   private subscriptionRefs = 0;
   /** Unix seconds. Where a reconnect resumes from. */
   private lastEventTs = 0;
-  private seenIds: string[] = [];
-  private seenSet = new Set<string>();
+  /** Delivered to a waiter. Gates both re-delivery and the replay backstop. */
+  private consumedIds = new RecentIds(SEEN_IDS_LIMIT);
+  /** Shown to a watcher. Kept apart so observing never suppresses replay (H3). */
+  private observedIds = new RecentIds(SEEN_IDS_LIMIT);
   private readonly retry: RetryPolicy;
   private readonly subscriptionPolicy: SubscriptionPolicy;
   readonly pending: PendingStore;
@@ -546,11 +589,15 @@ export class NtfyTransport {
         return;
       }
 
+      const registrationId = this.nextRegistrationId++;
+
       let settled = false;
       const finish = (fn: () => void) => {
         if (settled) return;
         settled = true;
-        this.waiters.delete(key);
+        // By registration, never by key: another call may be waiting on the
+        // same key, and deleting theirs would hang them forever.
+        this.waiters.delete(registrationId);
         signal?.removeEventListener('abort', onAbort);
         this.releaseSubscription();
         fn();
@@ -559,7 +606,8 @@ export class NtfyTransport {
       const onAbort = () => finish(() => reject(new AbortedWaitError(key)));
       signal?.addEventListener('abort', onAbort);
 
-      this.waiters.set(key, {
+      this.waiters.set(registrationId, {
+        key,
         match,
         resolve: (received) => finish(() => resolve(received as ReceivedMessage<T>)),
         reject: (err) => finish(() => reject(err)),
@@ -589,14 +637,15 @@ export class NtfyTransport {
    * registered.
    */
   watch(key: string, match: MessageMatcher, handle: (received: ReceivedMessage) => void): () => void {
-    this.watchers.set(key, { match, handle });
+    const registrationId = this.nextRegistrationId++;
+    this.watchers.set(registrationId, { key, match, handle });
     this.acquireSubscription();
 
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      this.watchers.delete(key);
+      this.watchers.delete(registrationId);
       this.releaseSubscription();
     };
   }
@@ -694,28 +743,35 @@ export class NtfyTransport {
     }
   }
 
-  /** Hand a message to the first waiter that wants it, ignoring replays. */
+  /**
+   * Hand a message to the first waiter that wants it, ignoring replays.
+   *
+   * A message is marked consumed only when a waiter actually takes it. A
+   * watcher merely observing one must not suppress the `replayCache` backstop:
+   * on the D-8 resume path the response arrives while the watcher is attached
+   * but before the waiter registers, and marking it seen there would both tell
+   * the human their submission was lost and hide it from replay, hanging the
+   * agent that was about to wait for it (H3).
+   */
   private deliver(received: ReceivedMessage): void {
     const id = received.msg.messageId;
-    if (id) {
-      if (this.seenSet.has(id)) return;
-      this.seenSet.add(id);
-      this.seenIds.push(id);
-      if (this.seenIds.length > SEEN_IDS_LIMIT) {
-        const evicted = this.seenIds.shift();
-        if (evicted) this.seenSet.delete(evicted);
-      }
-    }
+    if (id && this.consumedIds.has(id)) return;
 
-    for (const [key, waiter] of this.waiters) {
+    for (const [registrationId, waiter] of this.waiters) {
       if (waiter.match(received.msg)) {
-        this.waiters.delete(key);
+        if (id) this.consumedIds.add(id);
+        this.waiters.delete(registrationId);
         waiter.resolve(received);
         return;
       }
     }
 
-    // Only what no waiter claimed reaches the watchers.
+    // Only what no waiter claimed reaches the watchers, and only once each —
+    // a reconnect replay must not publish a second "lost" acknowledgement.
+    if (id) {
+      if (this.observedIds.has(id)) return;
+      this.observedIds.add(id);
+    }
     for (const watcher of [...this.watchers.values()]) {
       if (watcher.match(received.msg)) watcher.handle(received);
     }

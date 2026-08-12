@@ -468,6 +468,46 @@ describe('NtfyTransport', () => {
     ).toBe('CIPHER');
   });
 
+  it('keeps both waits alive when two register on the same key (C1)', async () => {
+    globalThis.fetch = jest.fn(async (url: unknown) => {
+      if (String(url).includes('poll=1')) return pollResponse([]);
+      return openStream([answerEvent('shared', 'first'), answerEvent('shared', 'second')]);
+    }) as unknown as typeof fetch;
+
+    transport = new NtfyTransport(CONFIG, FAST);
+
+    // Two calls can resolve to one key — two ReviewPlan calls on unchanged
+    // content, most obviously. Keying the registry by that string let the
+    // second registration displace the first, leaving a promise nobody could
+    // settle; and either one's cleanup then deleted the other's live entry.
+    const first = transport.waitForAnswer('shared');
+    const second = transport.waitForAnswer('shared');
+
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+  });
+
+  it('does not let one abort cancel another wait sharing its key (C1)', async () => {
+    globalThis.fetch = jest.fn(async (url: unknown) => {
+      if (String(url).includes('poll=1')) return pollResponse([]);
+      return openStream([]);
+    }) as unknown as typeof fetch;
+
+    transport = new NtfyTransport(CONFIG, FAST);
+
+    const doomed = new AbortController();
+    const abandoned = transport.waitForAnswer('shared', doomed.signal);
+    const survivor = transport.waitForAnswer('shared');
+
+    doomed.abort();
+    await expect(abandoned).rejects.toBeInstanceOf(AbortedWaitError);
+
+    // The survivor must still be registered: deliver a matching answer and it
+    // resolves. Before the fix its entry had been deleted by the other's key.
+    await new Promise((r) => setTimeout(r, 5));
+    transport.close();
+    await expect(survivor).rejects.toThrow(/Transport closed/);
+  });
+
   it('closes the stream and rejects every outstanding wait on close()', async () => {
     globalThis.fetch = jest.fn(async (url: unknown) => {
       if (String(url).includes('poll=1')) return pollResponse([]);
@@ -507,6 +547,37 @@ describe('NtfyTransport', () => {
     // The waiter consumes the first; only the loser reaches the watcher.
     expect(winner.msg.messageId).toBe('resp-phone');
     expect(seen).toEqual(['resp-laptop']);
+  });
+
+  it('lets a waiter still receive a message a watcher only observed (H3)', async () => {
+    globalThis.fetch = jest.fn(async (url: unknown) => {
+      if (String(url).includes('poll=1')) {
+        return pollResponse([reviewResponseEvent('review-9', 'resp-1')]);
+      }
+      return openStream([reviewResponseEvent('review-9', 'resp-1')]);
+    }) as unknown as typeof fetch;
+
+    transport = new NtfyTransport(CONFIG, FAST);
+    const observed: string[] = [];
+    const matches = (msg: AnyHitlMessage) =>
+      msg.type === 'plan_review_response' && msg.reviewId === 'review-9';
+
+    const stop = transport.watch('late:review-9', matches, (r) => observed.push(r.msg.messageId));
+
+    // The response lands while only the watcher is attached — the D-8 resume
+    // shape, where the review was published before this process restarted.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(observed).toEqual(['resp-1']);
+
+    // Marking it seen on observation used to hide it from the replay backstop,
+    // so the wait that was about to start could never be satisfied — while the
+    // human had already been told their submission was lost.
+    const got = await transport.waitFor<PlanReviewResponseMessage>(
+      'plan_review_response:review-9',
+      matches
+    );
+    expect(got.msg.messageId).toBe('resp-1');
+    stop();
   });
 
   it('stops delivering and drops its subscription hold once released', async () => {
