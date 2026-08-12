@@ -788,8 +788,16 @@ async fn dispatch_message(
             }
         }
 
-        // Transport-internal and already reassembled upstream. Never a warning.
-        "chunk" => {}
+        // Only reachable when `resolve_chunked_message` could NOT parse the
+        // fragment as a `ChunkMessage` — a parsed one is either held for its
+        // group or dispatched as the reassembled body, and never arrives here
+        // still typed "chunk". So this arm means a fragment was dropped, and
+        // its whole group will now expire incomplete.
+        "chunk" => log::warn!(
+            "Chunk fragment {} could not be parsed as a fragment and was dropped; \
+             its group will never complete",
+            env.message_id
+        ),
 
         other => log::warn!(
             "Unrecognized message type '{}' (id {})",

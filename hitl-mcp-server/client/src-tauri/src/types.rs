@@ -131,8 +131,14 @@ pub struct DismissNotificationMessage {
 
 /// A fragment of an oversized message body, published as its own ntfy message.
 /// Transport-only wrapper — never survives past reassembly on the receiving side.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+///
+/// Every field defaults. A fragment that fails to deserialize does not fail
+/// loudly: it falls through `resolve_chunked_message` as an ordinary message,
+/// so one absent field silently drops the fragment and with it the entire
+/// group. `msg_type` is what identifies a chunk, and `ChunkAssembler` rejects
+/// the header values these defaults produce, so tolerance here costs nothing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct ChunkMessage {
     #[serde(rename = "type")]
     pub msg_type: String,
@@ -574,6 +580,35 @@ mod tests {
     #[test]
     fn envelope_rejects_a_message_with_no_type() {
         assert!(serde_json::from_str::<MessageEnvelope>(r#"{"messageId":"x"}"#).is_err());
+    }
+
+    /// M2. A fragment that fails to deserialize is not reported — it falls
+    /// through `resolve_chunked_message` as an ordinary message and is dropped,
+    /// taking its whole group with it. So an absent field must never be the
+    /// reason a fragment fails to parse.
+    #[test]
+    fn chunk_message_deserializes_with_fields_omitted() {
+        let raw = r#"{"type":"chunk","groupId":"g1","index":2,"total":4,"data":"AAAA"}"#;
+        let chunk: ChunkMessage = serde_json::from_str(raw).unwrap();
+
+        assert_eq!(chunk.msg_type, "chunk");
+        assert_eq!(chunk.group_id, "g1");
+        assert_eq!(chunk.index, 2);
+        assert_eq!(chunk.total, 4);
+        assert_eq!(chunk.data, "AAAA");
+        // Absent, and defaulted rather than fatal.
+        assert_eq!(chunk.message_id, "");
+        assert_eq!(chunk.timestamp, 0);
+    }
+
+    /// The defaults have to be values the assembler refuses, so tolerance here
+    /// can never turn a fragment with no header into a group.
+    #[test]
+    fn a_chunk_with_no_fields_defaults_to_something_unassemblable() {
+        let chunk: ChunkMessage = serde_json::from_str(r#"{}"#).unwrap();
+
+        assert_eq!(chunk.msg_type, "", "an empty object must not look like a chunk");
+        assert_eq!(chunk.total, 0, "total 0 is rejected by ChunkAssembler::feed");
     }
 
     // --- Plan-review types deserialize with every optional field omitted (A-6) ---
