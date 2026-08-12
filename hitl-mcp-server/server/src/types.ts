@@ -61,7 +61,22 @@ interface BaseMessage {
   messageId: string;
   /** Unix-epoch millis when the message was created */
   timestamp: number;
+  /**
+   * Wire-shape version. Absent ⇒ 1.
+   *
+   * Emitted ONLY on plan_review / plan_review_response / plan_review_ack /
+   * cancel_review. The four shipping types (question, answer, notification,
+   * dismiss_notification) must keep a byte-identical wire format so a new
+   * server never breaks an already-installed client.
+   *
+   * Increment only when the wire shape changes — NEVER derive it from the
+   * package version.
+   */
+  protocolVersion?: number;
 }
+
+/** Current wire-shape version. See BaseMessage.protocolVersion. */
+export const PROTOCOL_VERSION = 2;
 
 /** Published by MCP server when the LLM calls ask_human. */
 export interface QuestionMessage extends BaseMessage {
@@ -101,7 +116,10 @@ export interface AnswerMessage extends BaseMessage {
   subAnswers?: SubAnswer[];
 }
 
-/** Union type for all messages over the ntfy channel. */
+/**
+ * Union of the four message types that predate `protocolVersion`.
+ * Their wire format is frozen — see BaseMessage.protocolVersion.
+ */
 export type HitlMessage = QuestionMessage | AnswerMessage | NotificationMessage | DismissNotificationMessage;
 
 /** Published by MCP server for fire-and-forget progress notifications. */
@@ -144,6 +162,126 @@ export interface ChunkMessage extends BaseMessage {
   /** Slice of the base64-encoded original body */
   data: string;
 }
+
+// -----------------------------------------------------------
+// Plan review (protocolVersion 2)
+//
+// These four types are the ONLY ones that carry `protocolVersion`, gzip their
+// body, and may spill to an ntfy attachment. They never chunk. The four types
+// above keep their exact pre-existing wire format.
+// -----------------------------------------------------------
+
+export type PlanVerdict = 'approved' | 'changes_requested' | 'rejected' | 'skipped' | 'cancelled';
+
+/**
+ * ntfy-event-level attachment metadata, parsed off the raw ntfy JSON event.
+ * NEVER carried inside our own message — the URL only exists after the PUT.
+ * This is plaintext metadata outside our encryption, which is why `name` must
+ * be random hex and never a real path (F-9).
+ */
+export interface AttachmentRef {
+  name: string;
+  url: string;
+  type?: string;
+  size?: number;
+  /** Unix seconds. ntfy expires attachments after 3 h — messages after 12 h. */
+  expires?: number;
+}
+
+/** Where a plan-review body lives, and how to verify it once fetched. */
+export interface PlanPayloadRef {
+  kind: 'inline' | 'attachment';
+  /** inline only: the encrypted-envelope JSON string produced by crypto.encrypt() */
+  data?: string;
+  /** sha256 hex of the payload plaintext (the base64(gzip(bodyJson)) string) */
+  contentHash: string;
+  /** utf-8 byte length of that same payload plaintext */
+  contentLength: number;
+}
+
+/** The gzipped body of a plan_review message. */
+export interface PlanReviewBody {
+  content: string;
+  diff: string;
+}
+
+/** Published by the MCP server when the agent calls ReviewPlan. */
+export interface PlanReviewMessage extends BaseMessage {
+  type: 'plan_review';
+  protocolVersion: number;
+  repo: RepoContext | null;
+  context: string;
+  /** '' when absent — never undefined */
+  summary: string;
+  /** repo-relative ONLY, never an absolute path (F-9) */
+  displayPath: string;
+  /** identity hash of the plan file location; keys drafts across revisions */
+  planId: string;
+  revision: number;
+  isNewPlan: boolean;
+  /** 'sha256:<hex>' of the plan file content */
+  snapshotHash: string;
+  body: PlanPayloadRef;
+}
+
+/** A single line-anchored comment, in source-line space. */
+export interface InlineComment {
+  path: string;
+  startLine: number;
+  endLine: number;
+  side: 'old' | 'new';
+  comment: string;
+}
+
+/** The gzipped body of a plan_review_response message. */
+export interface PlanReviewResponseBody {
+  overallFeedback: string;
+  inlineComments: InlineComment[];
+}
+
+/** Published by a client when the human finishes reviewing. */
+export interface PlanReviewResponseMessage extends BaseMessage {
+  type: 'plan_review_response';
+  protocolVersion: number;
+  /** messageId of the plan_review being answered */
+  reviewId: string;
+  respondedFrom: string;
+  verdict: PlanVerdict;
+  snapshotHash: string;
+  body: PlanPayloadRef;
+}
+
+/**
+ * Published by the server once it has actually read a response body. Without
+ * it the client shows "submitted" at click time even when the response
+ * attachment later 404s (attachments expire in 3 h, messages in 12 h).
+ */
+export interface PlanReviewAckMessage extends BaseMessage {
+  type: 'plan_review_ack';
+  protocolVersion: number;
+  reviewId: string;
+  responseId: string;
+  status: 'received' | 'lost';
+  reason?: string;
+}
+
+/** Published by the server when an outstanding review will never be read. */
+export interface CancelReviewMessage extends BaseMessage {
+  type: 'cancel_review';
+  protocolVersion: number;
+  reviewId: string;
+  reason: 'agent_exited' | 'cancelled' | 'superseded';
+}
+
+/** Union of the plan-review message types. These never chunk. */
+export type PlanMessage =
+  | PlanReviewMessage
+  | PlanReviewResponseMessage
+  | PlanReviewAckMessage
+  | CancelReviewMessage;
+
+/** Anything that can arrive on the topic (excluding the transport-only chunk wrapper). */
+export type AnyHitlMessage = HitlMessage | PlanMessage;
 
 // -----------------------------------------------------------
 // Configuration (~/.hitl/config.json)

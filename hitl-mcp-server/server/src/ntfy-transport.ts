@@ -1,6 +1,29 @@
-import type { QuestionMessage, AnswerMessage, HitlMessage, HitlConfig } from './types.js';
+import type { QuestionMessage, AnswerMessage, HitlMessage, AnyHitlMessage, AttachmentRef, HitlConfig } from './types.js';
 import { encrypt, decrypt, isEncryptedEnvelope } from './crypto.js';
 import { shouldChunk, splitIntoChunks } from './chunking.js';
+
+/**
+ * Pull ntfy's own attachment metadata off a raw event.
+ *
+ * Shape confirmed live against ntfy.sh:
+ *   {"name":"…","type":"application/octet-stream","size":5000,
+ *    "expires":1786514937,"url":"https://ntfy.sh/file/qurRQchLV1Fb.bin"}
+ *
+ * This is plaintext metadata outside our encryption — `name` echoes the
+ * Filename header, so senders must use random hex there and never a real path.
+ */
+export function parseAttachment(ntfyEvent: unknown): AttachmentRef | undefined {
+  const att = (ntfyEvent as { attachment?: Record<string, unknown> } | null)?.attachment;
+  if (!att || typeof att.url !== 'string') return undefined;
+
+  return {
+    name: typeof att.name === 'string' ? att.name : '',
+    url: att.url,
+    type: typeof att.type === 'string' ? att.type : undefined,
+    size: typeof att.size === 'number' ? att.size : undefined,
+    expires: typeof att.expires === 'number' ? att.expires : undefined,
+  };
+}
 
 /**
  * Transport layer for communicating with ntfy.sh.
@@ -96,7 +119,7 @@ export class NtfyTransport {
       const sinceTs = Math.floor(Date.now() / 1000);
       const sseUrl = `${this.topicUrl}/json?since=${sinceTs}`;
 
-      this.startSSEListener(sseUrl, signal, (msg: HitlMessage) => {
+      this.startSSEListener(sseUrl, signal, (msg: AnyHitlMessage) => {
         if (msg.type === 'answer' && msg.questionId === questionId) {
           cleanup();
           resolve(msg as AnswerMessage);
@@ -117,11 +140,15 @@ export class NtfyTransport {
   /**
    * Open a streaming connection to ntfy and invoke the callback for each parsed HITL message.
    * Uses fetch streaming (works in Node 18+).
+   *
+   * `attachment` is the ntfy event's own attachment metadata, which only exists
+   * on the event envelope — never inside our message, since the URL is assigned
+   * by the PUT. Plan-review bodies over the inline threshold live there.
    */
   private async startSSEListener(
     url: string,
     signal: AbortSignal,
-    onMessage: (msg: HitlMessage) => void
+    onMessage: (msg: AnyHitlMessage, attachment?: AttachmentRef) => void
   ): Promise<void> {
     const response = await fetch(url, {
       headers: { Accept: 'application/x-ndjson' },
@@ -157,7 +184,7 @@ export class NtfyTransport {
             if (ntfyEvent.message) {
               try {
                 const parsed = JSON.parse(ntfyEvent.message);
-                let hitlMsg: HitlMessage;
+                let hitlMsg: AnyHitlMessage;
 
                 if (isEncryptedEnvelope(parsed)) {
                   if (!this.config.encryptionKey) {
@@ -166,17 +193,17 @@ export class NtfyTransport {
                   }
                   try {
                     const decrypted = decrypt(ntfyEvent.message, this.config.encryptionKey);
-                    hitlMsg = JSON.parse(decrypted) as HitlMessage;
+                    hitlMsg = JSON.parse(decrypted) as AnyHitlMessage;
                   } catch (decryptErr) {
                     console.error('Failed to decrypt message:', decryptErr);
                     continue;
                   }
                 } else {
-                  hitlMsg = parsed as HitlMessage;
+                  hitlMsg = parsed as AnyHitlMessage;
                 }
 
                 if (hitlMsg.type) {
-                  onMessage(hitlMsg);
+                  onMessage(hitlMsg, parseAttachment(ntfyEvent));
                 }
               } catch {
                 // Not a valid HITL message, ignore

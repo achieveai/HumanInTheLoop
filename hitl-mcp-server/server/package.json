@@ -37,6 +37,7 @@
     "start": "node dist/mcp-server.js",
     "dev": "tsx src/index.ts",
     "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --config jest.config.js",
+    "fixture:payload": "tsx scripts/gen-payload-fixture.ts",
     "clean": "rimraf dist",
     "postinstall": "node scripts/postinstall.js",
     "prepublishOnly": "npm run build"
