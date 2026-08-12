@@ -322,6 +322,40 @@ describe('NtfyTransport', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
+  it('preserves the caller\'s AbortSignal.reason on .cause and .reason when aborted asynchronously', async () => {
+    globalThis.fetch = jest.fn(async (url: unknown) => {
+      if (String(url).includes('poll=1')) return pollResponse([]);
+      return openStream([]);
+    }) as unknown as typeof fetch;
+
+    transport = new NtfyTransport(CONFIG, FAST);
+    const controller = new AbortController();
+    const wait = transport.waitForAnswer('never-answered', controller.signal);
+
+    await new Promise((r) => setTimeout(r, 10));
+    const stopReason = new Error('Stop requested by user');
+    controller.abort(stopReason);
+
+    // The caller's own reason for cancelling — not a generic re-statement of
+    // "it was cancelled" — is what lets a handler upstream tell a user Stop
+    // apart from a host timeout. Losing it here loses that distinction for
+    // every caller of waitFor, not just this one.
+    await expect(wait).rejects.toMatchObject({ cause: stopReason, reason: stopReason });
+  });
+
+  it('preserves the caller\'s AbortSignal.reason on .cause and .reason when already aborted', async () => {
+    globalThis.fetch = jest.fn(async () => pollResponse([])) as unknown as typeof fetch;
+    transport = new NtfyTransport(CONFIG, FAST);
+
+    const hostTimeout = new Error('host timeout');
+    const signal = AbortSignal.abort(hostTimeout);
+
+    await expect(transport.waitForAnswer('x', signal)).rejects.toMatchObject({
+      cause: hostTimeout,
+      reason: hostTimeout,
+    });
+  });
+
   it('backs off on a burst 429 then succeeds', async () => {
     let attempts = 0;
     globalThis.fetch = jest.fn(async () => {

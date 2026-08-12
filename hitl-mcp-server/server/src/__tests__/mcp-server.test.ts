@@ -172,3 +172,129 @@ describe('handleReviewPlan orderings', () => {
     expect(readLatest(identity)?.revision).toBe(1);
   });
 });
+
+/**
+ * A wait cancelled by the caller's AbortSignal (Stop, or a host-side timeout)
+ * is a real, recoverable event — not the same as ntfy being unreachable. The
+ * message an agent sees for it must say plainly that the wait was cancelled
+ * before a response arrived and name the two things that actually cancel it,
+ * without asserting that Claude Code's auto-background feature is the cause:
+ * it only ever *disconnects* a call already running in the background, it does
+ * not itself abort the request (see CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS).
+ */
+describe('abort remediation (honest wait-cancelled wording)', () => {
+  const realFetch = globalThis.fetch;
+  const originalHome = process.env.HITL_HOME;
+  let home: string;
+  let planPath: string;
+  let server: HumanInTheLoopServer;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), 'hitl-abort-remediation-'));
+    process.env.HITL_HOME = home;
+    planPath = path.join(home, 'plan.md');
+    writeFileSync(planPath, '# Plan\n\n- step one\n', 'utf8');
+
+    // Three request shapes share this mock: the cache poll (`poll=1`), the SSE
+    // subscribe `watch()` opens (`/json` with no poll), which must park rather
+    // than resolve, and a plain publish POST, which just needs to succeed.
+    globalThis.fetch = jest.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.includes('poll=1')) {
+        return { ok: true, status: 200, statusText: 'OK', text: async () => '' } as unknown as Response;
+      }
+      if (u.includes('/json')) {
+        return parkedStream();
+      }
+      return { ok: true, status: 200, statusText: 'OK' } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    server = new HumanInTheLoopServer(CONFIG);
+    // Not the subject of these tests, and there is no client binary here.
+    (server as unknown as { requireClient: () => void }).requireClient = () => {};
+  });
+
+  afterEach(() => {
+    (server as unknown as { transport: { close: () => void } }).transport.close();
+    globalThis.fetch = realFetch;
+    if (originalHome === undefined) delete process.env.HITL_HOME;
+    else process.env.HITL_HOME = originalHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /**
+   * The wording both tools must produce for a genuine abort: say the wait was
+   * cancelled before a response, name Stop and a host timeout as the two real
+   * causes, and offer the auto-background setting as something to try — never
+   * as a stated cause, because it is not one.
+   */
+  function assertHonestAbortWording(message: string): void {
+    expect(message).toMatch(/wait cancelled before response/i);
+    expect(message).toMatch(/stop or host timeout/i);
+    expect(message).toContain('CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0');
+    expect(message).toMatch(/global settings/i);
+    expect(message).toMatch(/restart/i);
+    expect(message).not.toMatch(/auto-background[^.]*(trigger|caus|initiat)/i);
+  }
+
+  it('gives honest remediation when AskUserQuestion is aborted mid-wait', async () => {
+    // The tool handler is registered on the SDK Server rather than exposed as a
+    // method (see wire-compat.test.ts), so this reaches for it directly.
+    const handlers = (
+      server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
+    ).server._requestHandlers;
+    const callTool = handlers.get('tools/call') as (
+      req: unknown,
+      extra: unknown
+    ) => Promise<unknown>;
+
+    let caught: unknown;
+    try {
+      await callTool(
+        {
+          method: 'tools/call',
+          params: {
+            name: 'AskUserQuestion',
+            arguments: {
+              context: 'ctx',
+              question: 'Proceed?',
+              options: [{ label: 'Yes', value: 'yes' }],
+            },
+          },
+        },
+        { signal: AbortSignal.abort() }
+      );
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    assertHonestAbortWording((caught as Error).message);
+  });
+
+  it('gives honest remediation when ReviewPlan is aborted mid-wait', async () => {
+    const transport = (
+      server as unknown as { transport: { publishPlan: (...args: unknown[]) => Promise<void> } }
+    ).transport;
+    // The publish itself must succeed so the abort is reached in the wait,
+    // not mistaken for a publish failure by getting short-circuited first.
+    transport.publishPlan = async () => {};
+
+    let caught: unknown;
+    try {
+      await (
+        server as unknown as {
+          handleReviewPlan: (a: Record<string, unknown>, e: unknown) => Promise<unknown>;
+        }
+      ).handleReviewPlan(
+        { filePath: planPath, context: 'abort remediation test' },
+        { ...extraWithProgress(), signal: AbortSignal.abort() }
+      );
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    assertHonestAbortWording((caught as Error).message);
+  });
+});

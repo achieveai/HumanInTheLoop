@@ -29,7 +29,7 @@ import type {
   PlanVerdict,
 } from './types.js';
 import { PROTOCOL_VERSION } from './types.js';
-import { NtfyTransport, AttachmentExpiredError } from './ntfy-transport.js';
+import { NtfyTransport, AttachmentExpiredError, AbortedWaitError } from './ntfy-transport.js';
 import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
 import { performSetup, ensureClientRunning } from './setup.js';
@@ -63,6 +63,20 @@ const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+/**
+ * The honest message for a genuine abort of `waitFor`/`waitForAnswer`: a real,
+ * recoverable event, not the same thing as ntfy being unreachable.
+ *
+ * A Stop and a host-side timeout are the two things that actually cancel the
+ * wait — this says so instead of leaving the agent staring at "was cancelled".
+ * `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0` is offered as something to try, not
+ * as a stated cause: auto-background only ever detaches an already-running
+ * call from the foreground, it does not itself abort the request.
+ */
+const ABORT_REMEDIATION_MESSAGE =
+  'Wait cancelled before response; may be Stop or host timeout; ' +
+  'set CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0 in global settings and restart.';
 
 /** The SDK's per-request context: progress token, sendNotification, abort signal. */
 type RequestExtra = Parameters<Parameters<Server['setRequestHandler']>[1]>[1];
@@ -519,6 +533,10 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
       } catch (error) {
         console.error('Dialog error:', error);
 
+        if (error instanceof AbortedWaitError) {
+          throw new McpError(ErrorCode.InternalError, ABORT_REMEDIATION_MESSAGE);
+        }
+
         throw new McpError(
           ErrorCode.InternalError,
           `Failed to get human response: ${error instanceof Error ? error.message : 'Unknown error'}`
@@ -669,6 +687,9 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
       stopWatchingLateResponses();
       if (error instanceof McpError) throw error;
       console.error('ReviewPlan error:', error);
+      if (error instanceof AbortedWaitError) {
+        throw new McpError(ErrorCode.InternalError, ABORT_REMEDIATION_MESSAGE);
+      }
       throw new McpError(
         ErrorCode.InternalError,
         `Failed to get plan review: ${error instanceof Error ? error.message : 'Unknown error'}`

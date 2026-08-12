@@ -614,7 +614,7 @@ export class NtfyTransport {
   ): Promise<ReceivedMessage<T>> {
     return new Promise<ReceivedMessage<T>>((resolve, reject) => {
       if (signal?.aborted) {
-        reject(new AbortedWaitError(key));
+        reject(new AbortedWaitError(key, signal.reason));
         return;
       }
 
@@ -632,7 +632,7 @@ export class NtfyTransport {
         fn();
       };
 
-      const onAbort = () => finish(() => reject(new AbortedWaitError(key)));
+      const onAbort = () => finish(() => reject(new AbortedWaitError(key, signal?.reason)));
       signal?.addEventListener('abort', onAbort);
 
       this.waiters.set(registrationId, {
@@ -950,11 +950,21 @@ export class NtfyTransport {
   }
 }
 
-/** Raised when a wait is cancelled by its caller's AbortSignal. */
+/**
+ * Raised when a wait is cancelled by its caller's AbortSignal.
+ *
+ * `reason` carries the external signal's own `AbortSignal.reason` (also set as
+ * the standard `Error.cause`) so a caller further up — an MCP tool handler
+ * deciding what to tell the agent — can distinguish a host-issued Stop from a
+ * host-side timeout instead of seeing only "it was cancelled".
+ */
 export class AbortedWaitError extends Error {
-  constructor(readonly key: string) {
-    super(`Wait for ${key} was cancelled`);
+  readonly reason?: unknown;
+
+  constructor(readonly key: string, reason?: unknown) {
+    super(`Wait for ${key} was cancelled`, reason !== undefined ? { cause: reason } : undefined);
     this.name = 'AbortedWaitError';
+    this.reason = reason;
   }
 }
 
