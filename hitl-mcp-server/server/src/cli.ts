@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import { loadConfig, saveConfig, generateDefaultConfig, getConfigPath } from './config.js';
 import { findClientBinary, launchClient } from './setup.js';
+import { applyAutoBackgroundSetting } from './host-settings.js';
 import { dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -139,25 +140,14 @@ export interface HostSettingMergeResult {
 }
 
 /**
- * Placeholder boundary for merging HITL's entry into Claude Code's global
- * user-level settings.
- *
- * NOTE FOR INTEGRATION: a dedicated host-settings module is being built as a
- * separate workstream. Once it lands, it is expected to export a function
- * matching this exact contract:
- *
- *   mergeGlobalHostSetting(): { updated: boolean; path: string }
- *
- * — merging (never overwriting) HITL's entry into whatever global settings
- * file that module owns, and reporting whether a change was made and which
- * file was touched. That function should be imported and passed in as the
- * `mergeGlobalHostSetting` dependency of {@link performClaudeCodeInstall} in
- * place of this default; no other change to this file should be needed.
- * Until that module exists, this local no-op keeps `hitl claude-code install`
- * safe to run — it will not touch any global settings file.
+ * Merge HITL's entry into Claude Code's global user-level settings
+ * (~/.claude/settings.json), setting CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS="0"
+ * so Claude Code never auto-backgrounds a blocking HITL tool call before the
+ * human gets a chance to respond. Delegates to host-settings.ts, which
+ * preserves every unrelated key and is idempotent.
  */
 function defaultMergeGlobalHostSetting(): HostSettingMergeResult {
-  return { updated: false, path: '' };
+  return applyAutoBackgroundSetting();
 }
 
 /** Injectable dependencies for {@link performClaudeCodeInstall}, for testing. */

@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'fs';
 import { homedir } from 'os';
+import { randomBytes } from 'crypto';
 import path from 'path';
 
 /** The env var Claude Code reads to decide when to auto-background a long-running MCP tool call. */
@@ -64,6 +65,62 @@ export function mergeAutoBackgroundSetting(
       [AUTO_BACKGROUND_ENV_KEY]: AUTO_BACKGROUND_TARGET_VALUE,
     },
   };
+}
+
+/** Result of writing the auto-background remediation to disk. */
+export interface ApplySettingsResult {
+  /** True if the file was created or modified to reach the target state. */
+  updated: boolean;
+  /** Path to the settings file that was read/written. */
+  path: string;
+}
+
+/**
+ * Write via a temp file in the same directory, then rename over the target,
+ * so a crash mid-write can never leave a partially-written settings.json.
+ * `renameSync` maps to MoveFileEx with MOVEFILE_REPLACE_EXISTING on Windows,
+ * so replacing an existing destination is atomic there too. The temp file is
+ * removed on failure so a full disk (or a failed rename) cannot leave debris
+ * behind.
+ */
+function writeAtomic(file: string, contents: string): void {
+  const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  try {
+    writeFileSync(tmp, contents, 'utf-8');
+    renameSync(tmp, file);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* nothing to clean up */
+    }
+    throw err;
+  }
+}
+
+/**
+ * Apply the auto-background remediation to disk: read the existing
+ * settings.json (if any), merge in the target env value via
+ * {@link mergeAutoBackgroundSetting}, and write the result back only if it
+ * actually changed. Re-running this after a prior successful run is a no-op
+ * (`updated: false`) rather than rewriting an identical file.
+ *
+ * The parent directory (e.g. ~/.claude) is created if missing. Writes are
+ * atomic — see {@link writeAtomic}.
+ */
+export function applyAutoBackgroundSetting(
+  settingsPath: string = getHostSettingsPath()
+): ApplySettingsResult {
+  const existing = readHostSettings(settingsPath);
+  const merged = mergeAutoBackgroundSetting(existing);
+
+  if (JSON.stringify(merged) === JSON.stringify(existing)) {
+    return { updated: false, path: settingsPath };
+  }
+
+  mkdirSync(path.dirname(settingsPath), { recursive: true });
+  writeAtomic(settingsPath, JSON.stringify(merged, null, 2) + '\n');
+  return { updated: true, path: settingsPath };
 }
 
 /**

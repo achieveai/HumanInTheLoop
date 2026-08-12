@@ -11,12 +11,42 @@ jest.unstable_mockModule('child_process', () => ({
   spawn: jest.fn(),
 }));
 
+// fs/os: cli.ts's default host-setting merge delegates to host-settings.ts,
+// which reads/writes ~/.claude/settings.json — mock the filesystem so the
+// default CLI path can be exercised without touching a real home directory.
+const mockExistsSync = jest.fn<(p: string) => boolean>();
+const mockReadFileSync = jest.fn<(p: string, enc: string) => string>();
+const mockWriteFileSync = jest.fn<(...args: unknown[]) => void>();
+const mockMkdirSync = jest.fn<(...args: unknown[]) => void>();
+const mockRenameSync = jest.fn<(from: string, to: string) => void>();
+const mockUnlinkSync = jest.fn<(p: string) => void>();
+jest.unstable_mockModule('fs', () => {
+  const actual = jest.requireActual<typeof import('fs')>('fs');
+  return {
+    ...actual,
+    existsSync: mockExistsSync,
+    readFileSync: mockReadFileSync,
+    writeFileSync: mockWriteFileSync,
+    mkdirSync: mockMkdirSync,
+    renameSync: mockRenameSync,
+    unlinkSync: mockUnlinkSync,
+  };
+});
+jest.unstable_mockModule('os', () => {
+  const actual = jest.requireActual<typeof import('os')>('os');
+  return {
+    ...actual,
+    homedir: jest.fn(() => '/mock/home'),
+  };
+});
+
 // Dynamically import the module under test AFTER mocks are registered.
 const { performClaudeCodeInstall, buildClaudeMcpAddArgs } = await import('../cli.js');
 
 describe('cli: hitl claude-code install', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockExistsSync.mockReturnValue(false);
   });
 
   describe('buildClaudeMcpAddArgs', () => {
@@ -114,10 +144,54 @@ describe('cli: hitl claude-code install', () => {
       expect(Array.isArray(args)).toBe(true);
       expect(args).toEqual(buildClaudeMcpAddArgs());
       expect(options).toMatchObject({ stdio: 'pipe' });
-      // The default host-setting merge is a safe placeholder until the
-      // dedicated host-settings module is wired in (see cli.ts).
-      expect(result.hostSetting).toEqual({ updated: false, path: '' });
       expect(result.success).toBe(true);
+    });
+
+    describe('default host-setting merge (real host-settings module)', () => {
+      it('writes CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS="0" to settings.json on first install', () => {
+        mockExecFileSync.mockReturnValue('');
+        mockExistsSync.mockReturnValue(false);
+
+        const result = performClaudeCodeInstall();
+
+        expect(result.hostSetting.updated).toBe(true);
+        expect(result.hostSetting.path).toContain('settings.json');
+        expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
+        const [, contents] = mockWriteFileSync.mock.calls[0] as unknown as [string, string];
+        const parsed = JSON.parse(contents);
+        expect(parsed.env.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS).toBe('0');
+        expect(mockRenameSync).toHaveBeenCalledTimes(1);
+      });
+
+      it('preserves unrelated existing settings keys when installing', () => {
+        mockExecFileSync.mockReturnValue('');
+        mockExistsSync.mockReturnValue(true);
+        mockReadFileSync.mockReturnValue(
+          JSON.stringify({ theme: 'dark', permissions: { allow: ['Bash'] } })
+        );
+
+        const result = performClaudeCodeInstall();
+
+        expect(result.hostSetting.updated).toBe(true);
+        const [, contents] = mockWriteFileSync.mock.calls[0] as unknown as [string, string];
+        const parsed = JSON.parse(contents);
+        expect(parsed.theme).toBe('dark');
+        expect(parsed.permissions).toEqual({ allow: ['Bash'] });
+        expect(parsed.env.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS).toBe('0');
+      });
+
+      it('is idempotent: a repeat install after the setting is already applied performs no write', () => {
+        mockExecFileSync.mockReturnValue('');
+        mockExistsSync.mockReturnValue(true);
+        mockReadFileSync.mockReturnValue(
+          JSON.stringify({ env: { CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS: '0' } })
+        );
+
+        const result = performClaudeCodeInstall();
+
+        expect(result.hostSetting.updated).toBe(false);
+        expect(mockWriteFileSync).not.toHaveBeenCalled();
+      });
     });
   });
 });

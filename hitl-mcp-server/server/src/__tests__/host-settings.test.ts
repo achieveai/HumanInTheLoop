@@ -6,9 +6,17 @@ import path from 'path';
 // fs
 const mockExistsSync = jest.fn<(p: string) => boolean>();
 const mockReadFileSync = jest.fn<(p: string, enc: string) => string>();
+const mockWriteFileSync = jest.fn<(...args: unknown[]) => void>();
+const mockMkdirSync = jest.fn<(...args: unknown[]) => void>();
+const mockRenameSync = jest.fn<(from: string, to: string) => void>();
+const mockUnlinkSync = jest.fn<(p: string) => void>();
 jest.unstable_mockModule('fs', () => ({
   existsSync: mockExistsSync,
   readFileSync: mockReadFileSync,
+  writeFileSync: mockWriteFileSync,
+  mkdirSync: mockMkdirSync,
+  renameSync: mockRenameSync,
+  unlinkSync: mockUnlinkSync,
 }));
 
 // os
@@ -21,6 +29,7 @@ const {
   getHostSettingsPath,
   readHostSettings,
   mergeAutoBackgroundSetting,
+  applyAutoBackgroundSetting,
   detectAutoBackgroundStatus,
   buildAutoBackgroundRemediationText,
   AUTO_BACKGROUND_ENV_KEY,
@@ -30,6 +39,8 @@ const {
 describe('host-settings', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockRenameSync.mockImplementation(() => undefined);
+    mockUnlinkSync.mockImplementation(() => undefined);
   });
 
   // ---- getHostSettingsPath ----
@@ -121,6 +132,89 @@ describe('host-settings', () => {
       const snapshotBefore = JSON.parse(JSON.stringify(existing));
       mergeAutoBackgroundSetting(existing);
       expect(existing).toEqual(snapshotBefore);
+    });
+  });
+
+  // ---- applyAutoBackgroundSetting ----
+  describe('applyAutoBackgroundSetting', () => {
+    it('creates settings.json with the target env value when no file exists', () => {
+      mockExistsSync.mockReturnValue(false);
+
+      const result = applyAutoBackgroundSetting('/mock/home/.claude/settings.json');
+
+      expect(result).toEqual({ updated: true, path: '/mock/home/.claude/settings.json' });
+      expect(mockMkdirSync).toHaveBeenCalledWith(
+        '/mock/home/.claude',
+        expect.objectContaining({ recursive: true })
+      );
+      expect(mockWriteFileSync).toHaveBeenCalledTimes(1);
+      const [tmpPath, contents] = mockWriteFileSync.mock.calls[0] as unknown as [string, string];
+      expect(tmpPath.startsWith('/mock/home/.claude/settings.json')).toBe(true);
+      const parsed = JSON.parse(contents);
+      expect(parsed.env[AUTO_BACKGROUND_ENV_KEY]).toBe(AUTO_BACKGROUND_TARGET_VALUE);
+      expect(mockRenameSync).toHaveBeenCalledWith(tmpPath, '/mock/home/.claude/settings.json');
+    });
+
+    it('preserves unrelated top-level and env keys already in the file', () => {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(
+        JSON.stringify({ theme: 'dark', permissions: { allow: ['Bash'] }, env: { OTHER_VAR: 'keep-me' } })
+      );
+
+      const result = applyAutoBackgroundSetting('/mock/home/.claude/settings.json');
+
+      expect(result.updated).toBe(true);
+      const [, contents] = mockWriteFileSync.mock.calls[0] as unknown as [string, string];
+      const parsed = JSON.parse(contents);
+      expect(parsed.theme).toBe('dark');
+      expect(parsed.permissions).toEqual({ allow: ['Bash'] });
+      expect(parsed.env.OTHER_VAR).toBe('keep-me');
+      expect(parsed.env[AUTO_BACKGROUND_ENV_KEY]).toBe(AUTO_BACKGROUND_TARGET_VALUE);
+    });
+
+    it('is idempotent: reports updated:false and writes nothing when already applied', () => {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(
+        JSON.stringify({ theme: 'dark', env: { [AUTO_BACKGROUND_ENV_KEY]: AUTO_BACKGROUND_TARGET_VALUE } })
+      );
+
+      const result = applyAutoBackgroundSetting('/mock/home/.claude/settings.json');
+
+      expect(result).toEqual({ updated: false, path: '/mock/home/.claude/settings.json' });
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+      expect(mockRenameSync).not.toHaveBeenCalled();
+    });
+
+    it('running it twice in sequence is idempotent end-to-end', () => {
+      mockExistsSync.mockReturnValue(false);
+      const first = applyAutoBackgroundSetting('/mock/home/.claude/settings.json');
+      expect(first.updated).toBe(true);
+
+      // Simulate the file now existing with the content just "written".
+      const [, writtenContents] = mockWriteFileSync.mock.calls[0] as unknown as [string, string];
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue(writtenContents);
+      mockWriteFileSync.mockClear();
+
+      const second = applyAutoBackgroundSetting('/mock/home/.claude/settings.json');
+      expect(second).toEqual({ updated: false, path: '/mock/home/.claude/settings.json' });
+      expect(mockWriteFileSync).not.toHaveBeenCalled();
+    });
+
+    it('cleans up the temp file and rethrows if the rename fails', () => {
+      mockExistsSync.mockReturnValue(false);
+      mockRenameSync.mockImplementation(() => {
+        throw new Error('boom');
+      });
+
+      expect(() => applyAutoBackgroundSetting('/mock/home/.claude/settings.json')).toThrow('boom');
+      expect(mockUnlinkSync).toHaveBeenCalledTimes(1);
+    });
+
+    it('defaults to the host settings path when no argument is given', () => {
+      mockExistsSync.mockReturnValue(false);
+      const result = applyAutoBackgroundSetting();
+      expect(result.path).toBe(getHostSettingsPath());
     });
   });
 
