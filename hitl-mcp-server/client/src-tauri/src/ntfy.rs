@@ -20,6 +20,61 @@ use crate::types::{
 /// A reconnect replays at most one ntfy cache window, so this is generous.
 const SEEN_ID_CAPACITY: usize = 512;
 
+/// How long to wait for a TCP connection and TLS handshake.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Ceiling on a whole request/response for the short calls: publish, cache poll.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Attachments are megabytes over whatever link the human is on, so they get
+/// longer than a publish — but still a bound.
+const ATTACHMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A subscription is a long poll: it is *supposed* to stay open for hours, so
+/// it gets no overall deadline. This bounds the gap between reads instead.
+/// ntfy sends a keepalive roughly every 45 s, so silence this long is a dead
+/// connection rather than a quiet one.
+const STREAM_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Build an HTTP client with an actual deadline on it.
+///
+/// `Client::new()` has neither a request timeout nor a connect timeout. A host
+/// that completes the handshake and then sends nothing hangs the caller
+/// forever — and `dispatch_message` is awaited inline inside the stream loop,
+/// so one such host stops every future message from being dispatched while the
+/// tray still reports "Connected". Nothing in this module may use the default.
+fn http_client(timeout: Option<std::time::Duration>, read_timeout: Option<std::time::Duration>) -> Client {
+    let mut builder = Client::builder().connect_timeout(CONNECT_TIMEOUT);
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    if let Some(read_timeout) = read_timeout {
+        builder = builder.read_timeout(read_timeout);
+    }
+
+    builder.build().unwrap_or_else(|e| {
+        // Only fails if the TLS backend cannot initialize, in which case an
+        // un-timed-out client is the lesser problem — but say so.
+        log::error!("Could not build an HTTP client with timeouts: {}", e);
+        Client::new()
+    })
+}
+
+/// Run work off the dispatch path so a slow network cannot stall the stream.
+///
+/// The `JoinHandle` is awaited rather than dropped: dropping it swallows a
+/// panic, which is exactly how a dead subscription becomes invisible.
+fn spawn_detached<F>(what: &'static str, work: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = tauri::async_runtime::spawn(work).await {
+            log::error!("{} task did not finish: {}", what, e);
+        }
+    });
+}
+
 /// Start listening to ntfy for incoming question messages.
 /// First polls cached messages to find pending (unanswered) questions,
 /// then subscribes to live messages going forward.
@@ -89,7 +144,7 @@ pub async fn subscribe_loop(app: AppHandle) {
 async fn fetch_cached_body(base_url: &str) -> String {
     let poll_url = format!("{}/json?since=all&poll=1", base_url);
 
-    let client = Client::new();
+    let client = http_client(Some(REQUEST_TIMEOUT), None);
     let response = match client
         .get(&poll_url)
         .header("Accept", "application/x-ndjson")
@@ -351,7 +406,9 @@ async fn subscribe_live(
     url: &str,
     state: &mut LiveState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new();
+    // No overall timeout: this request is meant to stay open. The read timeout
+    // is what distinguishes a quiet connection from a dead one.
+    let client = http_client(None, Some(STREAM_READ_TIMEOUT));
     let response = client
         .get(url)
         .header("Accept", "application/x-ndjson")
@@ -607,7 +664,16 @@ async fn dispatch_message(
                         review.display_path
                     );
                 }
-                handle_plan_review(app, config, &review, was_encrypted, attachment).await;
+                // Off the dispatch path. This is the one handler that makes a
+                // network call — the attachment download — and dispatch is
+                // awaited inline inside the stream loop, so awaiting it here
+                // would let one slow or hung host stop every later message
+                // from being dispatched at all.
+                let app = app.clone();
+                let config = config.clone();
+                spawn_detached("plan_review", async move {
+                    handle_plan_review(&app, &config, &review, was_encrypted, attachment).await;
+                });
             }
             Err(e) => log::error!("plan_review {} parse failed: {}", env.message_id, e),
         },
@@ -749,7 +815,7 @@ impl std::fmt::Display for ReviewBodyError {
 /// `since=all` on every client start. Any review older than 3 h replays against
 /// a dead URL.
 async fn download_attachment(url: &str) -> Result<String, ReviewBodyError> {
-    let response = Client::new()
+    let response = http_client(Some(ATTACHMENT_TIMEOUT), None)
         .get(url)
         .send()
         .await
@@ -1216,7 +1282,7 @@ async fn publish_message(
         body.to_string()
     };
 
-    let client = Client::new();
+    let client = http_client(Some(REQUEST_TIMEOUT), None);
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
@@ -1405,7 +1471,7 @@ async fn publish_review_response(
         config.topic_id
     );
 
-    let http = Client::new();
+    let http = http_client(Some(ATTACHMENT_TIMEOUT), None);
     let sent = http
         .put(&url)
         .header("Filename", &filename)
@@ -1808,6 +1874,39 @@ mod tests {
 
     fn envelope(version: u32, msg_type: &str) -> VersionVerdict {
         version_verdict(version, msg_type)
+    }
+
+    #[test]
+    fn every_http_client_in_this_module_carries_a_deadline() {
+        // Not a style preference. `Client::new()` has no request timeout and no
+        // connect timeout, and dispatch is awaited inline in the stream loop,
+        // so a single host that accepts a connection and then goes quiet stops
+        // every future message from being dispatched.
+        for (timeout, read_timeout) in [
+            (Some(REQUEST_TIMEOUT), None),
+            (Some(ATTACHMENT_TIMEOUT), None),
+            (None, Some(STREAM_READ_TIMEOUT)),
+        ] {
+            // Builds rather than falling back to the untimed default.
+            let _ = http_client(timeout, read_timeout);
+        }
+    }
+
+    #[test]
+    fn the_subscription_read_timeout_outlives_an_ntfy_keepalive() {
+        // ntfy sends a keepalive roughly every 45 s. A read timeout at or below
+        // that would tear down a perfectly healthy subscription on a timer, and
+        // the reconnect loop would hide it as a recurring "stream ended".
+        const NTFY_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(45);
+
+        assert!(
+            STREAM_READ_TIMEOUT > NTFY_KEEPALIVE * 2,
+            "a subscription must tolerate at least two missed keepalives"
+        );
+        // And it must not be given an overall deadline: a long poll is supposed
+        // to stay open for hours.
+        assert!(CONNECT_TIMEOUT < REQUEST_TIMEOUT);
+        assert!(ATTACHMENT_TIMEOUT >= REQUEST_TIMEOUT);
     }
 
     #[test]
