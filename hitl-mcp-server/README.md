@@ -26,7 +26,13 @@ A cross-machine notification system that lets AI agents (via MCP) ask humans for
 
 ## Quick Start
 
-### 1. Add the MCP server to your AI tool
+### 1. Build the server
+
+```bash
+cd server && npm install && npm run build
+```
+
+### 2. Add the MCP server to your AI tool
 
 Add to your `.mcp.json` or MCP client config:
 
@@ -41,17 +47,16 @@ Add to your `.mcp.json` or MCP client config:
 }
 ```
 
-### 2. Run setup (via your AI agent)
+### 3. Run setup (via your AI agent)
 
 Ask your AI agent to call the `setup` tool — it will:
-- Create `~/.hitl/config.json` with a unique topic ID (if it doesn't exist)
+- Create `~/.hitl/config.json` with a unique topic ID and a fresh `encryptionKey` (if it doesn't exist)
 - Find the HITL client binary on your machine
 - Launch it in the system tray (if not already running)
 
-### 3. Initialize config manually (alternative)
+### 4. Initialize config manually (alternative)
 
 ```bash
-cd server && npm install && npm run build
 npx hitl init
 ```
 
@@ -67,12 +72,12 @@ This creates `~/.hitl/config.json`:
 }
 ```
 
-### 4. Set up additional machines
+### 5. Set up additional machines
 
 Copy the **same** `topicId` **and** `encryptionKey` to `~/.hitl/config.json` on every machine where you want to receive notifications. Each machine needs:
 - The same `topicId` (shared secret)
 - The same `encryptionKey`, or it will see the traffic but not be able to read it
-- The HITL client app running in the system tray
+- The HITL client app running in the system tray — start it with `hitl client`
 
 ## MCP Tools
 
@@ -246,6 +251,8 @@ hitl-mcp-server/
 │   │       ├── ntfy.rs          # ntfy subscription + message handling
 │   │       ├── payload.rs       # Payload decode + attachment fetch
 │   │       ├── payload_store.rs # Received plan bodies
+│   │       ├── drafts.rs        # In-progress review draft persistence
+│   │       ├── opener.rs        # Cross-platform "open file/URL" helper
 │   │       ├── crypto.rs        # AES-256-GCM envelope
 │   │       ├── chunking.rs      # Chunk reassembly
 │   │       ├── logging.rs       # ~/.hitl/client.log + rotation
@@ -260,7 +267,12 @@ hitl-mcp-server/
 │       ├── dialog.js        # Dialog rendering, collapsible context
 │       ├── app.js           # App entry, event handling
 │       ├── notifications.*  # Notification window
-│       └── review.*         # Two-pane plan review window
+│       ├── review.*         # Two-pane plan review window
+│       ├── review-app.js    # Review window entry point
+│       ├── review-harness.html   # Standalone harness for review UI
+│       ├── test-harness.html     # Standalone harness for dialog UI
+│       ├── test-notifications.html # Standalone harness for notifications UI
+│       └── vendor/          # Bundled third-party frontend assets
 └── sounds/          # Notification audio files
 ```
 
@@ -268,7 +280,7 @@ hitl-mcp-server/
 
 - **Topic ID is the secret** — a long random UUID that acts as an authentication token
 - Anyone with the topic ID can see that messages are flowing on the topic
-- **Message bodies are encrypted** with the `encryptionKey` from your config (AES-256-GCM), so the topic alone does not reveal question text, plan contents, or your review comments. Every machine sharing a topic must share the key.
+- **Message bodies are encrypted** with the `encryptionKey` from your config (AES-256-GCM), so the topic alone does not reveal question text, plan contents, or your review comments. Every machine sharing a topic must share the key. Encryption is conditional on the key being present: `setup` and `hitl init` always generate one, but a config missing `encryptionKey` (hand-edited, or from before encryption was added) loads without error and sends message bodies to ntfy.sh in plaintext, silently.
 - Plan bodies too large to inline are uploaded as ntfy attachments — encrypted the same way, and sent under a random filename so the real path never appears in ntfy's plaintext metadata
 - For sensitive environments, self-host ntfy or use [ntfy access tokens](https://docs.ntfy.sh/publish/#access-tokens)
 - Config and plan snapshots are stored in the user home directory (`~/.hitl/`)

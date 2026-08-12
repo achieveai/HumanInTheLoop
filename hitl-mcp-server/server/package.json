@@ -31,7 +31,7 @@
     "type": "git",
     "url": "git+https://github.com/achieveai/HumanInTheLoop.git"
   },
-  "license": "MIT",
+  "license": "GPL-3.0",
   "scripts": {
     "build": "tsc",
     "start": "node dist/mcp-server.js",
