@@ -38,7 +38,7 @@ async function init() {
 
     // States that arrive with no reviewable body at all.
     if (message?.state === 'expired' || message?.state === 'upgrade-required' || message?.state === 'error') {
-        renderReviewPanel(container, message);
+        renderReviewPanel(container, { ...message, kind: message.state });
         await revealWindow(invoke);
         return;
     }

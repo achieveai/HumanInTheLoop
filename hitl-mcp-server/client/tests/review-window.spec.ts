@@ -350,8 +350,9 @@ test.describe('Naive re-render cost on a 100 KB plan', () => {
     await page.locator('.comment-card-list .comment-remove').click();
     const afterRemove = await page.evaluate(() => (window as any).__reviewPerf);
 
-    console.log(`[W3.6] rows=${initial.rowCount} `
-      + `initialRender=${initial.initialRenderMs.toFixed(1)}ms `
+    console.log(`[W3.6] contentBytes=${size} rows=${initial.rowCount} `
+      + `markdownParse=${initial.markdownRenderMs.toFixed(1)}ms `
+      + `initialDiffRender=${initial.initialRenderMs.toFixed(1)}ms `
       + `add=${afterAdd.lastCommentUpdateMs.toFixed(1)}ms `
       + `remove=${afterRemove.lastCommentUpdateMs.toFixed(1)}ms`);
 
@@ -360,5 +361,22 @@ test.describe('Naive re-render cost on a 100 KB plan', () => {
     // with a line-keyed overlay; the printed numbers are the actual result.
     expect(afterAdd.lastCommentUpdateMs).toBeLessThan(300);
     expect(afterRemove.lastCommentUpdateMs).toBeLessThan(300);
+  });
+
+  test('E-14: the re-render does not degrade as comments accumulate', async ({ page }) => {
+    test.setTimeout(120_000);
+    await page.goto(url('?fixture=large'));
+
+    const samples: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      const line = 100 + i * 10;
+      await addComment(page, line, line + 2, `comment ${i}`);
+      samples.push(await page.evaluate(() => (window as any).__reviewPerf.lastCommentUpdateMs));
+    }
+    console.log(`[W3.6] 20 comments on a 100 KB plan: first=${samples[0].toFixed(1)}ms `
+      + `last=${samples[19].toFixed(1)}ms max=${Math.max(...samples).toFixed(1)}ms`);
+
+    await expect(page.locator('.comment-card-list')).toHaveCount(20);
+    expect(Math.max(...samples)).toBeLessThan(300);
   });
 });

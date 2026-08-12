@@ -224,7 +224,7 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     let submitting = false;
     let resolved = false;   // superseded or cancelled — verdict controls disabled
 
-    const perf = { initialRenderMs: 0, lastCommentUpdateMs: 0, rowCount: rows.length };
+    const perf = { initialRenderMs: 0, markdownRenderMs: 0, lastCommentUpdateMs: 0, rowCount: rows.length };
     window.__reviewPerf = perf;
 
     // ── shell ────────────────────────────────────────────────────────────────
@@ -323,7 +323,9 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
             el.textContent = text || '';
         }
     }
+    const tMd = performance.now();
     renderMarkdownInto(renderedEl, content);
+    perf.markdownRenderMs = performance.now() - tMd;
     if (msg.summary) renderMarkdownInto(container.querySelector('#review-summary'), msg.summary);
     if (msg.context) renderMarkdownInto(container.querySelector('#review-context-content'), msg.context);
 
