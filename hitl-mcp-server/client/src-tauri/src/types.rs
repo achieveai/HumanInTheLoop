@@ -415,6 +415,91 @@ impl Default for HitlConfig {
 mod tests {
     use super::*;
 
+    // --- Golden-byte serialization of the two client-published shipping
+    // types (S0/audit) ---
+    //
+    // `answer` and `dismiss_notification` travel client -> server. The server
+    // test suite (`server/src/__tests__/wire-compat.test.ts`) pins its two
+    // (`question`, `notification`); its own comment says these two are
+    // "pinned on the client side", but until now nothing here actually did
+    // that — `publish_answer` / `publish_dismiss_notification` (ntfy.rs) call
+    // `serde_json::to_string` with no byte-level test nearby. These two tests
+    // close that gap.
+    //
+    // Expected values are raw literals transcribed from the actual output of
+    // `serde_json::to_string` on these structs today, NOT derived from the
+    // struct or produced by round-tripping — a field rename or reorder must
+    // move only one side.
+
+    #[test]
+    fn answer_message_emits_the_pinned_shape_with_all_optionals() {
+        let answer = AnswerMessage {
+            msg_type: "answer".to_string(),
+            message_id: "41ba33d7-08a8-4761-9abf-5f4e6ba364b3".to_string(),
+            question_id: "21ba33d7-08a8-4761-9abf-5f4e6ba364b1".to_string(),
+            timestamp: 1_700_000_000_000,
+            responded_from: "laptop".to_string(),
+            selected_values: vec!["yes".to_string()],
+            other_text: None,
+            skipped: false,
+            sub_answers: None,
+        };
+
+        let json = serde_json::to_string(&answer).unwrap();
+        let golden = r#"{"type":"answer","messageId":"41ba33d7-08a8-4761-9abf-5f4e6ba364b3","questionId":"21ba33d7-08a8-4761-9abf-5f4e6ba364b1","timestamp":1700000000000,"respondedFrom":"laptop","selectedValues":["yes"],"skipped":false}"#;
+
+        assert_eq!(json, golden);
+        assert!(!json.contains("protocolVersion"), "{json}");
+    }
+
+    #[test]
+    fn answer_message_emits_the_pinned_shape_with_other_text_and_sub_answers() {
+        // The other branch of the two `skip_serializing_if` fields, plus a
+        // populated `subAnswers` — the batch-question shape.
+        let answer = AnswerMessage {
+            msg_type: "answer".to_string(),
+            message_id: "41ba33d7-08a8-4761-9abf-5f4e6ba364b3".to_string(),
+            question_id: "21ba33d7-08a8-4761-9abf-5f4e6ba364b1".to_string(),
+            timestamp: 1_700_000_000_000,
+            responded_from: "laptop".to_string(),
+            selected_values: vec![],
+            other_text: Some("custom text".to_string()),
+            skipped: true,
+            sub_answers: Some(vec![SubAnswer {
+                question_index: 0,
+                question_text: "Pick one".to_string(),
+                selected_values: vec!["a".to_string()],
+                other_text: None,
+                skipped: None,
+                response_type: "selection".to_string(),
+                selected_preview: None,
+            }]),
+        };
+
+        let json = serde_json::to_string(&answer).unwrap();
+        let golden = r#"{"type":"answer","messageId":"41ba33d7-08a8-4761-9abf-5f4e6ba364b3","questionId":"21ba33d7-08a8-4761-9abf-5f4e6ba364b1","timestamp":1700000000000,"respondedFrom":"laptop","selectedValues":[],"otherText":"custom text","skipped":true,"subAnswers":[{"questionIndex":0,"questionText":"Pick one","selectedValues":["a"],"responseType":"selection"}]}"#;
+
+        assert_eq!(json, golden);
+        assert!(!json.contains("protocolVersion"), "{json}");
+    }
+
+    #[test]
+    fn dismiss_notification_message_emits_the_pinned_shape() {
+        let dismiss = DismissNotificationMessage {
+            msg_type: "dismiss_notification".to_string(),
+            message_id: "51ba33d7-08a8-4761-9abf-5f4e6ba364b4".to_string(),
+            timestamp: 1_700_000_000_000,
+            notification_id: "31ba33d7-08a8-4761-9abf-5f4e6ba364b2".to_string(),
+            dismissed_from: "phone".to_string(),
+        };
+
+        let json = serde_json::to_string(&dismiss).unwrap();
+        let golden = r#"{"type":"dismiss_notification","messageId":"51ba33d7-08a8-4761-9abf-5f4e6ba364b4","timestamp":1700000000000,"notificationId":"31ba33d7-08a8-4761-9abf-5f4e6ba364b2","dismissedFrom":"phone"}"#;
+
+        assert_eq!(json, golden);
+        assert!(!json.contains("protocolVersion"), "{json}");
+    }
+
     #[test]
     fn question_message_deserializes_when_sub_question_omits_question_field() {
         // Real payload shape published by an unpatched (pre-2.9.2) server:
