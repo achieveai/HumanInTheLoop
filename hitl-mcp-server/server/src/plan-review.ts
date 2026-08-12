@@ -42,9 +42,33 @@ export interface ReviewPlanResult {
   snapshotHash: string;
 }
 
-/** Coerce an unknown verdict string, defaulting to the least destructive reading. */
+/**
+ * Coerce an unknown verdict string.
+ *
+ * An unrecognized value is a client that is broken or newer than this server —
+ * never a human decision. Reporting it as `'skipped'` would tell the agent the
+ * human deliberately declined, and would route around the A-5 gate that makes
+ * `changes_requested` say what to change. Refusing is the only honest answer.
+ */
 export function parseVerdict(raw: unknown): PlanVerdict {
-  return VALID_VERDICTS.includes(raw as PlanVerdict) ? (raw as PlanVerdict) : 'skipped';
+  if (VALID_VERDICTS.includes(raw as PlanVerdict)) return raw as PlanVerdict;
+  throw new ReviewResponseError(
+    `Unrecognized verdict ${JSON.stringify(raw)}; expected one of ${VALID_VERDICTS.join(', ')}.`
+  );
+}
+
+/**
+ * Order two strings by Unicode code point.
+ *
+ * `localeCompare` is wrong here twice over: it returns 0 for strings that are
+ * canonically equivalent but not byte-equal (NFC vs NFD, which is exactly what
+ * a macOS and a Windows client produce for the same accented word), and its
+ * ordering depends on the host locale. A-4 requires the same comments to
+ * serialize to the same bytes on every device, so the comparator has to be
+ * decided by the bytes (M3).
+ */
+function compareCodePoints(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /**
@@ -80,11 +104,11 @@ export function normalizeInlineComments(raw: unknown, defaultPath: string): Inli
 
   return cleaned.sort(
     (a, b) =>
-      a.path.localeCompare(b.path) ||
+      compareCodePoints(a.path, b.path) ||
       a.startLine - b.startLine ||
       a.endLine - b.endLine ||
-      a.side.localeCompare(b.side) ||
-      a.comment.localeCompare(b.comment)
+      compareCodePoints(a.side, b.side) ||
+      compareCodePoints(a.comment, b.comment)
   );
 }
 

@@ -28,6 +28,22 @@ import { encrypt, decrypt } from './crypto.js';
  */
 export const PLAN_INLINE_THRESHOLD_BYTES = 2048;
 
+/**
+ * Caps on what a payload may expand to.
+ *
+ * The content hash is no protection here: it is computed over the compressed
+ * plaintext, which is exactly the bytes an attacker controls, so it confirms
+ * "these are the bytes that were sent" and says nothing about what they
+ * decompress to. Without a cap a 1 GiB expansion is a couple of seconds of
+ * work for whoever holds the topic (H4).
+ *
+ * A plan is capped at 1 MB and a body carries the plan plus its diff, so 8 MB
+ * is well clear of anything legitimate. The compressed cap is below ntfy's own
+ * 2 MB attachment limit, so nothing that could arrive is rejected by it.
+ */
+export const PLAN_MAX_COMPRESSED_BYTES = 2 * 1024 * 1024;
+export const PLAN_MAX_DECOMPRESSED_BYTES = 8 * 1024 * 1024;
+
 /** Raised when a payload cannot be turned back into its body object. */
 export class PayloadDecodeError extends Error {
   constructor(message: string, readonly cause?: unknown) {
@@ -111,8 +127,18 @@ export function decodePayload<T>(cipher: string, keyHex: string | undefined, exp
 
   let json: string;
   try {
-    json = zlib.gunzipSync(Buffer.from(plaintext, 'base64')).toString('utf8');
+    const compressed = Buffer.from(plaintext, 'base64');
+    if (compressed.byteLength > PLAN_MAX_COMPRESSED_BYTES) {
+      throw new PayloadDecodeError(
+        `Plan payload is ${compressed.byteLength} compressed bytes, over the ` +
+          `${PLAN_MAX_COMPRESSED_BYTES} limit`
+      );
+    }
+    json = zlib
+      .gunzipSync(compressed, { maxOutputLength: PLAN_MAX_DECOMPRESSED_BYTES })
+      .toString('utf8');
   } catch (err) {
+    if (err instanceof PayloadDecodeError) throw err;
     throw new PayloadDecodeError('Failed to gunzip plan payload', err);
   }
 

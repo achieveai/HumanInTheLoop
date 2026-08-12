@@ -26,6 +26,7 @@ import type {
   PlanReviewAckMessage,
   CancelReviewMessage,
   HitlConfig,
+  PlanVerdict,
 } from './types.js';
 import { PROTOCOL_VERSION } from './types.js';
 import { NtfyTransport, AttachmentExpiredError } from './ntfy-transport.js';
@@ -556,7 +557,19 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
     this.requireClient();
 
     const identity = resolvePlanIdentity(plan.resolvedPath);
-    const recorded = recordRevision(identity, plan.content);
+    let recorded;
+    try {
+      recorded = recordRevision(identity, plan.content);
+    } catch (err) {
+      // The store retries what is transient; anything reaching here is a real
+      // filesystem problem, and a raw EPERM stack is not something an agent
+      // can act on.
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Could not record a snapshot of ${identity.displayPath}: ${describeError(err)}. ` +
+          `The plan review needs to write under ${path.dirname(identity.dir)}.`
+      );
+    }
     const snapshotHash = `sha256:${recorded.digest}`;
     const diff = buildPlanDiff(identity.displayPath, plan.content, resolveBaseline(identity, recorded));
 
@@ -677,10 +690,23 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
     response: PlanReviewResponseMessage,
     attachment?: AttachmentRef
   ): Promise<ReviewPlanResult> {
-    const verdict = parseVerdict(response.verdict);
-
+    let verdict: PlanVerdict;
     let body: PlanReviewResponseBody;
     try {
+      // Inside the try so a client that sends nonsense is acknowledged as
+      // lost rather than leaving the human's window claiming success.
+      verdict = parseVerdict(response.verdict);
+
+      // The human must have reviewed the content we published. A mismatch is a
+      // stale window or a broken client, and accepting it would approve this
+      // revision on the strength of a review of a different one (A-8/M5).
+      if (response.snapshotHash && response.snapshotHash !== reviewMsg.snapshotHash) {
+        throw new ReviewResponseError(
+          `Response is for snapshot ${response.snapshotHash}, but this review published ` +
+            `${reviewMsg.snapshotHash}.`
+        );
+      }
+
       const cipher =
         response.body?.kind === 'attachment'
           ? await this.downloadResponseBody(attachment)
@@ -718,9 +744,9 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
       inlineComments: body.inlineComments,
       revision: reviewMsg.revision,
       isNewPlan: reviewMsg.isNewPlan,
-      // The hash the human's client echoed back — the content they actually
-      // saw, which may differ from the file if the agent rewrote it (A-8).
-      snapshotHash: response.snapshotHash || reviewMsg.snapshotHash,
+      // Checked against what we published above, so this is the content the
+      // human actually reviewed rather than whatever the client claimed (A-8).
+      snapshotHash: reviewMsg.snapshotHash,
     };
   }
 

@@ -1,7 +1,16 @@
 import { describe, it, expect } from '@jest/globals';
 import { randomBytes } from 'crypto';
+import zlib from 'zlib';
 import type { InlineComment, PlanReviewResponseBody, PlanReviewBody } from '../types.js';
-import { encodePayload, decodePayload, PLAN_INLINE_THRESHOLD_BYTES } from '../payload.js';
+import {
+  encodePayload,
+  decodePayload,
+  sha256Hex,
+  PayloadDecodeError,
+  PLAN_INLINE_THRESHOLD_BYTES,
+  PLAN_MAX_DECOMPRESSED_BYTES,
+} from '../payload.js';
+import { encrypt } from '../crypto.js';
 import {
   normalizeInlineComments,
   normalizeResponseBody,
@@ -72,6 +81,27 @@ describe('review response payload', () => {
 
     expect(decodePayload<PlanReviewBody>(encoded.cipher, KEY, encoded.ref.contentHash)).toEqual(body);
   });
+
+  it('refuses a payload that expands past the decompressed cap (H4)', () => {
+    // Whoever holds the topic can put anything on it. The content hash covers
+    // the compressed bytes, so it confirms nothing about what they expand to:
+    // 32 KB on the wire becomes 64 MB of resident heap without a cap.
+    const bomb = zlib.gzipSync(Buffer.alloc(PLAN_MAX_DECOMPRESSED_BYTES * 8)).toString('base64');
+    expect(Buffer.byteLength(bomb, 'utf8')).toBeLessThan(200_000);
+
+    const cipher = encrypt(bomb, KEY);
+    expect(() => decodePayload(cipher, KEY, sha256Hex(bomb))).toThrow(PayloadDecodeError);
+  });
+
+  it('names the compressed size when the payload is too big to even try (H4)', () => {
+    // Incompressible bytes over the compressed cap are rejected before gunzip,
+    // so the process never allocates the output buffer at all.
+    const oversized = randomBytes(3 * 1024 * 1024).toString('base64');
+
+    expect(() => decodePayload(encrypt(oversized, KEY), KEY, sha256Hex(oversized))).toThrow(
+      /compressed bytes, over the/
+    );
+  });
 });
 
 describe('normalizeInlineComments', () => {
@@ -113,6 +143,28 @@ describe('normalizeInlineComments', () => {
       [PLAN_PATH, 10, 10, 'old', 'a'],
       [PLAN_PATH, 10, 12, 'new', 'a'],
       ['other.md', 10, 10, 'new', 'z'],
+    ]);
+  });
+
+  it('orders by code point, not by locale, so NFC and NFD stay distinct (M3)', () => {
+    // The same accented word as macOS composes it and as Windows decomposes it.
+    // localeCompare calls these equal, which makes the sort order depend on
+    // input order — and A-4 requires the same bytes on every device.
+    const nfc = 'café';
+    const nfd = 'café';
+    expect(nfc.localeCompare(nfd)).toBe(0);
+    expect(nfc).not.toBe(nfd);
+
+    const comments = [comment(1, nfd), comment(1, nfc), comment(1, 'apple')];
+    const forward = JSON.stringify(normalizeInlineComments(comments, PLAN_PATH));
+    const reversed = JSON.stringify(normalizeInlineComments([...comments].reverse(), PLAN_PATH));
+
+    expect(forward).toBe(reversed);
+    // 'e' (U+0065) sorts before 'é' (U+00E9), so the decomposed form comes first.
+    expect(normalizeInlineComments(comments, PLAN_PATH).map((c) => c.comment)).toEqual([
+      'apple',
+      nfd,
+      nfc,
     ]);
   });
 
@@ -210,9 +262,12 @@ describe('parseVerdict', () => {
     }
   });
 
-  it('falls back to skipped for an unknown verdict rather than failing the message', () => {
-    expect(parseVerdict('lgtm')).toBe('skipped');
-    expect(parseVerdict(undefined)).toBe('skipped');
-    expect(parseVerdict(7)).toBe('skipped');
+  it('refuses an unknown verdict instead of calling it skipped (M1)', () => {
+    // Coercing to 'skipped' told the agent the human declined when in fact a
+    // client sent something this server does not understand — and it routed
+    // around the A-5 gate, since 'skipped' needs no feedback.
+    expect(() => parseVerdict('lgtm')).toThrow(ReviewResponseError);
+    expect(() => parseVerdict(undefined)).toThrow(/expected one of/);
+    expect(() => parseVerdict(7)).toThrow(ReviewResponseError);
   });
 });

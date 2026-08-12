@@ -22,6 +22,18 @@ import { isTracked, readHeadContent } from './git-context.js';
 /** Full-document context: large enough that no real plan produces split hunks. */
 const FULL_DOCUMENT_CONTEXT = 999_999;
 
+/**
+ * How long the diff may run before giving up.
+ *
+ * `structuredPatch` is synchronous, so its cost is the event loop's cost: the
+ * heartbeat cannot fire and every other in-flight request stalls behind it.
+ * Measured at 20 s for 10,000 changed lines, extrapolating to roughly 45 s at
+ * the 1 MB plan cap — and a normally rewritten plan gets there without anyone
+ * trying (H6). Well under the 15 s heartbeat interval, so a bail-out still
+ * leaves the call looking alive.
+ */
+const DIFF_TIMEOUT_MS = 3_000;
+
 /** jsdiff's marker for a final line with no terminating newline. */
 const NO_NEWLINE_MARKER = '\\ No newline at end of file';
 
@@ -51,20 +63,45 @@ export function resolveBaseline(identity: PlanIdentity, recorded: RecordedRevisi
  * @param baseline - What to diff against, or null for a brand-new plan
  */
 export function buildPlanDiff(displayPath: string, content: string, baseline: string | null): string {
-  const patch: ParsedDiff =
-    baseline === null
-      ? emptyPatch(displayPath, [allAddedHunk(content)])
-      : structuredPatch(`a/${displayPath}`, `b/${displayPath}`, baseline, content, undefined, undefined, {
-          context: FULL_DOCUMENT_CONTEXT,
-        });
+  const patch = baseline === null ? null : diffAgainst(displayPath, baseline, content);
+
+  // No baseline, or a comparison that ran out of time: show the whole document
+  // as new. The reviewer loses the change markers but keeps every line, which
+  // is far better than a call that blocks the process for a minute.
+  const resolved: ParsedDiff = patch ?? emptyPatch(displayPath, [allAddedHunk(content)]);
 
   // Identical revisions produce no hunks at all; substitute the all-context
   // document so an unchanged resubmit stays fully line-selectable (B-3).
-  if (patch.hunks.length === 0) {
-    patch.hunks = [allContextHunk(content)];
+  if (resolved.hunks.length === 0) {
+    resolved.hunks = [allContextHunk(content)];
   }
 
-  return formatPatch(patch);
+  return formatPatch(resolved);
+}
+
+/** `structuredPatch` returns undefined when it hits the timeout, despite its types. */
+function diffAgainst(displayPath: string, baseline: string, content: string): ParsedDiff | null {
+  const patch = structuredPatch(
+    `a/${displayPath}`,
+    `b/${displayPath}`,
+    baseline,
+    content,
+    undefined,
+    undefined,
+    // `timeout` is honoured by jsdiff's diff engine (base.js) but missing from
+    // @types/diff's PatchOptions, hence the cast.
+    { context: FULL_DOCUMENT_CONTEXT, timeout: DIFF_TIMEOUT_MS } as Parameters<
+      typeof structuredPatch
+    >[6]
+  ) as ParsedDiff | undefined;
+
+  if (!patch) {
+    console.error(
+      `Diff of ${displayPath} exceeded ${DIFF_TIMEOUT_MS}ms; showing the plan without change markers.`
+    );
+    return null;
+  }
+  return patch;
 }
 
 /** A patch envelope carrying hand-built hunks, named exactly as jsdiff names them. */

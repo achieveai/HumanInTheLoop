@@ -55,15 +55,16 @@ describe('readPlanFile', () => {
     expect(() => readPlanFile(path.join(dir, 'notes.txt'))).toThrow(/must be markdown/);
   });
 
-  it('rejects a .md symlink whose target is not markdown (F-2)', () => {
-    if (!symlinksSupported) {
-      // Documented rather than silently skipped: the check is exercised on any
-      // platform where the test process may create symlinks.
-      expect(symlinksSupported).toBe(false);
-      return;
+  // Reported as skipped rather than passing when the process cannot create
+  // symlinks — which is the default for a non-elevated Windows account, the
+  // platform this runs on. Asserting the skip flag instead showed a green F-2
+  // while the only control stopping `plan.md -> ~/.ssh/id_rsa` went untested.
+  (symlinksSupported ? it : it.skip)(
+    'rejects a .md symlink whose target is not markdown (F-2)',
+    () => {
+      expect(() => readPlanFile(path.join(dir, 'sneaky.md'))).toThrow(/must be markdown/);
     }
-    expect(() => readPlanFile(path.join(dir, 'sneaky.md'))).toThrow(/must be markdown/);
-  });
+  );
 
   it('rejects a directory even when it is named like markdown (F-3)', () => {
     expect(() => readPlanFile(path.join(dir, 'plans.md'))).toThrow(/is a directory/);

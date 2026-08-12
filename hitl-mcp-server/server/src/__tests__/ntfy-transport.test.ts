@@ -508,6 +508,38 @@ describe('NtfyTransport', () => {
     await expect(survivor).rejects.toThrow(/Transport closed/);
   });
 
+  it('gives up and reports why when ntfy refuses the subscription (H2)', async () => {
+    let opens = 0;
+    globalThis.fetch = jest.fn(async (url: unknown) => {
+      if (String(url).includes('poll=1')) return pollResponse([]);
+      opens++;
+      return errorResponse(403, JSON.stringify({ code: 40301, error: 'forbidden' }));
+    }) as unknown as typeof fetch;
+
+    transport = new NtfyTransport(CONFIG, FAST);
+
+    // A 403 from an auth-required topic or a mistyped ntfyUrl never becomes a
+    // 200. Reconnecting forever at 30 s hid the one diagnosable fact there was
+    // behind a call that simply never returned.
+    await expect(transport.waitForAnswer('never-arrives')).rejects.toThrow(/403/);
+    expect(opens).toBe(1);
+  });
+
+  it('keeps reconnecting when the subscription failure is retryable (H2)', async () => {
+    let opens = 0;
+    globalThis.fetch = jest.fn(async (url: unknown) => {
+      if (String(url).includes('poll=1')) return pollResponse([]);
+      opens++;
+      return opens === 1 ? errorResponse(503, 'upstream down') : openStream([answerEvent('later')]);
+    }) as unknown as typeof fetch;
+
+    transport = new NtfyTransport(CONFIG, FAST);
+    const answer = await transport.waitForAnswer('later');
+
+    expect(answer.questionId).toBe('later');
+    expect(opens).toBeGreaterThanOrEqual(2);
+  });
+
   it('closes the stream and rejects every outstanding wait on close()', async () => {
     globalThis.fetch = jest.fn(async (url: unknown) => {
       if (String(url).includes('poll=1')) return pollResponse([]);

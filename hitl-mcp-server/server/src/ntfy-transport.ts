@@ -70,6 +70,21 @@ export class NtfyPublishError extends Error {
   }
 }
 
+/**
+ * Raised when ntfy refuses the subscription itself.
+ *
+ * `retryable` decides whether the reconnect loop keeps trying. A 403 from an
+ * auth-required topic or a mistyped `ntfyUrl` never becomes a 200, and
+ * reconnecting forever at 30 s hides a diagnosable cause behind a call that
+ * simply never returns.
+ */
+export class NtfySubscribeError extends Error {
+  constructor(message: string, readonly status: number, readonly retryable: boolean, readonly code?: number) {
+    super(message);
+    this.name = 'NtfySubscribeError';
+  }
+}
+
 /** Raised when the X-Message header would exceed the proxy's header buffer. */
 export class XMessageTooLargeError extends Error {
   constructor(readonly byteLength: number) {
@@ -730,6 +745,16 @@ export class NtfyTransport {
         );
       } catch (err) {
         if (signal.aborted) return;
+
+        // A subscription ntfy will never accept is not something to retry at
+        // 30 s forever. Tell everyone waiting why, so the agent surfaces the
+        // cause instead of blocking until the host gives up (H2).
+        if (err instanceof NtfySubscribeError && !err.retryable) {
+          console.error(`ntfy subscription rejected, giving up: ${err.message}`);
+          this.failAllWaiters(err);
+          return;
+        }
+
         console.error(`ntfy subscription error, reconnecting: ${(err as Error).message}`);
       }
 
@@ -846,7 +871,17 @@ export class NtfyTransport {
     });
 
     if (!response.ok) {
-      throw new Error(`ntfy subscription failed: ${response.status} ${response.statusText}`);
+      // The same classifier the publish path uses. This is the connection the
+      // human's answer actually travels on, so throwing away a diagnosable
+      // status here is what turns a misconfiguration into a silent hang (H2).
+      const body = await response.text().catch(() => '');
+      const verdict = classifyNtfyError(response.status, body);
+      throw new NtfySubscribeError(
+        `ntfy subscription failed: ${verdict.message}`,
+        response.status,
+        verdict.retryable,
+        verdict.code
+      );
     }
 
     const reader = response.body?.getReader();
@@ -883,11 +918,20 @@ export class NtfyTransport {
     this.subscriptionAbort = null;
     this.subscriptionRefs = 0;
     this.watchers.clear();
+    this.failAllWaiters(new Error('Transport closed'));
+  }
 
+  /**
+   * Settle every outstanding wait with the same failure.
+   *
+   * Each waiter's own `finish` removes it from the registry, so the snapshot is
+   * taken first — rejecting while iterating would mutate the map underneath.
+   */
+  private failAllWaiters(err: Error): void {
     const waiters = [...this.waiters.values()];
     this.waiters.clear();
     for (const waiter of waiters) {
-      waiter.reject(new Error('Transport closed'));
+      waiter.reject(err);
     }
   }
 }

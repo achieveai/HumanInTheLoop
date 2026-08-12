@@ -1,4 +1,4 @@
-import { existsSync, chmodSync } from 'fs';
+import { existsSync, chmodSync, accessSync, constants } from 'fs';
 import { execSync, spawn } from 'child_process';
 import { homedir, arch } from 'os';
 import path from 'path';
@@ -91,11 +91,20 @@ export function findClientBinary(serverDir: string): string | null {
 
 /**
  * Launch the client binary as a fully detached background process.
+ *
+ * The `'error'` listener is not optional. Node reports a failed exec (ENOENT,
+ * EACCES) by emitting `'error'` asynchronously, and an unhandled `'error'` on
+ * an EventEmitter is rethrown as an uncaught exception — which, from inside a
+ * tool call, kills the whole MCP server instead of returning a message the
+ * agent can act on (H9).
  */
 export function launchClient(binaryPath: string): void {
   const child = spawn(binaryPath, [], {
     detached: true,
     stdio: 'ignore',
+  });
+  child.on('error', (err) => {
+    console.error(`HITL client at ${binaryPath} failed to start: ${err.message}`);
   });
   child.unref();
 }
@@ -128,6 +137,10 @@ export function ensureClientRunning(serverDir: string): ClientRunningResult {
   }
 
   try {
+    // Checked synchronously so an unusable binary becomes a returned reason
+    // rather than an async 'error' event that arrives after this function has
+    // already told the caller everything was fine.
+    accessSync(binaryPath, constants.X_OK);
     launchClient(binaryPath);
     console.error(`Auto-launched HITL client from ${binaryPath}`);
     return { ok: true };

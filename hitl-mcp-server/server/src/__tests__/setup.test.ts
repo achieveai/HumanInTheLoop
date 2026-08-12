@@ -5,8 +5,11 @@ import type { SetupResult } from '../setup.js';
 
 // fs
 const mockExistsSync = jest.fn<(p: string) => boolean>();
+const mockAccessSync = jest.fn<(p: string, mode?: number) => void>();
 jest.unstable_mockModule('fs', () => ({
   existsSync: mockExistsSync,
+  accessSync: mockAccessSync,
+  constants: { X_OK: 1 },
   readFileSync: jest.fn(),
   writeFileSync: jest.fn(),
   mkdirSync: jest.fn(),
@@ -15,7 +18,8 @@ jest.unstable_mockModule('fs', () => ({
 
 // child_process
 const mockExecSync = jest.fn<(...args: unknown[]) => string>();
-const mockSpawn = jest.fn<(...args: unknown[]) => { unref: () => void }>();
+type FakeChild = { unref: () => void; on: (event: string, cb: (err: Error) => void) => FakeChild };
+const mockSpawn = jest.fn<(...args: unknown[]) => FakeChild>();
 jest.unstable_mockModule('child_process', () => ({
   execSync: mockExecSync,
   spawn: mockSpawn,
@@ -120,7 +124,8 @@ describe('setup', () => {
   describe('launchClient', () => {
     it('spawns a detached process and unrefs it', () => {
       const mockUnref = jest.fn();
-      mockSpawn.mockReturnValue({ unref: mockUnref });
+      const mockOn = jest.fn();
+      mockSpawn.mockReturnValue({ unref: mockUnref, on: mockOn } as unknown as FakeChild);
 
       launchClient('/path/to/hitl-client');
 
@@ -129,6 +134,25 @@ describe('setup', () => {
         stdio: 'ignore',
       });
       expect(mockUnref).toHaveBeenCalled();
+    });
+
+    it('handles the async spawn error rather than letting it kill the server (H9)', () => {
+      // Node reports a failed exec by emitting 'error' asynchronously. With no
+      // listener that is rethrown as an uncaught exception, which from inside a
+      // tool call takes the whole MCP server down.
+      let emitError: ((err: Error) => void) | undefined;
+      mockSpawn.mockReturnValue({
+        unref: jest.fn(),
+        on: ((event: string, cb: (err: Error) => void) => {
+          if (event === 'error') emitError = cb;
+          return undefined as unknown as FakeChild;
+        }) as FakeChild['on'],
+      } as unknown as FakeChild);
+
+      launchClient('/path/to/hitl-client');
+
+      expect(emitError).toBeDefined();
+      expect(() => emitError?.(new Error('spawn ENOENT'))).not.toThrow();
     });
   });
 
@@ -195,7 +219,7 @@ describe('setup', () => {
 
     it('launches client when binary is found and client is not running', async () => {
       const mockUnref = jest.fn();
-      mockSpawn.mockReturnValue({ unref: mockUnref });
+      mockSpawn.mockReturnValue({ unref: mockUnref, on: jest.fn() } as unknown as FakeChild);
 
       // Config exists, binary exists at release path, client not running
       mockExistsSync.mockImplementation((p: string) =>
