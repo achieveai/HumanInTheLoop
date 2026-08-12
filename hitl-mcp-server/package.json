@@ -1,15 +1,13 @@
 {
   "name": "hitl-mcp",
-  "version": "2.0.0",
+  "version": "2.10.0",
   "private": true,
   "workspaces": [
-    "shared",
     "server",
     "client"
   ],
   "scripts": {
     "build": "npm run build --workspaces",
-    "build:shared": "npm run build -w shared",
     "build:server": "npm run build -w server",
     "build:client": "npm run build -w client",
     "test": "npm run test --workspaces --if-present",

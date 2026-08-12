@@ -1,6 +1,6 @@
 {
   "name": "@achieveai/hitl-mcp-server",
-  "version": "2.9.6",
+  "version": "2.10.0",
   "description": "Human-in-the-Loop MCP Server — enables LLM agents to ask questions across all your devices via ntfy.sh",
   "type": "module",
   "main": "./dist/mcp-server.js",

@@ -1,6 +1,6 @@
 [package]
 name = "hitl-client"
-version = "2.9.6"
+version = "2.10.0"
 description = "Human-in-the-Loop cross-machine notification client"
 authors = ["HITL"]
 edition = "2021"
@@ -23,6 +23,8 @@ bytes = "1"
 urlencoding = "2"
 aes-gcm = "0.10"
 base64 = "0.22"
+sha2 = "0.10"
+flate2 = "1"
 rodio = "0.19"
 
 [target.'cfg(windows)'.dependencies]
