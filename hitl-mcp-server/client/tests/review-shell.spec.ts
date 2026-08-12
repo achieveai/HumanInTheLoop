@@ -5,7 +5,13 @@ import { test, expect, type Page } from '@playwright/test';
 // shape this lane codes against; if the Rust side lands different names, this
 // spec is where the rename shows up.
 
-type InvokeStub = { payload: unknown; failSubmit?: boolean; submitResult?: unknown };
+type InvokeStub = {
+  payload: unknown;
+  failSubmit?: boolean;
+  submitResult?: unknown;
+  failDraftSave?: boolean;
+  failOpenExternal?: boolean;
+};
 
 async function stubTauri(page: Page, opts: InvokeStub) {
   await page.addInitScript((o: InvokeStub) => {
@@ -24,6 +30,12 @@ async function stubTauri(page: Page, opts: InvokeStub) {
           if (cmd === 'submit_plan_review') {
             if (o.failSubmit) return Promise.reject(new Error('ntfy publish failed'));
             return Promise.resolve(o.submitResult ?? { status: 'received', responseId: 'r1', reason: null });
+          }
+          if (cmd === 'save_review_draft' && o.failDraftSave) {
+            return Promise.reject(new Error('disk full'));
+          }
+          if (cmd === 'open_external' && o.failOpenExternal) {
+            return Promise.reject(new Error('no handler registered'));
           }
           return Promise.resolve();
         },
@@ -164,10 +176,72 @@ test.describe('review.html shell', () => {
     await page.evaluate(() => (window as any).__emit('review-cancelled', { reviewId: 'rev-1', reason: 'agent_exited' }));
 
     await expect(page.locator('[data-banner="cancelled"]')).toContainText('agent exited');
-    // The comments stay on screen — that, not a persistence command, is what
-    // D-3 requires, and there is no save_review_draft command in the client.
+    await expect(page.locator('[data-banner="cancelled"]')).toContainText('saved as a draft');
     await expect(page.locator('.comment-card-list .comment-card-body')).toHaveText('unsent');
     expect(await page.evaluate(() => (window as any).__windowClosed)).toBeUndefined();
+
+    const draftCall = await page.evaluate(() =>
+      (window as any).__calls.filter((c: any) => c.cmd === 'save_review_draft').pop());
+    expect(draftCall.args.draft.inlineComments[0]).toMatchObject({ startLine: 3, endLine: 3 });
+  });
+
+  test('a failed draft save stops the banner promising the draft was saved', async ({ page }) => {
+    await stubTauri(page, { payload: samplePlan(), failDraftSave: true });
+    await page.goto('/review.html');
+
+    await page.locator('.diff-row[data-side="new"][data-line="3"]').click();
+    await page.locator('#comment-input').fill('unsent');
+    await page.locator('#comment-add').click();
+    await expect
+      .poll(() => page.evaluate(() => (window as any).__calls.some((c: any) => c.cmd === 'save_review_draft')))
+      .toBe(true);
+
+    await page.evaluate(() => (window as any).__emit('review-cancelled', { reviewId: 'rev-1', reason: 'agent_exited' }));
+
+    // Telling someone their work is saved when it is not is how they close the
+    // window and lose it.
+    await expect(page.locator('[data-banner="cancelled"]')).toContainText('could not be saved');
+    await expect(page.locator('[data-banner="cancelled"]')).not.toContainText('have been saved as a draft');
+    await expect(page.locator('.comment-card-list .comment-card-body')).toHaveText('unsent');
+  });
+
+  test('a remote image hands off to open_external', async ({ page }) => {
+    const lines = ['# Plan', '', '![pixel](https://attacker.example/pixel.png)'];
+    await stubTauri(page, {
+      payload: samplePlan({
+        body: {
+          content: lines.join('\n'),
+          diff: ['--- plan.md', '+++ plan.md', `@@ -1,${lines.length} +1,${lines.length} @@`,
+                 ...lines.map(l => ` ${l}`)].join('\n'),
+        },
+      }),
+    });
+    await page.goto('/review.html');
+
+    await page.locator('.md-image-placeholder').click();
+    const call = await page.evaluate(() =>
+      (window as any).__calls.find((c: any) => c.cmd === 'open_external'));
+    expect(call.args).toEqual({ url: 'https://attacker.example/pixel.png' });
+  });
+
+  test('a failed open_external falls back to loading in place, not a dead click', async ({ page }) => {
+    const lines = ['# Plan', '', '![pixel](https://attacker.example/pixel.png)'];
+    await page.route('**://attacker.example/**', route => route.abort());
+    await stubTauri(page, {
+      failOpenExternal: true,
+      payload: samplePlan({
+        body: {
+          content: lines.join('\n'),
+          diff: ['--- plan.md', '+++ plan.md', `@@ -1,${lines.length} +1,${lines.length} @@`,
+                 ...lines.map(l => ` ${l}`)].join('\n'),
+        },
+      }),
+    });
+    await page.goto('/review.html');
+
+    await page.locator('.md-image-placeholder').click();
+    // The load is blocked, so the URL surfaces as text — never silently nothing.
+    await expect(page.locator('.md-image-blocked')).toContainText('https://attacker.example/pixel.png');
   });
 
   test('C-4: an expired payload renders the expired panel', async ({ page }) => {

@@ -8,6 +8,11 @@ dist/
 *.d.ts
 !jest.config.js
 
+# The Tauri client frontend is hand-written ES modules with no build step, so
+# it is source, not output. Without this negation the tree-wide *.js above
+# swallows it and `git add` on a new frontend file fails silently.
+!client/src/**/*.js
+
 # IDE
 .vscode/
 .idea/

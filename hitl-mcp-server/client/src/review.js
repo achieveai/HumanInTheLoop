@@ -252,6 +252,9 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     /** @type {{side:string, anchor:number, focus:number}|null} */
     let selection = null;
     let submitting = false;
+    // Set when persisting the draft has actually failed, so the D-3 banner does
+    // not promise a save that did not happen.
+    let draftSaveFailed = false;
     let resolved = false;   // superseded or cancelled — verdict controls disabled
 
     const perf = { initialRenderMs: 0, markdownRenderMs: 0, lastCommentUpdateMs: 0, rowCount: rows.length };
@@ -386,13 +389,26 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     function loadPlaceholderImage(ph) {
         const src = ph.getAttribute('data-src') || '';
         if (callbacks.onOpenExternal) {
-            callbacks.onOpenExternal(src);
+            // If handing off to the OS fails, fall back to loading in place
+            // rather than leaving a click that visibly does nothing.
+            let handed;
+            try { handed = callbacks.onOpenExternal(src); } catch (err) { handed = Promise.reject(err); }
+            if (handed && typeof handed.catch === 'function') {
+                handed.catch(() => loadImageInPlace(ph, src));
+            }
             return;
         }
+        loadImageInPlace(ph, src);
+    }
+
+    function loadImageInPlace(ph, src) {
+        if (!ph.isConnected) return;
         const img = document.createElement('img');
         img.className = 'md-image-loaded';
         img.alt = ph.querySelector('.md-image-alt')?.textContent || '';
         img.addEventListener('error', () => {
+            // F-7 vs F-8: img-src 'self' data: blocks this by design. Say so,
+            // and keep the URL visible as text so it is never hidden.
             const failed = document.createElement('span');
             failed.className = 'md-image-blocked';
             failed.textContent = `Image blocked by content policy: ${src}`;
@@ -764,7 +780,6 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         try { callbacks.onDraftChange?.(currentDraft()); } catch (err) { console.error('onDraftChange failed:', err); }
     }
     feedbackEl.addEventListener('input', notifyDraft);
-
     function setControlsDisabled(disabled) {
         container.querySelectorAll('.review-actions .button').forEach(b => { b.disabled = disabled; });
     }
@@ -781,7 +796,13 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     //   unacknowledged → published, unconfirmed. Keep everything, say so plainly.
     // A rejection means the publish itself failed and nothing was sent at all.
     function applySubmitResult(result, verdict) {
-        const status = result?.status || 'received';
+        // Fail safe: only a literal 'received' is success. An unknown status —
+        // a newer client, a shape change, a missing field — is treated as
+        // unacknowledged, because the cost of being wrong is asymmetric.
+        // Guessing 'received' silently discards someone's review.
+        const status = result?.status === 'received' ? 'received'
+            : result?.status === 'lost' ? 'lost'
+            : 'unacknowledged';
         if (status === 'received') {
             showSubmitted(container, verdict);
             return;
@@ -875,12 +896,22 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
             resolved = true;
             setControlsDisabled(true);
             renderComposer();
-            // `reason` is a free string on the wire, so this reads it rather
-            // than switching on it exhaustively.
-            showBanner('cancelled', reason === 'cancelled'
-                ? 'This review was cancelled. Your comments have been saved as a draft.'
-                : 'The agent exited before this review finished. Your comments have been saved as a draft.');
             notifyDraft();
+            // `reason` is a free string on the wire, so this reads it rather
+            // than switching on it exhaustively. The wording follows whether the
+            // draft was actually persisted — claiming a save that failed is how
+            // someone loses 20 minutes of review and only finds out later.
+            const kept = draftSaveFailed
+                ? 'Your comments are still here, but could not be saved as a draft — copy anything you need before closing.'
+                : 'Your comments have been saved as a draft.';
+            showBanner('cancelled', (reason === 'cancelled'
+                ? 'This review was cancelled. '
+                : 'The agent exited before this review finished. ') + kept);
+        },
+
+        /** Reported by the shell when persisting the draft failed. */
+        noteDraftSaveFailed() {
+            draftSaveFailed = true;
         },
 
         showError,

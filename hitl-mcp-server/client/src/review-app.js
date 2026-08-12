@@ -90,6 +90,19 @@ async function init() {
             inlineComments: [],
             encrypted: wasEncrypted,
         }),
+        // Draft persistence is a promise to the human, so a failure is recorded
+        // rather than swallowed: the D-3 banner reads this flag and stops
+        // claiming the draft was saved. Not surfaced per keystroke — that would
+        // be an error message on every character typed.
+        onDraftChange: (draft) => {
+            invoke('save_review_draft', { draft }).catch(err => {
+                console.error('save_review_draft failed:', err);
+                controller?.noteDraftSaveFailed();
+            });
+        },
+        // Returning the promise lets review.js fall back to loading in place if
+        // the OS hand-off fails, instead of a click that does nothing.
+        onOpenExternal: (url) => invoke('open_external', { url }),
     });
 
     await revealWindow(invoke);

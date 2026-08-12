@@ -343,6 +343,26 @@ test.describe('Review states', () => {
     await expect(page.locator('.success-title')).toHaveText('Plan approved');
   });
 
+  test('an unrecognized status fails safe to unacknowledged, never to success', async ({ page }) => {
+    await page.goto(url('?status=something-new'));
+    await addComment(page, 42, 42, 'must survive');
+    await page.locator('#btn-approve').click();
+
+    // A newer client, a renamed status, a dropped field — guessing "received"
+    // silently discards the review, so anything unknown is treated as unsent.
+    await expect(page.locator('.success-title')).toHaveCount(0);
+    await expect(page.locator('#review-error')).toHaveAttribute('data-tone', 'warning');
+    await expect(page.locator('.comment-card-list .comment-card-body')).toHaveText('must survive');
+    await expect(page.locator('#btn-approve')).toBeEnabled();
+  });
+
+  test('a submit resolving with no status at all also fails safe', async ({ page }) => {
+    await page.goto(url('?status='));
+    await page.locator('#btn-approve').click();
+    await expect(page.locator('.success-title')).toHaveCount(0);
+    await expect(page.locator('#review-error')).toHaveAttribute('data-tone', 'warning');
+  });
+
   test('C-4: an expired plan gets a first-class panel, not a blank window', async ({ page }) => {
     await page.goto(url('?state=expired'));
     await expect(page.locator('.review-panel[data-state="expired"]')).toBeVisible();

@@ -162,14 +162,15 @@
         const state = params.get('state');
         const failSubmit = params.get('fail') === '1';
         // submit_plan_review resolves with {status, responseId, reason}; only
-        // 'received' is success. ?status= drives the other two.
-        const submitStatus = params.get('status') || 'received';
+        // 'received' is success. ?status= drives the others, and an empty
+        // ?status= drops the field entirely to exercise the fail-safe default.
+        const submitStatus = params.has('status') ? params.get('status') : 'received';
         const submitResult = {
-            status: submitStatus,
             responseId: 'resp-test',
             reason: submitStatus === 'lost' ? 'response attachment expired'
                 : submitStatus === 'unacknowledged' ? 'no ack within 30s' : null,
         };
+        if (submitStatus) submitResult.status = submitStatus;
 
         const container = document.getElementById('review-container');
 
