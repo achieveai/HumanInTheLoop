@@ -91,12 +91,14 @@ test.describe('Remote images (F-7)', () => {
 });
 
 test.describe('Vendored libraries (E-11 / F-8)', () => {
-  test('no page requests a CDN', async ({ page }) => {
+  test('no page requests a CDN, and every page still loads cleanly', async ({ page }) => {
     const external: string[] = [];
+    const errors: string[] = [];
     page.on('request', req => {
       const u = req.url();
       if (!u.startsWith('http://127.0.0.1:3848') && !u.startsWith('data:')) external.push(u);
     });
+    page.on('pageerror', e => errors.push(e.message));
 
     for (const path of ['/index.html', '/notifications.html', '/test-harness.html',
                         '/test-notifications.html', '/review-harness.html']) {
@@ -105,6 +107,9 @@ test.describe('Vendored libraries (E-11 / F-8)', () => {
     }
 
     expect(external.filter(u => u.includes('jsdelivr'))).toEqual([]);
+    // index.html and notifications.html have no Tauri mock, so they legitimately
+    // fail on `window.__TAURI__` when served statically. Nothing else should.
+    expect(errors.filter(e => !e.includes("reading 'window'"))).toEqual([]);
   });
 
   test('markdown-it and marked are served from src/vendor', async ({ page, request }) => {
