@@ -288,6 +288,33 @@ test.describe('Submit failure keeps the answer', () => {
   });
 });
 
+// ─── Payload handoff over IPC (W2.5 / W3.2) ──────────────────────────────────
+
+test.describe('Question payload comes from take_window_payload', () => {
+  test('the question renders from the staged payload, not the URL', async ({ page }) => {
+    await page.goto('/test-harness.html?scenario=single&driver=app');
+
+    // The fixture's own options prove the staged payload was what rendered.
+    await expect(page.locator('.option')).not.toHaveCount(0);
+    await expect(page.locator('#btn-submit')).toBeVisible();
+    // The whole point of the move: a large question no longer has to survive
+    // query-string encoding, and never lands anywhere that logs URLs.
+    expect(page.url()).not.toContain('question=');
+
+    // Taken exactly once — the store removes the entry on read.
+    expect(await page.evaluate(() => (window as any).__stagedPayload)).toBeUndefined();
+  });
+
+  test('a window with nothing staged explains itself instead of spinning forever', async ({ page }) => {
+    await page.goto('/test-harness.html?scenario=single&driver=app&nopayload=1');
+
+    // The default markup is a "Waiting for question..." spinner, which is
+    // indistinguishable from a hang — and the agent is blocked the whole time.
+    await expect(page.locator('#dialog-container')).toContainText('Could not load the question');
+    await expect(page.locator('.spinner')).toHaveCount(0);
+  });
+});
+
 // ─── Preview mode: unaffected ────────────────────────────────────────────────
 
 

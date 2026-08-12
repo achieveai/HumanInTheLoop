@@ -22,6 +22,16 @@
                     if (failInvoke && cmd === 'submit_answer') {
                         return Promise.reject(new Error('ntfy publish failed (simulated)'));
                     }
+                    // Mirrors payload_store: staged by window label, taken once,
+                    // and a rejection when nothing was staged for this window.
+                    if (cmd === 'take_window_payload') {
+                        const staged = window.__stagedPayload;
+                        if (staged === undefined) {
+                            return Promise.reject(new Error('no payload staged for this window'));
+                        }
+                        window.__stagedPayload = undefined;
+                        return Promise.resolve(staged);
+                    }
                     return Promise.resolve();
                 },
             },
@@ -160,13 +170,15 @@
 
         // ?driver=app routes the fixture through app.js itself rather than
         // calling renderDialog directly, so the real submit/skip handlers —
-        // and their failure paths — are what gets tested.
+        // and their failure paths — are what gets tested. The payload is staged
+        // the way Rust stages it, over IPC rather than on the URL.
         if (params.get('driver') === 'app') {
-            const query = new URLSearchParams({
-                question: JSON.stringify(question),
-                encrypted: 'false',
-            });
+            const query = new URLSearchParams({ encrypted: 'false' });
             if (params.get('fail') === '1') query.set('fail', '1');
+            // ?nopayload=1 leaves nothing staged, to exercise the load-failure path.
+            if (params.get('nopayload') !== '1') {
+                window.__stagedPayload = JSON.stringify(question);
+            }
             history.replaceState(null, '', `?${query.toString()}`);
             await import('./app.js');
         } else {

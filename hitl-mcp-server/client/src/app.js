@@ -1,5 +1,5 @@
 // Main app entry point for the HITL Tauri client frontend.
-// Reads question data from URL query param and renders the dialog.
+// Pulls the question payload over IPC and renders the dialog.
 
 import { renderDialog, showSuccess } from './dialog.js';
 
@@ -41,14 +41,29 @@ async function init() {
     const dialogContainer = document.getElementById('dialog-container');
     const dismissedContainer = document.getElementById('dismissed-container');
 
-    // Read question data from URL query parameter (set by Rust backend)
+    // The question no longer travels on the URL: a large payload does not
+    // survive query-string encoding and the content leaks into anything that
+    // logs URLs, so Rust stages it by window label and we take it once, here.
+    // `encrypted` stays on the URL — it is a flag, not content.
     const params = new URLSearchParams(window.location.search);
-    const questionParam = params.get('question');
     const wasEncrypted = params.get('encrypted') === 'true';
 
-    if (questionParam) {
+    let question = null;
+    try {
+        const raw = await invoke('take_window_payload');
+        question = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch (err) {
+        // Never leave the window on its "Waiting for question..." spinner: that
+        // is indistinguishable from a hang, and the agent is blocked meanwhile.
+        console.error('Failed to load the question payload:', err);
+        dialogContainer.innerHTML = '<p style="color:red;padding:24px;">'
+            + 'Could not load the question. The agent is still waiting — '
+            + 'close this window and ask it to resend.</p>';
+        await invoke('show_no_activate').catch(() => {});
+    }
+
+    if (question) {
         try {
-            const question = JSON.parse(questionParam);
             currentQuestionId = question.messageId;
 
             dismissedContainer.style.display = 'none';
@@ -105,7 +120,7 @@ async function init() {
             });
             await invoke('show_no_activate');
         } catch (err) {
-            console.error('Failed to parse question from URL:', err);
+            console.error('Failed to render the question:', err);
             dialogContainer.innerHTML = '<p style="color:red;padding:24px;">Failed to load question data.</p>';
         }
     }
