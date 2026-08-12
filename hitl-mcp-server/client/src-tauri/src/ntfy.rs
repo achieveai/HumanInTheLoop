@@ -452,17 +452,31 @@ async fn dispatch_message(
         }
     }
 
-    if env.version() > SUPPORTED_PROTOCOL_VERSION {
-        // The visible "needs a newer HITL client" panel lands with the review
-        // window. Until then this is at least named in the log rather than
-        // dropped on the floor.
-        log::warn!(
-            "Message {} declares protocolVersion {} but this client supports {} — ignoring",
-            env.message_id,
-            env.version(),
-            SUPPORTED_PROTOCOL_VERSION
-        );
-        return;
+    match version_verdict(env.version(), &env.msg_type) {
+        VersionVerdict::Handle => {}
+        VersionVerdict::ShowUpgradePanel => {
+            log::warn!(
+                "Message {} ({}) declares protocolVersion {} but this client supports {} — \
+                 showing the upgrade panel",
+                env.message_id,
+                env.msg_type,
+                env.version(),
+                SUPPORTED_PROTOCOL_VERSION
+            );
+            show_upgrade_required(app, &env, raw);
+            return;
+        }
+        VersionVerdict::Ignore => {
+            log::warn!(
+                "Message {} ({}) declares protocolVersion {} but this client supports {} — \
+                 ignoring, nothing is waiting on it",
+                env.message_id,
+                env.msg_type,
+                env.version(),
+                SUPPORTED_PROTOCOL_VERSION
+            );
+            return;
+        }
     }
 
     match env.msg_type.as_str() {
@@ -830,6 +844,147 @@ fn review_window_payload(
     serde_json::to_string(&payload).unwrap_or_default()
 }
 
+/// What the protocol-version gate decides to do with a message.
+#[derive(Debug, PartialEq, Eq)]
+enum VersionVerdict {
+    /// This build understands the wire shape; dispatch normally.
+    Handle,
+    /// Too new, and a human is waiting on it — say so on screen.
+    ShowUpgradePanel,
+    /// Too new, but nothing human-facing is blocked on it.
+    Ignore,
+}
+
+/// Decide what a message's `protocolVersion` means for this build.
+///
+/// A-7: silently ignoring a message this client cannot read is the exact
+/// failure the version field was added to prevent — a bumped release would
+/// leave every agent blocked forever on a request the human never sees.
+///
+/// The default for a too-new message is therefore to show the panel, including
+/// for message types this build has never heard of, since a future
+/// human-facing type would otherwise vanish. Only the settlement types are
+/// exempt: they resolve something rather than ask for it, so nothing waits on
+/// them, and one panel per ack during a version mismatch would bury the one
+/// panel that matters.
+fn version_verdict(version: u32, msg_type: &str) -> VersionVerdict {
+    if version <= SUPPORTED_PROTOCOL_VERSION {
+        return VersionVerdict::Handle;
+    }
+
+    match msg_type {
+        "answer" | "plan_review_response" | "plan_review_ack" | "cancel_review"
+        | "dismiss_notification" | "chunk" => VersionVerdict::Ignore,
+        _ => VersionVerdict::ShowUpgradePanel,
+    }
+}
+
+/// Open a window that says this client is too old to read the message.
+///
+/// Only the two fields the panel renders are forwarded. A message from a
+/// future protocol is precisely the case where this build's reading of the
+/// rest cannot be trusted, so none of it is passed on.
+fn show_upgrade_required(app: &AppHandle, env: &MessageEnvelope, raw: &str) {
+    let label = window_label("review", &env.message_id);
+
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = crate::window_utils::show_window_no_activate(&window);
+        return;
+    }
+
+    let display_path = serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|v| v.get("displayPath").and_then(|p| p.as_str()).map(String::from))
+        .unwrap_or_default();
+
+    let payload = serde_json::json!({
+        "messageId": env.message_id,
+        "protocolVersion": env.version(),
+        "displayPath": display_path,
+    });
+    payload_store::put(app, &label, payload.to_string());
+
+    match build_review_window(app, &label, "Plan review — update required") {
+        Ok(window) => {
+            log::info!("Upgrade-required window created: {}", label);
+            if let Err(e) = crate::window_utils::show_window_no_activate(&window) {
+                log::error!("Failed to show upgrade window {}: {}", label, e);
+            }
+        }
+        Err(e) => {
+            app.state::<payload_store::PayloadStore>().take(&label);
+            log::error!("Failed to create upgrade window: {}", e);
+        }
+    }
+}
+
+/// The size a review window would like to be, before the display gets a say.
+const REVIEW_PREFERRED_SIZE: (f64, f64) = (1280.0, 900.0);
+/// Below this the two-pane layout stops being usable.
+const REVIEW_MIN_SIZE: (f64, f64) = (720.0, 520.0);
+
+/// Shrink the preferred size to something that actually fits on screen.
+///
+/// E-9. 1280x900 is taller than a 1366x768 laptop display, and `.center()` then
+/// pushes the overflow off both edges — including the verdict footer, which is
+/// the bottom-most element by design (E-12), leaving a reviewer able to read
+/// the plan and unable to act on it.
+fn fit_to_work_area(preferred: (f64, f64), min: (f64, f64), available: (f64, f64)) -> (f64, f64) {
+    let fit = |preferred: f64, min: f64, available: f64| {
+        if available <= 0.0 {
+            return preferred; // no usable monitor information
+        }
+        // A display smaller than the minimum takes the display: a window sized
+        // past the screen edge is the very thing being fixed.
+        preferred.min(available).max(min.min(available))
+    };
+
+    (
+        fit(preferred.0, min.0, available.0),
+        fit(preferred.1, min.1, available.1),
+    )
+}
+
+fn review_window_size(app: &AppHandle) -> (f64, f64) {
+    let Ok(Some(monitor)) = app.primary_monitor() else {
+        log::debug!("No monitor information available; using the preferred window size");
+        return REVIEW_PREFERRED_SIZE;
+    };
+
+    // The work area excludes the taskbar and dock, which is what the window
+    // has to share the screen with.
+    let area = monitor
+        .work_area()
+        .size
+        .to_logical::<f64>(monitor.scale_factor());
+
+    fit_to_work_area(REVIEW_PREFERRED_SIZE, REVIEW_MIN_SIZE, (area.width, area.height))
+}
+
+/// The review window shell, shared by a real review and the upgrade panel.
+fn build_review_window(
+    app: &AppHandle,
+    label: &str,
+    title: &str,
+) -> tauri::Result<tauri::WebviewWindow> {
+    let (width, height) = review_window_size(app);
+
+    tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App("review.html".into()))
+        .title(title)
+        .inner_size(width, height)
+        .min_inner_size(REVIEW_MIN_SIZE.0, REVIEW_MIN_SIZE.1)
+        .center()
+        .resizable(true)
+        // Decorated and not on top, both opposite to show_question: a review
+        // window is worked in alongside an editor, and decorations are what give
+        // the webview its find-in-page.
+        .decorations(true)
+        .always_on_top(false)
+        .visible(false)
+        .focused(false)
+        .build()
+}
+
 /// Create and show the review window for a plan.
 ///
 /// Deliberately unlike `show_question`: a review is read for minutes, not
@@ -882,25 +1037,7 @@ fn show_review(
         format!("Plan review — {}", review.display_path)
     };
 
-    match tauri::WebviewWindowBuilder::new(
-        app,
-        &label,
-        tauri::WebviewUrl::App("review.html".into()),
-    )
-    .title(title)
-    .inner_size(1280.0, 900.0)
-    .min_inner_size(720.0, 520.0)
-    .center()
-    .resizable(true)
-    // Decorated and not on top, both opposite to show_question: a review window
-    // is worked in alongside an editor, and decorations are what give the
-    // webview its find-in-page.
-    .decorations(true)
-    .always_on_top(false)
-    .visible(false)
-    .focused(false)
-    .build()
-    {
+    match build_review_window(app, &label, &title) {
         Ok(window) => {
             log::info!("Review window created: {}", label);
             if let Err(e) = crate::window_utils::show_window_no_activate(&window) {
@@ -1631,6 +1768,111 @@ mod tests {
         .unwrap();
 
         assert_eq!(json["_draft"], serde_json::Value::Null);
+    }
+
+    fn envelope(version: u32, msg_type: &str) -> VersionVerdict {
+        version_verdict(version, msg_type)
+    }
+
+    #[test]
+    fn a_supported_version_is_dispatched_normally() {
+        for msg_type in ["question", "plan_review", "answer", "chunk"] {
+            assert_eq!(envelope(SUPPORTED_PROTOCOL_VERSION, msg_type), VersionVerdict::Handle);
+            assert_eq!(envelope(1, msg_type), VersionVerdict::Handle);
+        }
+    }
+
+    #[test]
+    fn a_too_new_message_a_human_is_waiting_on_reaches_the_window() {
+        // A-7. The old gate logged and returned, so the panel review.js renders
+        // could only be reached through a window Rust had already decided not
+        // to open — a bumped protocol would leave the agent blocked forever on
+        // a request nobody ever saw.
+        let too_new = SUPPORTED_PROTOCOL_VERSION + 1;
+
+        assert_eq!(envelope(too_new, "plan_review"), VersionVerdict::ShowUpgradePanel);
+        assert_eq!(envelope(too_new, "question"), VersionVerdict::ShowUpgradePanel);
+        assert_eq!(envelope(too_new, "notification"), VersionVerdict::ShowUpgradePanel);
+    }
+
+    #[test]
+    fn an_unknown_future_message_type_still_reaches_the_window() {
+        // The case this is actually for: a version bump that introduces a type
+        // this build has never heard of. Defaulting to silence would recreate
+        // the exact failure A-7 exists to prevent.
+        assert_eq!(
+            envelope(SUPPORTED_PROTOCOL_VERSION + 1, "plan_review_v2"),
+            VersionVerdict::ShowUpgradePanel
+        );
+        assert_eq!(
+            envelope(99, "something_invented_years_from_now"),
+            VersionVerdict::ShowUpgradePanel
+        );
+    }
+
+    #[test]
+    fn a_too_new_settlement_message_is_ignored_without_a_window() {
+        // These resolve something rather than ask for it, so nothing is
+        // waiting. One panel per ack would bury the one panel that matters.
+        let too_new = SUPPORTED_PROTOCOL_VERSION + 1;
+
+        for msg_type in [
+            "answer",
+            "plan_review_response",
+            "plan_review_ack",
+            "cancel_review",
+            "dismiss_notification",
+            "chunk",
+        ] {
+            assert_eq!(
+                envelope(too_new, msg_type),
+                VersionVerdict::Ignore,
+                "{msg_type} should not open a window"
+            );
+        }
+    }
+
+    #[test]
+    fn a_review_window_fits_a_display_it_would_otherwise_overflow() {
+        // E-9. 1366x768 is the case that breaks: 900 > 768, and .center() then
+        // pushes the verdict footer off the bottom edge, leaving the plan
+        // readable and unactionable.
+        let (w, h) = fit_to_work_area(REVIEW_PREFERRED_SIZE, REVIEW_MIN_SIZE, (1366.0, 728.0));
+
+        assert_eq!(w, 1280.0, "width already fits");
+        assert_eq!(h, 728.0, "height must come down to the work area");
+    }
+
+    #[test]
+    fn a_large_display_gets_the_preferred_size() {
+        let (w, h) = fit_to_work_area(REVIEW_PREFERRED_SIZE, REVIEW_MIN_SIZE, (2560.0, 1400.0));
+
+        assert_eq!((w, h), REVIEW_PREFERRED_SIZE);
+    }
+
+    #[test]
+    fn a_narrow_display_shrinks_both_dimensions_independently() {
+        let (w, h) = fit_to_work_area(REVIEW_PREFERRED_SIZE, REVIEW_MIN_SIZE, (1024.0, 1400.0));
+
+        assert_eq!(w, 1024.0);
+        assert_eq!(h, 900.0);
+    }
+
+    #[test]
+    fn a_display_smaller_than_the_minimum_takes_the_display() {
+        // Clamping up to the minimum would put the edges back off-screen,
+        // which is the bug rather than the fix.
+        let (w, h) = fit_to_work_area(REVIEW_PREFERRED_SIZE, REVIEW_MIN_SIZE, (640.0, 480.0));
+
+        assert_eq!((w, h), (640.0, 480.0));
+    }
+
+    #[test]
+    fn unusable_monitor_information_falls_back_to_the_preferred_size() {
+        assert_eq!(
+            fit_to_work_area(REVIEW_PREFERRED_SIZE, REVIEW_MIN_SIZE, (0.0, 0.0)),
+            REVIEW_PREFERRED_SIZE
+        );
     }
 
     #[test]
