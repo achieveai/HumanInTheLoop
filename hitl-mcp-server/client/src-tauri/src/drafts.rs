@@ -145,6 +145,27 @@ pub fn load_for_window(plan_id: &str, review_id: &str, snapshot_hash: &str) -> O
     Some(draft)
 }
 
+/// Delete the draft filed for this plan. Idempotent.
+pub fn clear(plan_id: &str, review_id: &str) -> Result<(), String> {
+    let dir = drafts_dir().ok_or_else(|| "no home directory for the draft store".to_string())?;
+    clear_in(&dir, plan_id, review_id)
+}
+
+fn clear_in(dir: &std::path::Path, plan_id: &str, review_id: &str) -> Result<(), String> {
+    let key = draft_key(plan_id, review_id)
+        .ok_or_else(|| "no planId or reviewId to identify the draft to clear".to_string())?;
+    let path = draft_file(dir, &key);
+
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        // Already gone is the goal state. The window calls this after a submit
+        // that may well have happened on another device, so "there was nothing
+        // here" is the common case, not a fault.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("could not remove {}: {e}", path.display())),
+    }
+}
+
 #[cfg(unix)]
 fn restrict_dir(dir: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -184,6 +205,36 @@ pub async fn save_review_draft(draft: ReviewDraft) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(e) => {
             log::warn!("Could not save the review draft: {}", e);
+            Err(e)
+        }
+    }
+}
+
+/// Tauri command: delete a draft once its review has actually been delivered.
+///
+/// Called only for `status: "received"`. On `lost` or `unacknowledged` the draft
+/// is the sole surviving copy of the reviewer's work, so it must stay.
+///
+/// Both ids are optional so a caller that knows only one of them still clears
+/// the right file; failing to parse the arguments would leave a draft behind
+/// that gets re-offered against a review the human already finished.
+#[tauri::command]
+pub async fn clear_review_draft(
+    plan_id: Option<String>,
+    review_id: Option<String>,
+) -> Result<(), String> {
+    let plan_id = plan_id.unwrap_or_default();
+    let review_id = review_id.unwrap_or_default();
+
+    match clear(&plan_id, &review_id) {
+        Ok(()) => {
+            log::info!("Cleared the draft for plan {:?} / review {:?}", plan_id, review_id);
+            Ok(())
+        }
+        Err(e) => {
+            // Surfaced, not swallowed: a stale draft is a small annoyance, but
+            // a store that has silently stopped working is not.
+            log::warn!("Could not clear the review draft: {}", e);
             Err(e)
         }
     }
@@ -425,6 +476,92 @@ mod tests {
             load_in(&dir, "plan-other", "").unwrap().overall_feedback,
             "different plan"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clearing_a_delivered_review_removes_its_draft() {
+        let dir = temp_dir("clear");
+
+        save_in(&dir, &a_draft()).unwrap();
+        assert!(load_in(&dir, "plan-abc", "rev-1").is_some());
+
+        clear_in(&dir, "plan-abc", "rev-1").unwrap();
+
+        assert!(load_in(&dir, "plan-abc", "rev-1").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clearing_a_draft_that_was_never_saved_succeeds() {
+        // The window clears after a submit that may have happened on another
+        // device, so there is often nothing here. That is the goal state.
+        let dir = temp_dir("clear-absent");
+
+        assert!(clear_in(&dir, "plan-never-saved", "rev-1").is_ok());
+        // And clearing twice is still fine.
+        save_in(&dir, &a_draft()).unwrap();
+        assert!(clear_in(&dir, "plan-abc", "rev-1").is_ok());
+        assert!(clear_in(&dir, "plan-abc", "rev-1").is_ok());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clearing_removes_only_the_targeted_draft() {
+        let dir = temp_dir("clear-targeted");
+
+        save_in(&dir, &a_draft()).unwrap();
+        save_in(
+            &dir,
+            &ReviewDraft {
+                plan_id: "plan-other".to_string(),
+                overall_feedback: "still being written".to_string(),
+                ..a_draft()
+            },
+        )
+        .unwrap();
+
+        clear_in(&dir, "plan-abc", "rev-1").unwrap();
+
+        assert!(load_in(&dir, "plan-abc", "rev-1").is_none());
+        assert_eq!(
+            load_in(&dir, "plan-other", "").unwrap().overall_feedback,
+            "still being written",
+            "another plan's in-progress review must survive"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clearing_uses_the_same_key_resolution_as_saving() {
+        // A plan with no planId was saved under its reviewId, so it has to be
+        // cleared under the reviewId too or it would linger forever.
+        let dir = temp_dir("clear-fallback");
+        let draft = ReviewDraft {
+            plan_id: String::new(),
+            review_id: "rev-1".to_string(),
+            ..a_draft()
+        };
+
+        save_in(&dir, &draft).unwrap();
+        assert!(load_in(&dir, "", "rev-1").is_some());
+
+        clear_in(&dir, "", "rev-1").unwrap();
+
+        assert!(load_in(&dir, "", "rev-1").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clearing_with_nothing_to_key_on_is_an_error_rather_than_a_quiet_no_op() {
+        let dir = temp_dir("clear-unkeyed");
+
+        assert!(clear_in(&dir, "", "").is_err());
 
         let _ = fs::remove_dir_all(&dir);
     }

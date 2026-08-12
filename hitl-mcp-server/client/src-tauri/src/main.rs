@@ -131,6 +131,7 @@ fn main() {
             dismiss_notification,
             show_no_activate,
             drafts::save_review_draft,
+            drafts::clear_review_draft,
             opener::open_external,
             payload_store::take_window_payload
         ])
