@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import crypto from 'crypto';
+import { execFileSync } from 'child_process';
 import { loadConfig, saveConfig, generateDefaultConfig, getConfigPath } from './config.js';
 import { findClientBinary, launchClient } from './setup.js';
 import { dirname } from 'path';
@@ -15,6 +16,7 @@ Usage:
   hitl config set-topic <id>  Update the topic ID
   hitl test                Send a test question through ntfy
   hitl client              Launch the HITL desktop client app
+  hitl claude-code install Register HITL as a Claude Code MCP server (user scope)
   hitl help                Show this help message
 `;
 
@@ -31,6 +33,8 @@ async function main() {
       return cmdTest();
     case 'client':
       return cmdClient();
+    case 'claude-code':
+      return cmdClaudeCode(args.slice(1));
     case 'help':
     case '--help':
     case '-h':
@@ -121,6 +125,166 @@ function cmdClient() {
   console.log(`HITL Client launched from ${binaryPath}`);
 }
 
+// --- claude-code install ---
+
+const CLAUDE_CODE_MCP_NAME = 'hitl';
+const CLAUDE_CODE_MCP_PACKAGE = '@achieveai/hitl-mcp-server';
+const CLAUDE_CODE_RESTART_INSTRUCTION =
+  'Restart Claude Code (or start a new session) for the HITL MCP server to become available.';
+
+/** Result of merging HITL's entry into a host's global (user-level) settings. */
+export interface HostSettingMergeResult {
+  updated: boolean;
+  path: string;
+}
+
+/**
+ * Placeholder boundary for merging HITL's entry into Claude Code's global
+ * user-level settings.
+ *
+ * NOTE FOR INTEGRATION: a dedicated host-settings module is being built as a
+ * separate workstream. Once it lands, it is expected to export a function
+ * matching this exact contract:
+ *
+ *   mergeGlobalHostSetting(): { updated: boolean; path: string }
+ *
+ * — merging (never overwriting) HITL's entry into whatever global settings
+ * file that module owns, and reporting whether a change was made and which
+ * file was touched. That function should be imported and passed in as the
+ * `mergeGlobalHostSetting` dependency of {@link performClaudeCodeInstall} in
+ * place of this default; no other change to this file should be needed.
+ * Until that module exists, this local no-op keeps `hitl claude-code install`
+ * safe to run — it will not touch any global settings file.
+ */
+function defaultMergeGlobalHostSetting(): HostSettingMergeResult {
+  return { updated: false, path: '' };
+}
+
+/** Injectable dependencies for {@link performClaudeCodeInstall}, for testing. */
+export interface ClaudeCodeInstallDeps {
+  runClaudeMcpAdd: (args: string[]) => void;
+  mergeGlobalHostSetting: () => HostSettingMergeResult;
+}
+
+export interface ClaudeCodeInstallResult {
+  success: boolean;
+  registered: 'added' | 'already_registered' | 'error';
+  message: string;
+  hostSetting: HostSettingMergeResult;
+  restartInstruction: string;
+}
+
+/**
+ * Build the argv for `claude mcp add`, registering HITL as a user-scoped
+ * stdio MCP server launched via npx. Deliberately carries no `--env` flags:
+ * any "auto-launch client in the background" behavior belongs in global host
+ * settings (merged separately via mergeGlobalHostSetting), not baked into
+ * this per-registration command line.
+ */
+export function buildClaudeMcpAddArgs(): string[] {
+  return [
+    'mcp', 'add', CLAUDE_CODE_MCP_NAME,
+    '--scope', 'user',
+    '--transport', 'stdio',
+    '--',
+    'npx', '-y', CLAUDE_CODE_MCP_PACKAGE,
+  ];
+}
+
+function defaultRunClaudeMcpAdd(args: string[]): void {
+  // execFileSync: argv passed as an array, no shell involved — safe against
+  // shell injection, unlike execSync/exec with a concatenated string.
+  execFileSync('claude', args, { stdio: 'pipe', encoding: 'utf-8' });
+}
+
+function errorText(err: unknown): string {
+  if (err instanceof Error) {
+    const withStreams = err as Error & { stderr?: string | Buffer; stdout?: string | Buffer };
+    const parts = [withStreams.message, withStreams.stderr, withStreams.stdout]
+      .filter((p): p is string | Buffer => Boolean(p))
+      .map((p) => p.toString());
+    return parts.join('\n');
+  }
+  return String(err);
+}
+
+/**
+ * Register HITL as a Claude Code MCP server and merge the global host
+ * setting. Idempotent: re-running after a prior successful install reports
+ * `registered: 'already_registered'` (success) rather than an error.
+ */
+export function performClaudeCodeInstall(
+  deps: ClaudeCodeInstallDeps = {
+    runClaudeMcpAdd: defaultRunClaudeMcpAdd,
+    mergeGlobalHostSetting: defaultMergeGlobalHostSetting,
+  }
+): ClaudeCodeInstallResult {
+  let registered: 'added' | 'already_registered' = 'added';
+  let message = `Registered "${CLAUDE_CODE_MCP_NAME}" as a user-scoped Claude Code MCP server.`;
+
+  try {
+    deps.runClaudeMcpAdd(buildClaudeMcpAddArgs());
+  } catch (err) {
+    const text = errorText(err);
+    if (/already exists/i.test(text)) {
+      registered = 'already_registered';
+      message = `"${CLAUDE_CODE_MCP_NAME}" is already registered as a Claude Code MCP server.`;
+    } else {
+      return {
+        success: false,
+        registered: 'error',
+        message: `Failed to register "${CLAUDE_CODE_MCP_NAME}" with Claude Code: ${text}`,
+        hostSetting: { updated: false, path: '' },
+        restartInstruction: CLAUDE_CODE_RESTART_INSTRUCTION,
+      };
+    }
+  }
+
+  try {
+    const hostSetting = deps.mergeGlobalHostSetting();
+    return {
+      success: true,
+      registered,
+      message,
+      hostSetting,
+      restartInstruction: CLAUDE_CODE_RESTART_INSTRUCTION,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      registered,
+      message: `${message} Failed to update global host settings: ${errorText(err)}`,
+      hostSetting: { updated: false, path: '' },
+      restartInstruction: CLAUDE_CODE_RESTART_INSTRUCTION,
+    };
+  }
+}
+
+function cmdClaudeCodeInstall() {
+  const result = performClaudeCodeInstall();
+  console.log(result.message);
+  if (result.hostSetting.updated) {
+    console.log(`Updated global host settings at ${result.hostSetting.path}`);
+  }
+  console.log(result.restartInstruction);
+  if (!result.success) {
+    process.exit(1);
+  }
+}
+
+function cmdClaudeCode(args: string[]) {
+  const subcommand = args[0];
+
+  switch (subcommand) {
+    case 'install':
+      return cmdClaudeCodeInstall();
+    default:
+      console.error(`Unknown claude-code subcommand: ${subcommand}`);
+      console.log('Available: install');
+      process.exit(1);
+  }
+}
+
 async function cmdTest() {
   const config = loadConfig();
   const { NtfyTransport } = await import('./ntfy-transport.js');
@@ -173,7 +337,13 @@ async function cmdTest() {
   }
 }
 
-main().catch((err) => {
-  console.error('Error:', err.message);
-  process.exit(1);
-});
+// Only run when executed directly (e.g. `node cli.js` / the `hitl` bin), not
+// when imported as a module (e.g. from tests) — importing must not have the
+// side effect of parsing real process.argv and dispatching a command.
+const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
+if (isMainModule) {
+  main().catch((err) => {
+    console.error('Error:', err.message);
+    process.exit(1);
+  });
+}
