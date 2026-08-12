@@ -121,6 +121,8 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .manage(payload_store::PayloadStore::default())
         .manage(ntfy::AckWaiters::default())
+        .manage(ntfy::OutstandingReviews::default())
+        .manage(tray::AppState::default())
         .invoke_handler(tauri::generate_handler![
             submit_answer,
             submit_plan_review,

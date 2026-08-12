@@ -8,6 +8,7 @@ use crate::config::load_config;
 use crate::crypto;
 use crate::payload::{self, PayloadError};
 use crate::payload_store;
+use crate::tray;
 use crate::types::{
     AnswerMessage, AttachmentRef, CancelReviewMessage, ChunkMessage, DismissNotificationMessage,
     HitlConfig, MessageEnvelope, NotificationMessage, PlanPayloadRef, PlanReviewAckMessage,
@@ -74,6 +75,7 @@ pub async fn subscribe_loop(app: AppHandle) {
             Ok(()) => log::warn!("ntfy stream ended, reconnecting in 5s..."),
             Err(e) => log::warn!("ntfy error: {}, reconnecting in 5s...", e),
         }
+        app.state::<tray::AppState>().mark_connected(false);
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }
@@ -354,6 +356,8 @@ async fn subscribe_live(
         return Err(format!("ntfy returned {}", response.status()).into());
     }
 
+    app.state::<tray::AppState>().mark_connected(true);
+
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
 
@@ -373,6 +377,7 @@ async fn subscribe_live(
                 // Advance before dispatching: a message that fails to decode is
                 // still a message we do not want re-delivered on every retry.
                 state.last_event_ts = state.last_event_ts.max(event.time);
+                app.state::<tray::AppState>().mark_message();
 
                 if let Some((decrypted, was_encrypted)) = try_decrypt(&event.message, config) {
                     if let Some((final_body, final_encrypted)) = resolve_chunked_message(
@@ -593,6 +598,7 @@ async fn dispatch_message(
                         response.responded_from,
                         response.verdict
                     );
+                    app.state::<OutstandingReviews>().settle(&response.review_id);
                     notify_review_window(app, &response.review_id, "review-superseded", &response);
                 }
                 Err(e) => log::error!(
@@ -616,6 +622,7 @@ async fn dispatch_message(
                         cancel.review_id,
                         cancel.reason
                     );
+                    app.state::<OutstandingReviews>().settle(&cancel.review_id);
                     notify_review_window(app, &cancel.review_id, "review-cancelled", &cancel);
                 }
                 Err(e) => log::error!("cancel_review {} parse failed: {}", env.message_id, e),
@@ -839,6 +846,9 @@ fn show_review(
         crate::sound::play_notification();
     }
 
+    app.state::<OutstandingReviews>()
+        .remember(&review.message_id, &review.snapshot_hash);
+
     payload_store::put(
         app,
         &label,
@@ -1055,10 +1065,40 @@ pub struct PlanReviewSubmitResult {
     pub reason: Option<String>,
 }
 
-struct AckWaiter {
-    review_id: String,
+struct AckWaiter {    review_id: String,
     response_id: String,
     tx: tokio::sync::oneshot::Sender<PlanReviewAckMessage>,
+}
+
+/// Reviews this client has shown and that nobody has settled yet.
+///
+/// Closing a review window resolves nothing (D-7) — the agent stays blocked —
+/// so entries are removed when the review is actually settled, not when its
+/// window goes away. That is what lets the tray release an agent whose window
+/// the user closed hours ago.
+#[derive(Default)]
+pub struct OutstandingReviews(std::sync::Mutex<std::collections::HashMap<String, String>>);
+
+impl OutstandingReviews {
+    fn remember(&self, review_id: &str, snapshot_hash: &str) {
+        if let Ok(mut open) = self.0.lock() {
+            open.insert(review_id.to_string(), snapshot_hash.to_string());
+        }
+    }
+
+    fn settle(&self, review_id: &str) {
+        if let Ok(mut open) = self.0.lock() {
+            open.remove(review_id);
+        }
+    }
+
+    /// Every unsettled review, as `(reviewId, snapshotHash)`.
+    pub fn snapshot(&self) -> Vec<(String, String)> {
+        self.0
+            .lock()
+            .map(|open| open.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    }
 }
 
 /// Submissions waiting to hear back from the agent.
@@ -1249,6 +1289,10 @@ pub async fn submit_review_response(
         encoded.payload_ref.kind,
         response_id
     );
+
+    // Settled from this client's point of view the moment it is on the wire:
+    // the tray must not offer to cancel a review the human has just answered.
+    app.state::<OutstandingReviews>().settle(&review_id);
 
     let result = match tokio::time::timeout(ACK_TIMEOUT, ack_rx).await {
         Ok(Ok(ack)) => {
