@@ -790,11 +790,16 @@ async fn handle_plan_review(
 /// The wire message's `body` is a `PlanPayloadRef` describing where the payload
 /// lives; the window has no use for that, so it is replaced in place with the
 /// decoded `{content, diff}` — or with `null` plus a populated `_error`.
+///
+/// `_draft` is the read half of `save_review_draft`: there is no second command
+/// for it, because the window already takes its payload exactly once and this
+/// is that payload.
 fn review_window_payload(
     review: &PlanReviewMessage,
     decoded: &Result<PlanReviewBody, ReviewBodyError>,
     was_encrypted: bool,
     device_name: &str,
+    draft: Option<crate::drafts::ReviewDraft>,
 ) -> String {
     let mut payload = serde_json::to_value(review).unwrap_or_default();
 
@@ -814,6 +819,12 @@ fn review_window_payload(
         }
         obj.insert("_wasEncrypted".into(), serde_json::Value::Bool(was_encrypted));
         obj.insert("_device".into(), serde_json::Value::String(device_name.to_string()));
+        obj.insert(
+            "_draft".into(),
+            draft
+                .map(|d| serde_json::to_value(d).unwrap_or_default())
+                .unwrap_or(serde_json::Value::Null),
+        );
     }
 
     serde_json::to_string(&payload).unwrap_or_default()
@@ -852,7 +863,17 @@ fn show_review(
     payload_store::put(
         app,
         &label,
-        review_window_payload(review, &decoded, was_encrypted, &config.device_name),
+        review_window_payload(
+            review,
+            &decoded,
+            was_encrypted,
+            &config.device_name,
+            crate::drafts::load_for_window(
+                &review.plan_id,
+                &review.message_id,
+                &review.snapshot_hash,
+            ),
+        ),
     );
 
     let title = if review.display_path.is_empty() {
@@ -1518,9 +1539,14 @@ mod tests {
             diff: "@@ -1 +1 @@\n".to_string(),
         });
 
-        let json: serde_json::Value =
-            serde_json::from_str(&review_window_payload(&a_review(), &decoded, true, "Kay9"))
-                .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&review_window_payload(
+            &a_review(),
+            &decoded,
+            true,
+            "Kay9",
+            None,
+        ))
+        .unwrap();
 
         // The window has no use for a PlanPayloadRef; it needs the plan.
         assert_eq!(json["body"]["content"], "# Plan\nline two\n");
@@ -1541,9 +1567,14 @@ mod tests {
         // cache is replayed with since=all on every client start.
         let decoded = Err(ReviewBodyError::Payload(PayloadError::Expired));
 
-        let json: serde_json::Value =
-            serde_json::from_str(&review_window_payload(&a_review(), &decoded, true, "Kay9"))
-                .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&review_window_payload(
+            &a_review(),
+            &decoded,
+            true,
+            "Kay9",
+            None,
+        ))
+        .unwrap();
 
         assert_eq!(json["body"], serde_json::Value::Null);
         assert_eq!(json["_error"]["kind"], "expired");
@@ -1551,6 +1582,55 @@ mod tests {
         // The window still gets everything it needs to say WHICH plan expired.
         assert_eq!(json["displayPath"], "docs/plan.md");
         assert_eq!(json["messageId"], "rev-12345678");
+    }
+
+    #[test]
+    fn a_saved_draft_rides_back_in_on_the_window_payload() {
+        // The read half of save_review_draft. There is no separate command for
+        // it: the window takes its payload once, so the draft has to be in it.
+        let decoded = Ok(PlanReviewBody {
+            content: "# Plan\n".to_string(),
+            diff: "@@ -1 +1 @@\n".to_string(),
+        });
+        let draft = crate::drafts::ReviewDraft {
+            review_id: "rev-12345678".to_string(),
+            plan_id: "plan-abc".to_string(),
+            snapshot_hash: "sha256:aa".to_string(),
+            overall_feedback: "half-written thought".to_string(),
+            inline_comments: vec![],
+            saved_at: 7,
+        };
+
+        let json: serde_json::Value = serde_json::from_str(&review_window_payload(
+            &a_review(),
+            &decoded,
+            false,
+            "Kay9",
+            Some(draft),
+        ))
+        .unwrap();
+
+        assert_eq!(json["_draft"]["overallFeedback"], "half-written thought");
+        assert_eq!(json["_draft"]["planId"], "plan-abc");
+    }
+
+    #[test]
+    fn no_draft_is_an_explicit_null_rather_than_a_missing_key() {
+        let decoded = Ok(PlanReviewBody {
+            content: "# Plan\n".to_string(),
+            diff: String::new(),
+        });
+
+        let json: serde_json::Value = serde_json::from_str(&review_window_payload(
+            &a_review(),
+            &decoded,
+            false,
+            "Kay9",
+            None,
+        ))
+        .unwrap();
+
+        assert_eq!(json["_draft"], serde_json::Value::Null);
     }
 
     #[test]

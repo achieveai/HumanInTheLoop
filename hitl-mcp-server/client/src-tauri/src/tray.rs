@@ -132,11 +132,6 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Open `~/.hitl/client.log` in whatever the OS uses for text.
-///
-/// Handed straight to the platform opener rather than to the shell plugin,
-/// whose `open` is deprecated in favour of a plugin this crate does not carry.
-/// `explorer.exe` on Windows specifically: routing through `cmd /C start` would
-/// flash a console window at a process built with `windows_subsystem = "windows"`.
 fn open_log_file(_app: &AppHandle) {
     let Some(path) = crate::logging::log_path() else {
         log::error!("No home directory, so there is no log file to open");
@@ -148,18 +143,9 @@ fn open_log_file(_app: &AppHandle) {
         return;
     }
 
-    #[cfg(target_os = "windows")]
-    let opener = "explorer.exe";
-    #[cfg(target_os = "macos")]
-    let opener = "open";
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    let opener = "xdg-open";
-
-    // explorer.exe reports a non-zero exit even when it succeeds, so only the
-    // failure to spawn at all is worth reporting.
-    match std::process::Command::new(opener).arg(&path).spawn() {
-        Ok(_) => log::info!("Opened {}", path.display()),
-        Err(e) => log::error!("Failed to open {} with {}: {}", path.display(), opener, e),
+    match crate::opener::spawn(&path) {
+        Ok(()) => log::info!("Opened {}", path.display()),
+        Err(e) => log::error!("{}", e),
     }
 }
 

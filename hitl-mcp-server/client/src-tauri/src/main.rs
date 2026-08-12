@@ -3,8 +3,10 @@
 mod chunking;
 mod config;
 mod crypto;
+mod drafts;
 mod logging;
 mod ntfy;
+mod opener;
 mod payload;
 mod payload_store;
 mod sound;
@@ -128,6 +130,8 @@ fn main() {
             submit_plan_review,
             dismiss_notification,
             show_no_activate,
+            drafts::save_review_draft,
+            opener::open_external,
             payload_store::take_window_payload
         ])
         .setup(|app| {
