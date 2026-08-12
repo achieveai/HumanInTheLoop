@@ -402,6 +402,17 @@ test.describe('Review states', () => {
 
 // ─── Performance (E-13 / E-14, measured not mandated) ────────────────────────
 
+/** E-14's budget: a comment edit must stay under this on a 100 KB plan. */
+const E14_BUDGET_MS = 100;
+
+/**
+ * Separate and deliberately looser: the point at which the naive full
+ * re-render would need replacing with a line-keyed overlay. The gate cut the
+ * overlay *mandate* and asked for a measured outcome, and this is the number
+ * that would reopen that decision — not the acceptance criterion.
+ */
+const OVERLAY_REWRITE_THRESHOLD_MS = 300;
+
 test.describe('Naive re-render cost on a 100 KB plan', () => {
   test('E-14: adding and removing a comment stays responsive', async ({ page }) => {
     test.setTimeout(60_000);
@@ -423,11 +434,10 @@ test.describe('Naive re-render cost on a 100 KB plan', () => {
       + `add=${afterAdd.lastCommentUpdateMs.toFixed(1)}ms `
       + `remove=${afterRemove.lastCommentUpdateMs.toFixed(1)}ms`);
 
-    // The gate cut the overlay *mandate* and asked for a measured outcome. This
-    // bound is the point at which the naive full re-render would need replacing
-    // with a line-keyed overlay; the printed numbers are the actual result.
-    expect(afterAdd.lastCommentUpdateMs).toBeLessThan(300);
-    expect(afterRemove.lastCommentUpdateMs).toBeLessThan(300);
+    expect(afterAdd.lastCommentUpdateMs).toBeLessThan(E14_BUDGET_MS);
+    expect(afterRemove.lastCommentUpdateMs).toBeLessThan(E14_BUDGET_MS);
+    // Well inside the rewrite threshold too, which is why the naive render stands.
+    expect(afterAdd.lastCommentUpdateMs).toBeLessThan(OVERLAY_REWRITE_THRESHOLD_MS);
   });
 
   test('E-14: the re-render does not degrade as comments accumulate', async ({ page }) => {
@@ -444,6 +454,6 @@ test.describe('Naive re-render cost on a 100 KB plan', () => {
       + `last=${samples[19].toFixed(1)}ms max=${Math.max(...samples).toFixed(1)}ms`);
 
     await expect(page.locator('.comment-card-list')).toHaveCount(20);
-    expect(Math.max(...samples)).toBeLessThan(300);
+    expect(Math.max(...samples)).toBeLessThan(E14_BUDGET_MS);
   });
 });
