@@ -29,9 +29,6 @@ impl PayloadStore {
 }
 
 /// Stage a payload before creating the window that will read it.
-// Called by the window-creation paths (show_question / show_review), which land
-// with the review window itself.
-#[allow(dead_code)]
 pub fn put(app: &AppHandle, label: &str, json: String) {
     app.state::<PayloadStore>().insert(label, json);
 }

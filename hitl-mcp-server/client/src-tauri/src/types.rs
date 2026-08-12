@@ -173,13 +173,15 @@ pub const SUPPORTED_PROTOCOL_VERSION: u32 = 2;
 /// with no window and no log.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // contract surface; consumed by the review lanes
 pub struct MessageEnvelope {
     #[serde(rename = "type")]
     pub msg_type: String,
     #[serde(default)]
     pub message_id: String,
+    /// Part of the envelope contract, but dispatch routes on `type` and every
+    /// handler reads the timestamp off its own concrete type instead.
     #[serde(default)]
+    #[allow(dead_code)]
     pub timestamp: u64,
     /// Absent ⇒ 1. Only the plan-review types emit it.
     #[serde(default)]
@@ -200,7 +202,6 @@ impl MessageEnvelope {
 /// put random hex in the `Filename` header and never a real path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // contract surface; consumed by the review lanes
 pub struct AttachmentRef {
     #[serde(default)]
     pub name: String,
@@ -219,7 +220,6 @@ pub struct AttachmentRef {
 /// Where a plan-review body lives, and how to verify it once fetched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // contract surface; consumed by the review lanes
 pub struct PlanPayloadRef {
     /// "inline" or "attachment".
     #[serde(default)]
@@ -238,7 +238,6 @@ pub struct PlanPayloadRef {
 /// The gzipped body of a plan_review message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // contract surface; consumed by the review lanes
 pub struct PlanReviewBody {
     #[serde(default)]
     pub content: String,
@@ -249,7 +248,6 @@ pub struct PlanReviewBody {
 /// Published by the MCP server when the agent calls ReviewPlan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // contract surface; consumed by the review lanes
 pub struct PlanReviewMessage {
     #[serde(rename = "type")]
     pub msg_type: String,
@@ -285,7 +283,6 @@ pub struct PlanReviewMessage {
 /// A single line-anchored comment, in source-line space.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // contract surface; consumed by the review lanes
 pub struct InlineComment {
     #[serde(default)]
     pub path: String,
@@ -303,7 +300,6 @@ pub struct InlineComment {
 /// The gzipped body of a plan_review_response message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // contract surface; consumed by the review lanes
 pub struct PlanReviewResponseBody {
     #[serde(default)]
     pub overall_feedback: String,
@@ -315,7 +311,6 @@ pub struct PlanReviewResponseBody {
 /// Publishers must set `protocol_version` to `Some(SUPPORTED_PROTOCOL_VERSION)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // contract surface; consumed by the review lanes
 pub struct PlanReviewResponseMessage {
     #[serde(rename = "type")]
     pub msg_type: String,
@@ -345,7 +340,6 @@ pub struct PlanReviewResponseMessage {
 /// response attachment later 404s — attachments expire in 3 h, messages in 12 h.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // contract surface; consumed by the review lanes
 pub struct PlanReviewAckMessage {
     #[serde(rename = "type")]
     pub msg_type: String,
@@ -369,7 +363,6 @@ pub struct PlanReviewAckMessage {
 /// Published by the server when an outstanding review will never be read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // contract surface; consumed by the review lanes
 pub struct CancelReviewMessage {
     #[serde(rename = "type")]
     pub msg_type: String,

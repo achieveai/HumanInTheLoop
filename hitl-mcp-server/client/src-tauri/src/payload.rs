@@ -1,8 +1,3 @@
-// This whole module is the wire contract the review lanes build on; nothing in
-// this crate calls it until the review window lands. Blanket-allow rather than
-// leave 8 dead-code warnings that would drown out real ones in those lanes.
-#![allow(dead_code)]
-
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
