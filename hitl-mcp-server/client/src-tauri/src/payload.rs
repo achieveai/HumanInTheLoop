@@ -52,8 +52,13 @@ pub const MAX_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 /// `gzipped.len()` here, before it is base64-encoded or encrypted. Checking
 /// it here too means an oversized response is refused locally, before an
 /// upload is spent on something the server is guaranteed to reject anyway.
-/// Not derived from a shared source — the two constants must be kept equal
-/// by hand.
+/// Not derived from a shared source, and nothing enforces the two constants
+/// staying equal — no build step or test compares the numeric values, only
+/// this comment and the matching one in `payload.ts` name each other. A
+/// divergence degrades to the pre-existing behaviour (the server rejects
+/// what the client thought was small enough) rather than to corruption, so
+/// this is deliberately not chased further; keep the two numbers equal by
+/// hand when either changes.
 pub const PLAN_MAX_COMPRESSED_BYTES: usize = 2 * 1024 * 1024;
 
 /// Why a payload could not be turned back into its body.
