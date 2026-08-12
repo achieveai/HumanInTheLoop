@@ -857,7 +857,10 @@ impl ReviewBodyError {
                 PayloadError::Base64(_)
                 | PayloadError::Gunzip(_)
                 | PayloadError::Json(_)
-                | PayloadError::TooLarge { .. },
+                | PayloadError::TooLarge { .. }
+                // Encode-side only; `decode_payload` never produces this, but
+                // the match must stay exhaustive over `PayloadError`.
+                | PayloadError::TooLargeToSubmit,
             ) => "corrupt",
         }
     }
@@ -1579,7 +1582,17 @@ pub async fn submit_review_response(
         None
     };
 
-    let encoded = payload::encode_payload(&body, key).map_err(|e| e.to_string())?;
+    let encoded = match payload::encode_payload(&body, key) {
+        Ok(encoded) => encoded,
+        Err(e) => {
+            // Logged with detail for us; returned as the plain `Display`
+            // message, which for `TooLargeToSubmit` is already the
+            // human-actionable text shown in the review window — nothing
+            // about compressed bytes or gzip leaks through.
+            log::warn!("Refused to submit review {review_id}: {e}");
+            return Err(e.to_string());
+        }
+    };
     let response_id = uuid::Uuid::new_v4().to_string();
 
     let message = PlanReviewResponseMessage {

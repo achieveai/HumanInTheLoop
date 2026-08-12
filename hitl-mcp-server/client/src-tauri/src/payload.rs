@@ -43,6 +43,19 @@ pub const PLAN_INLINE_THRESHOLD_BYTES: usize = 2048;
 /// small enough that the worst case is a transient 16 MB allocation.
 pub const MAX_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 
+/// Ceiling on the *compressed* size (raw gzip output, before base64) of a
+/// plan-review response this client will attempt to submit.
+///
+/// Mirrors `PLAN_MAX_COMPRESSED_BYTES` in `server/src/payload.ts`, which the
+/// server checks on the receiving end (`decodePayload`) against
+/// `Buffer.from(plaintext, 'base64').byteLength` — the same quantity as
+/// `gzipped.len()` here, before it is base64-encoded or encrypted. Checking
+/// it here too means an oversized response is refused locally, before an
+/// upload is spent on something the server is guaranteed to reject anyway.
+/// Not derived from a shared source — the two constants must be kept equal
+/// by hand.
+pub const PLAN_MAX_COMPRESSED_BYTES: usize = 2 * 1024 * 1024;
+
 /// Why a payload could not be turned back into its body.
 ///
 /// Each variant maps to a distinct thing the review window must say. A hash
@@ -64,6 +77,10 @@ pub enum PayloadError {
     /// The ref said `inline` but carried no `data`, or said `attachment` and
     /// nothing fetched it.
     MissingData,
+    /// The body would compress past `PLAN_MAX_COMPRESSED_BYTES`. Refused
+    /// before spending an upload on a response the server is guaranteed to
+    /// reject. Encode-side only — `decode_payload` never produces this.
+    TooLargeToSubmit,
 }
 
 impl std::fmt::Display for PayloadError {
@@ -83,6 +100,10 @@ impl std::fmt::Display for PayloadError {
             ),
             PayloadError::Json(e) => write!(f, "plan payload is not valid JSON: {e}"),
             PayloadError::MissingData => write!(f, "plan payload reference carries no data"),
+            PayloadError::TooLargeToSubmit => write!(
+                f,
+                "Your feedback is too large to submit. Please shorten it and try again."
+            ),
         }
     }
 }
@@ -90,6 +111,7 @@ impl std::fmt::Display for PayloadError {
 impl std::error::Error for PayloadError {}
 
 /// The wire bytes plus the reference that describes them.
+#[derive(Debug)]
 pub struct EncodedPayload {
     /// Goes into the outer message's `body` field. `data` is populated only when
     /// `kind == "inline"`; for `"attachment"` the cipher travels as the PUT body.
@@ -125,6 +147,8 @@ pub fn encode_payload<T: Serialize>(
         .finish()
         .map_err(|e| PayloadError::Gunzip(e.to_string()))?;
 
+    check_compressed_size(gzipped.len())?;
+
     let plaintext = BASE64.encode(&gzipped);
     let content_hash = sha256_hex(&plaintext);
     let content_length = plaintext.len() as u64;
@@ -144,6 +168,17 @@ pub fn encode_payload<T: Serialize>(
         },
         cipher,
     })
+}
+
+/// Refuses a gzip output larger than `PLAN_MAX_COMPRESSED_BYTES` — the same
+/// `>` comparison and the same quantity the server applies on decode, so a
+/// body this accepts is never rejected on the other end for size, and a body
+/// this refuses would have been rejected there too.
+fn check_compressed_size(compressed_len: usize) -> Result<(), PayloadError> {
+    if compressed_len > PLAN_MAX_COMPRESSED_BYTES {
+        return Err(PayloadError::TooLargeToSubmit);
+    }
+    Ok(())
 }
 
 /// Inverse of `encode_payload`. `cipher` is `payload_ref.data` for an inline
@@ -380,6 +415,85 @@ mod tests {
             decode_payload(&encoded.cipher, Some(KEY), &encoded.payload_ref.content_hash).unwrap();
 
         assert_eq!(back.content, content);
+    }
+
+    // --- Pre-submit compressed-size cap (mirrors server's
+    // PLAN_MAX_COMPRESSED_BYTES) ---
+    //
+    // `check_compressed_size` is exercised directly at the exact byte
+    // boundary — precise and independent of gzip's compression ratio, which
+    // an end-to-end test built from real body content could not pin exactly.
+    // The two tests after it exercise the real pipeline through
+    // `encode_payload` to prove the check is actually wired in, using
+    // near-incompressible content so a large real body is guaranteed to
+    // cross the ceiling rather than being compressed back under it.
+
+    #[test]
+    fn accepts_a_body_exactly_at_the_compressed_size_limit() {
+        assert!(check_compressed_size(PLAN_MAX_COMPRESSED_BYTES).is_ok());
+    }
+
+    #[test]
+    fn refuses_a_body_one_byte_over_the_compressed_size_limit() {
+        let err = check_compressed_size(PLAN_MAX_COMPRESSED_BYTES + 1).unwrap_err();
+        assert!(matches!(err, PayloadError::TooLargeToSubmit), "{err}");
+    }
+
+    /// Deterministic pseudo-random bytes, so gzip cannot meaningfully shrink
+    /// them the way it does the repetitive text `big_body()` builds — needed
+    /// so a large plaintext reliably produces a compressed output near its
+    /// own size instead of collapsing under the limit.
+    fn incompressible_string(byte_len: usize) -> String {
+        let mut state: u64 = 0x243f_6a88_85a3_08d3; // arbitrary fixed seed
+        let mut bytes = Vec::with_capacity(byte_len);
+        while bytes.len() < byte_len {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            bytes.extend_from_slice(&state.to_le_bytes());
+        }
+        bytes.truncate(byte_len);
+        BASE64.encode(&bytes)
+    }
+
+    #[test]
+    fn refuses_to_encode_a_body_whose_compressed_size_exceeds_the_submit_limit() {
+        let body = PlanReviewBody {
+            content: incompressible_string(PLAN_MAX_COMPRESSED_BYTES + 512 * 1024),
+            diff: String::new(),
+        };
+
+        let err = encode_payload(&body, None).unwrap_err();
+        assert!(matches!(err, PayloadError::TooLargeToSubmit), "{err}");
+
+        let message = err.to_string();
+        assert!(
+            message.to_lowercase().contains("too large"),
+            "message should tell the human their feedback is too large: {message}"
+        );
+        assert!(
+            message.to_lowercase().contains("shorten"),
+            "message should tell the human to shorten it: {message}"
+        );
+        assert!(
+            !message.to_lowercase().contains("compress"),
+            "message should not leak server jargon about compressed bytes: {message}"
+        );
+    }
+
+    #[test]
+    fn encodes_a_real_sized_body_comfortably_under_the_submit_limit() {
+        // A full-size legitimate review (biggest plan plus its diff) is well
+        // clear of the 2 MiB ceiling; this is the ordinary case the check
+        // must never get in the way of.
+        let content = "# Plan\n".to_string() + &"a line of plan text\n".repeat(55_000);
+        let body = PlanReviewBody {
+            content: content.clone(),
+            diff: String::new(),
+        };
+
+        let encoded = encode_payload(&body, None).unwrap();
+        assert!(encoded.cipher.len() < PLAN_MAX_COMPRESSED_BYTES);
     }
 
     // --- Cross-language fixture: produced by TypeScript, decoded here ---
