@@ -11,34 +11,67 @@ import {
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import type { QuestionMessage, NotificationMessage, HitlToolResponse, SubQuestion, SubAnswer } from './types.js';
-import { NtfyTransport } from './ntfy-transport.js';
+import type {
+  QuestionMessage,
+  NotificationMessage,
+  HitlToolResponse,
+  SubQuestion,
+  SubAnswer,
+  AttachmentRef,
+  PlanReviewMessage,
+  PlanReviewBody,
+  PlanReviewResponseMessage,
+  PlanReviewResponseBody,
+  PlanReviewAckMessage,
+  CancelReviewMessage,
+} from './types.js';
+import { PROTOCOL_VERSION } from './types.js';
+import { NtfyTransport, AttachmentExpiredError } from './ntfy-transport.js';
 import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
 import { performSetup, ensureClientRunning } from './setup.js';
 import { SERVER_VERSION } from './version.js';
+import { readPlanFile, PlanFileError } from './plan-file.js';
+import { resolvePlanIdentity, recordRevision } from './snapshot-store.js';
+import { resolveBaseline, buildPlanDiff } from './plan-diff.js';
+import { encodePayload, decodePayload, PayloadDecodeError } from './payload.js';
+import type { ReviewPlanResult } from './plan-review.js';
+import { parseVerdict, normalizeResponseBody, ReviewResponseError } from './plan-review.js';
 
 const TOOL_NAME = 'AskUserQuestion';
 const NOTIFY_TOOL_NAME = 'Notify';
 const SETUP_TOOL_NAME = 'setup';
+const REVIEW_TOOL_NAME = 'ReviewPlan';
 const SERVER_NAME = 'hitl-mcp-server';
+
+/** Interval between progress notifications that keep a blocked MCP call alive. */
+const HEARTBEAT_INTERVAL_MS = 15_000;
 
 /** Directory where the compiled server JS lives (used for relative binary paths). */
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 
+/** Best-effort message for an unknown thrown value, for ack reasons and logs. */
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** The SDK's per-request context: progress token, sendNotification, abort signal. */
+type RequestExtra = Parameters<Parameters<Server['setRequestHandler']>[1]>[1];
+
 class HumanInTheLoopServer {
   private server: Server;
   private transport: NtfyTransport;
+  private config = loadConfig();
+  /** reviewIds still waiting on a human, so a graceful exit can release them (D-3). */
+  private outstandingReviews = new Set<string>();
 
   constructor() {
-    const config = loadConfig();
-
     this.server = new Server(
       { name: SERVER_NAME, version: SERVER_VERSION },
       { capabilities: { tools: {} } }
     );
 
-    this.transport = new NtfyTransport(config);
+    this.transport = new NtfyTransport(this.config);
     this.setupHandlers();
   }
 
@@ -188,12 +221,6 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
                   'Whether to show an "Additional Context" text field for supplementary information',
                 default: true,
               },
-              timeout: {
-                type: 'number',
-                description: 'Timeout in milliseconds (default: 3600000 = 1 hour)',
-                minimum: 1000,
-                maximum: 86400000,
-              },
             },
             required: ['context'],
           },
@@ -237,6 +264,46 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
             required: ['title', 'body'],
           },
         },
+        {
+          name: REVIEW_TOOL_NAME,
+          description: `Get line-anchored human review of an implementation plan you have written to a markdown file.
+
+The plan opens as a two-pane review window on every device the user has subscribed — phone, laptop, desktop — so they can review it wherever they are. They select line ranges, attach comments to them, and return a verdict. This call blocks until they submit.
+
+Use this instead of pasting a plan into AskUserQuestion whenever you want feedback on specific lines rather than a yes/no. Typical moments: after drafting an implementation plan, a migration sequence, an architecture proposal, or a refactor outline.
+
+IMPORTANT — do not modify the file while this call is blocked. The returned snapshotHash identifies the exact content the human reviewed; if you rewrite the file mid-review, their approval applies to text that no longer exists.
+
+Revisions: call it again with the same file after making the requested changes. The user sees a diff against what they reviewed last time rather than the whole plan again, and the revision number increments.
+
+Returns JSON: { success, timestamp, respondedFrom, verdict, overallFeedback, inlineComments[], revision, isNewPlan, snapshotHash }.
+- verdict is one of: approved | changes_requested | rejected | skipped | cancelled
+- inlineComments are { path, startLine, endLine, side, comment }, stably sorted, with line numbers in the source-line space of the file you passed
+- changes_requested and rejected always carry either overallFeedback or at least one inline comment
+
+Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutOnProgress; this server emits progress heartbeats but cannot enforce the host's timeout.`,
+          inputSchema: {
+            type: 'object',
+            properties: {
+              filePath: {
+                type: 'string',
+                description:
+                  'Absolute or cwd-relative path to the markdown plan file (.md or .markdown, up to 1 MB).',
+              },
+              context: {
+                type: 'string',
+                description:
+                  'Brief description of what project and work you are doing. This helps the human understand the situation across devices.',
+              },
+              summary: {
+                type: 'string',
+                description:
+                  'Optional short prose framing shown above the document — what changed since last time, or what you most want feedback on.',
+              },
+            },
+            required: ['filePath', 'context'],
+          },
+        },
       ],
     }));
 
@@ -265,7 +332,7 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
         }
 
         try {
-          ensureClientRunning(SERVER_DIR);
+          this.requireClient();
 
           const notification: NotificationMessage = {
             type: 'notification',
@@ -289,6 +356,10 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
         }
       }
 
+      if (request.params.name === REVIEW_TOOL_NAME) {
+        return await this.handleReviewPlan(request.params.arguments as Record<string, unknown>, extra);
+      }
+
       if (request.params.name !== TOOL_NAME) {
         throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${request.params.name}`);
       }
@@ -309,8 +380,9 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
       }
 
       try {
-        // Auto-launch client if not running
-        ensureClientRunning(SERVER_DIR);
+        // Auto-launch client if not running. Must precede publish: with no
+        // timeout, publishing to a topic nobody reads blocks forever (A-10).
+        this.requireClient();
 
         const repo = detectRepoContext();
 
@@ -350,7 +422,6 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
             : (args.options as Array<{ label: string; value: string; description?: string; preview?: string }>).map(mapOption),
           allowMultiple: hasBatchQuestions ? false : (args.allowMultiple as boolean) !== false,
           allowOther: hasBatchQuestions ? true : (args.allowOther as boolean) !== false,
-          timeout: (args.timeout as number) || 3600000,
           questions: batchQuestions,
         };
 
@@ -358,40 +429,22 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
         await this.transport.publish(questionMsg);
         console.error('Question published. Waiting for answer...');
 
-        // Send periodic progress notifications to prevent MCP client timeout.
-        // Each progress notification resets the client's countdown timer.
-        const HEARTBEAT_INTERVAL_MS = 15_000;
-        const progressToken = extra?._meta?.progressToken;
-        let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
-        let progressCount = 0;
-
-        if (progressToken !== undefined) {
-          heartbeatTimer = setInterval(async () => {
-            progressCount++;
-            try {
-              await extra.sendNotification({
-                method: 'notifications/progress',
-                params: {
-                  progressToken,
-                  progress: progressCount,
-                  total: 0,
-                  message: 'Waiting for human response...',
-                },
-              });
-            } catch {
-              // Client may have disconnected; ignore
-            }
-          }, HEARTBEAT_INTERVAL_MS);
-        }
+        this.transport.pending.record({
+          kind: 'question',
+          id: questionMsg.messageId,
+          createdAt: Date.now(),
+        });
 
         let answer;
+        const stopHeartbeat = this.startHeartbeat(extra);
         try {
-          answer = await this.transport.waitForAnswer(
-            questionMsg.messageId,
-            questionMsg.timeout
-          );
+          answer = await this.transport.waitForAnswer(questionMsg.messageId, extra?.signal);
         } finally {
-          if (heartbeatTimer) clearInterval(heartbeatTimer);
+          // One finally for both: a host cancellation must release the SSE
+          // connection and the timer together, or every stop/retry cycle leaks
+          // one of each for the life of the process (D-9).
+          stopHeartbeat();
+          this.transport.pending.clear(questionMsg.messageId);
         }
 
         console.error(`Answer received from ${answer.respondedFrom}`);
@@ -454,25 +507,6 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
       } catch (error) {
         console.error('Dialog error:', error);
 
-        if (error instanceof Error && error.message === 'Dialog timeout') {
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(
-                  {
-                    success: false,
-                    error: 'timeout',
-                    message: 'The user did not respond within the timeout period',
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        }
-
         throw new McpError(
           ErrorCode.InternalError,
           `Failed to get human response: ${error instanceof Error ? error.message : 'Unknown error'}`
@@ -481,20 +515,298 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
     });
   }
 
+  /**
+   * ReviewPlan: snapshot a markdown plan, publish it for line-anchored review,
+   * and block until a human submits a verdict.
+   */
+  private async handleReviewPlan(
+    args: Record<string, unknown>,
+    extra: RequestExtra
+  ): Promise<{ content: Array<{ type: string; text: string }> }> {
+    if (typeof args?.filePath !== 'string' || args.filePath.trim() === '') {
+      throw new McpError(ErrorCode.InvalidParams, 'Missing required parameter: filePath');
+    }
+    if (typeof args?.context !== 'string' || args.context.trim() === '') {
+      throw new McpError(ErrorCode.InvalidParams, 'Missing required parameter: context');
+    }
+
+    // Validate and read before anything else: a rejected path must never reach
+    // the snapshot store, ntfy, or the human's screen.
+    let plan;
+    try {
+      plan = readPlanFile(args.filePath);
+    } catch (err) {
+      if (err instanceof PlanFileError) {
+        throw new McpError(ErrorCode.InvalidParams, err.message);
+      }
+      throw err;
+    }
+
+    this.requireClient();
+
+    const identity = resolvePlanIdentity(plan.resolvedPath);
+    const recorded = recordRevision(identity, plan.content);
+    const snapshotHash = `sha256:${recorded.digest}`;
+    const diff = buildPlanDiff(identity.displayPath, plan.content, resolveBaseline(identity, recorded));
+
+    // Reuse the reviewId of an identical review this or a previous process was
+    // still waiting on. A window may still be open for it on the human's
+    // device, and its response then resolves this call instead of asking
+    // again (D-8).
+    const resumable = this.transport.pending.findResumableReview(identity.planId, snapshotHash);
+    const reviewId = resumable?.id ?? uuidv4();
+
+    const body: PlanReviewBody = { content: plan.content, diff };
+    const encoded = encodePayload(body, this.config.encryptionKey);
+
+    const reviewMsg: PlanReviewMessage = {
+      type: 'plan_review',
+      messageId: reviewId,
+      timestamp: Date.now(),
+      protocolVersion: PROTOCOL_VERSION,
+      repo: detectRepoContext(path.dirname(plan.resolvedPath)),
+      context: args.context,
+      summary: typeof args.summary === 'string' ? args.summary : '',
+      displayPath: identity.displayPath,
+      planId: identity.planId,
+      revision: recorded.revision,
+      isNewPlan: recorded.isNewPlan,
+      snapshotHash,
+      body: encoded.ref,
+    };
+
+    this.transport.pending.record({
+      kind: 'plan_review',
+      id: reviewId,
+      planId: identity.planId,
+      snapshotHash,
+      createdAt: Date.now(),
+    });
+    this.outstandingReviews.add(reviewId);
+
+    console.error(
+      `Publishing plan_review ${reviewId} (revision ${recorded.revision}, ` +
+        `${encoded.ref.kind} payload, ${encoded.ref.contentLength} bytes) to ntfy...`
+    );
+
+    const stopHeartbeat = this.startHeartbeat(extra);
+    try {
+      await this.transport.publishPlan(
+        reviewMsg,
+        encoded.ref.kind === 'attachment' ? encoded.cipher : undefined
+      );
+
+      const { msg: response, attachment } = await this.transport.waitFor<PlanReviewResponseMessage>(
+        `plan_review_response:${reviewId}`,
+        (msg) => msg.type === 'plan_review_response' && msg.reviewId === reviewId,
+        extra?.signal
+      );
+
+      const result = await this.consumeReviewResponse(reviewMsg, response, attachment);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      if (error instanceof McpError) throw error;
+      console.error('ReviewPlan error:', error);
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get plan review: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    } finally {
+      // Same finally for the timer and the wait registration: a host
+      // cancellation must release both, not leak one per stop/retry cycle (D-9).
+      stopHeartbeat();
+      this.outstandingReviews.delete(reviewId);
+      this.transport.pending.clear(reviewId);
+    }
+  }
+
+  /**
+   * Download, decode and validate a submitted review, then acknowledge it.
+   *
+   * The ack is what lets the client distinguish "the server read this" from "I
+   * clicked submit": the response attachment expires after 3 h while the
+   * message itself survives 12 h, so a submit can be accepted at click time and
+   * still never arrive (C-12).
+   */
+  private async consumeReviewResponse(
+    reviewMsg: PlanReviewMessage,
+    response: PlanReviewResponseMessage,
+    attachment?: AttachmentRef
+  ): Promise<ReviewPlanResult> {
+    const verdict = parseVerdict(response.verdict);
+
+    let body: PlanReviewResponseBody;
+    try {
+      const cipher =
+        response.body?.kind === 'attachment'
+          ? await this.downloadResponseBody(attachment)
+          : response.body?.data ?? '';
+
+      const decoded = decodePayload<unknown>(
+        cipher,
+        this.config.encryptionKey,
+        response.body?.contentHash ?? ''
+      );
+      body = normalizeResponseBody(verdict, decoded, reviewMsg.displayPath);
+    } catch (err) {
+      await this.publishAck(reviewMsg.messageId, response.messageId, 'lost', describeError(err));
+      if (err instanceof AttachmentExpiredError) {
+        throw new McpError(
+          ErrorCode.InternalError,
+          `The review was submitted but its payload had already expired on ntfy (attachments live 3 h). ` +
+            `Ask for the review again.`
+        );
+      }
+      if (err instanceof PayloadDecodeError || err instanceof ReviewResponseError) {
+        throw new McpError(ErrorCode.InternalError, `Unusable review response: ${err.message}`);
+      }
+      throw err;
+    }
+
+    await this.publishAck(reviewMsg.messageId, response.messageId, 'received');
+
+    return {
+      success: true,
+      timestamp: response.timestamp,
+      respondedFrom: response.respondedFrom,
+      verdict,
+      overallFeedback: body.overallFeedback,
+      inlineComments: body.inlineComments,
+      revision: reviewMsg.revision,
+      isNewPlan: reviewMsg.isNewPlan,
+      // The hash the human's client echoed back — the content they actually
+      // saw, which may differ from the file if the agent rewrote it (A-8).
+      snapshotHash: response.snapshotHash || reviewMsg.snapshotHash,
+    };
+  }
+
+  private async downloadResponseBody(attachment?: AttachmentRef): Promise<string> {
+    if (!attachment) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        'Review response claims an attachment payload but the message carried no attachment URL.'
+      );
+    }
+    return await this.transport.downloadAttachment(attachment);
+  }
+
+  /** Tell the client whether its submission actually landed. */
+  private async publishAck(
+    reviewId: string,
+    responseId: string,
+    status: PlanReviewAckMessage['status'],
+    reason?: string
+  ): Promise<void> {
+    const ack: PlanReviewAckMessage = {
+      type: 'plan_review_ack',
+      messageId: uuidv4(),
+      timestamp: Date.now(),
+      protocolVersion: PROTOCOL_VERSION,
+      reviewId,
+      responseId,
+      status,
+      reason,
+    };
+    try {
+      await this.transport.publishPlan(ack);
+    } catch (err) {
+      console.error(`Could not acknowledge review ${reviewId}: ${err}`);
+    }
+  }
+
+  /**
+   * Fail before publishing when no client can be found or launched.
+   *
+   * Without a timeout to bound it, publishing to a topic nobody is subscribed
+   * to is a permanent silent hang — the agent blocks and the human never sees a
+   * window to explain why (A-10).
+   */
+  private requireClient(): void {    const result = ensureClientRunning(SERVER_DIR);
+    if (!result.ok) {
+      throw new McpError(
+        ErrorCode.InternalError,
+        `No HITL client available, so nobody would see this. ${result.reason ?? ''}`.trim()
+      );
+    }
+  }
+
+  /**
+   * Start emitting progress notifications, returning the stop function.
+   *
+   * Whether these actually keep the call alive is the calling host's decision:
+   * the MCP SDK's DEFAULT_REQUEST_TIMEOUT_MSEC is 60 s and
+   * `resetTimeoutOnProgress` defaults to false, so a host that does not opt in
+   * will time the call out regardless of what we send (D-2).
+   */
+  private startHeartbeat(extra: RequestExtra): () => void {
+    const progressToken = extra?._meta?.progressToken;
+    if (progressToken === undefined) return () => {};
+
+    let progressCount = 0;
+    const timer = setInterval(async () => {
+      progressCount++;
+      try {
+        await extra.sendNotification({
+          method: 'notifications/progress',
+          params: {
+            progressToken,
+            progress: progressCount,
+            total: 0,
+            message: 'Waiting for human response...',
+          },
+        });
+      } catch {
+        // Client may have disconnected; ignore
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    return () => clearInterval(timer);
+  }
+
   async run(): Promise<void> {
     const stdioTransport = new StdioServerTransport();
     await this.server.connect(stdioTransport);
 
     console.error(`${SERVER_NAME} v${SERVER_VERSION} running on stdio (ntfy-backed)`);
 
-    const shutdown = () => {
+    let shuttingDown = false;
+    const shutdown = async () => {
+      if (shuttingDown) return;
+      shuttingDown = true;
       console.error('Shutting down...');
+
+      // Tell open review windows their agent is gone before dropping the
+      // connection, so they show "agent exited" and keep the typed comments
+      // rather than waiting on a process that no longer exists (D-3).
+      // A hard kill (SIGKILL/OOM) cannot be caught here by design.
+      await this.cancelOutstandingReviews('agent_exited');
+
       this.transport.close();
       process.exit(0);
     };
 
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', () => void shutdown());
+    process.on('SIGTERM', () => void shutdown());
+  }
+
+  /** Publish cancel_review for every review still waiting on a human. */
+  private async cancelOutstandingReviews(reason: CancelReviewMessage['reason']): Promise<void> {
+    for (const reviewId of this.outstandingReviews) {
+      const cancel: CancelReviewMessage = {
+        type: 'cancel_review',
+        messageId: uuidv4(),
+        timestamp: Date.now(),
+        protocolVersion: PROTOCOL_VERSION,
+        reviewId,
+        reason,
+      };
+      try {
+        await this.transport.publishPlan(cancel);
+      } catch (err) {
+        console.error(`Could not cancel review ${reviewId}: ${err}`);
+      }
+    }
+    this.outstandingReviews.clear();
   }
 }
 

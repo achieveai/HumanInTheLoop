@@ -156,7 +156,7 @@ async function cmdTest() {
   console.log('Waiting for response (60s timeout)...');
 
   try {
-    const answer = await transport.waitForAnswer(messageId, 60000);
+    const answer = await transport.waitForAnswer(messageId, AbortSignal.timeout(60000));
     console.log('');
     console.log('✓ Response received!');
     console.log(`  From: ${answer.respondedFrom}`);

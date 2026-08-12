@@ -100,25 +100,42 @@ export function launchClient(binaryPath: string): void {
   child.unref();
 }
 
+/** Outcome of ensureClientRunning — the caller must not publish when `ok` is false. */
+export interface ClientRunningResult {
+  ok: boolean;
+  /** Why the client is unavailable. Present only when `ok` is false. */
+  reason?: string;
+}
+
 /**
  * Ensure the HITL client is running. Finds and launches it if needed.
- * Logs to stderr only — safe to call from the hot path of ask_human.
+ *
+ * Returns the outcome rather than only logging it: with timeouts removed, a
+ * caller that publishes to a topic nobody is subscribed to blocks forever and
+ * the human never sees anything (A-10). Both "binary not found" and "launch
+ * failed" must reach the agent as an error before anything is published.
  */
-export function ensureClientRunning(serverDir: string): void {
+export function ensureClientRunning(serverDir: string): ClientRunningResult {
   const binaryName = process.platform === 'win32' ? 'hitl-client.exe' : 'hitl-client';
 
   if (isProcessRunning(binaryName)) {
-    return;
+    return { ok: true };
   }
 
   const binaryPath = findClientBinary(serverDir);
-  if (binaryPath) {
-    try {
-      launchClient(binaryPath);
-      console.error(`Auto-launched HITL client from ${binaryPath}`);
-    } catch (err) {
-      console.error(`Failed to auto-launch HITL client: ${err}`);
-    }
+  if (!binaryPath) {
+    return { ok: false, reason: buildNotFoundMessage(serverDir) };
+  }
+
+  try {
+    launchClient(binaryPath);
+    console.error(`Auto-launched HITL client from ${binaryPath}`);
+    return { ok: true };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `Failed to launch the HITL client at ${binaryPath}: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 }
 
