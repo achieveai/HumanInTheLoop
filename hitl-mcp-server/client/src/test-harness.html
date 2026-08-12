@@ -8,6 +8,9 @@
     <script src="vendor/marked.umd.js"></script>
     <!-- Mock window.__TAURI__ so app.js doesn't crash outside Tauri -->
     <script>
+        // ?fail=1 makes submit_answer reject, so the C-6 / P3 submit-failure
+        // path in app.js is exercisable without breaking a real transport.
+        const failInvoke = new URLSearchParams(window.location.search).get('fail') === '1';
         window.__TAURI__ = {
             event: {
                 listen: () => Promise.resolve(() => {}),
@@ -16,6 +19,9 @@
                 invoke: (cmd, args) => {
                     console.log('[TAURI MOCK] invoke:', cmd, JSON.stringify(args, null, 2));
                     window.__lastInvoke = { cmd, args };
+                    if (failInvoke && cmd === 'submit_answer') {
+                        return Promise.reject(new Error('ntfy publish failed (simulated)'));
+                    }
                     return Promise.resolve();
                 },
             },
@@ -23,7 +29,7 @@
                 getCurrentWindow: () => ({
                     show: () => Promise.resolve(),
                     setFocus: () => Promise.resolve(),
-                    close: () => { console.log('[TAURI MOCK] window.close()'); },
+                    close: () => { console.log('[TAURI MOCK] window.close()'); window.__windowClosed = true; },
                 }),
             },
         };
@@ -35,6 +41,11 @@
             <div class="spinner"></div>
             <p>Loading test...</p>
         </div>
+    </div>
+    <!-- app.js expects this alongside #dialog-container; only the ?driver=app
+         path below reaches it. -->
+    <div class="dismissed-container" id="dismissed-container" style="display: none;">
+        <p class="dismissed-subtitle" id="dismissed-device"></p>
     </div>
     <script type="module">
         import { renderDialog, showSuccess } from './dialog.js';
@@ -146,18 +157,32 @@
         }
 
         const container = document.getElementById('dialog-container');
-        renderDialog(container, question, {
-            onSubmit: (selected, otherText, subAnswers) => {
-                console.log('[TEST] onSubmit:', { selected, otherText, subAnswers });
-                window.__lastSubmit = { selected, otherText, subAnswers };
-                showSuccess(container);
-            },
-            onSkip: () => {
-                console.log('[TEST] onSkip');
-                window.__lastSkip = true;
-                showSuccess(container, 'Skipped');
-            },
-        });
+
+        // ?driver=app routes the fixture through app.js itself rather than
+        // calling renderDialog directly, so the real submit/skip handlers —
+        // and their failure paths — are what gets tested.
+        if (params.get('driver') === 'app') {
+            const query = new URLSearchParams({
+                question: JSON.stringify(question),
+                encrypted: 'false',
+            });
+            if (params.get('fail') === '1') query.set('fail', '1');
+            history.replaceState(null, '', `?${query.toString()}`);
+            await import('./app.js');
+        } else {
+            renderDialog(container, question, {
+                onSubmit: (selected, otherText, subAnswers) => {
+                    console.log('[TEST] onSubmit:', { selected, otherText, subAnswers });
+                    window.__lastSubmit = { selected, otherText, subAnswers };
+                    showSuccess(container);
+                },
+                onSkip: () => {
+                    console.log('[TEST] onSkip');
+                    window.__lastSkip = true;
+                    showSuccess(container, 'Skipped');
+                },
+            });
+        }
     </script>
 </body>
 </html>

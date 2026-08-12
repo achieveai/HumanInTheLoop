@@ -238,7 +238,58 @@ test.describe('Single question mode unaffected', () => {
   });
 });
 
+// ─── Submit failure through app.js (C-6 / P3) ────────────────────────────────
+
+// ?driver=app routes the fixture through app.js's own submit/skip handlers
+// rather than the harness's, so this covers the shipping AskUserQuestion path.
+
+test.describe('Submit failure keeps the answer', () => {
+  test('a failed submit shows an error and preserves the typed answer', async ({ page }) => {
+    await page.goto('/test-harness.html?scenario=single&driver=app&fail=1');
+
+    await page.locator('.option').nth(1).click();
+    await page.locator('#other-input').fill('some extra context');
+    await page.locator('#btn-submit').click();
+
+    // Previously this was caught with console.error alone — which release
+    // builds discard on Windows — so the click produced no feedback at all
+    // while the agent stayed blocked waiting for an answer that never left.
+    await expect(page.locator('#error-message')).toBeVisible();
+    await expect(page.locator('#error-message')).toContainText('Could not send your answer');
+    await expect(page.locator('.success-title')).toHaveCount(0);
+
+    // Everything the human chose and typed is still there for a retry.
+    await expect(page.locator('input[name="options"]').nth(1)).toBeChecked();
+    await expect(page.locator('#other-input')).toHaveValue('some extra context');
+    await expect(page.locator('#btn-submit')).toBeVisible();
+    expect(await page.evaluate(() => (window as any).__windowClosed)).toBeUndefined();
+  });
+
+  test('a failed skip is reported instead of silently succeeding', async ({ page }) => {
+    await page.goto('/test-harness.html?scenario=single&driver=app&fail=1');
+    await page.locator('#btn-skip').click();
+
+    await expect(page.locator('#error-message')).toContainText('Could not send the skip');
+    await expect(page.locator('.success-title')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__windowClosed)).toBeUndefined();
+  });
+
+  test('a successful submit through app.js still shows the success screen', async ({ page }) => {
+    await page.goto('/test-harness.html?scenario=single&driver=app');
+
+    await page.locator('.option').nth(1).click();
+    await page.locator('#btn-submit').click();
+
+    await expect(page.locator('.success-title')).toHaveText('Response submitted successfully!');
+    await expect(page.locator('#error-message')).toBeHidden();
+    const call = await page.evaluate(() => (window as any).__lastInvoke);
+    expect(call.cmd).toBe('submit_answer');
+    expect(call.args.selectedValues).toEqual(['graphql']);
+  });
+});
+
 // ─── Preview mode: unaffected ────────────────────────────────────────────────
+
 
 test.describe('Preview mode unaffected', () => {
   test('no stepper tabs in preview mode', async ({ page }) => {
