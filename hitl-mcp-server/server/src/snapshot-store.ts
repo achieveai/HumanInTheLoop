@@ -59,6 +59,16 @@ export interface RecordedRevision {
   previousContent: string | null;
 }
 
+/** A revision whose content is stored but which is not yet the plan's latest. */
+export interface PreparedRevision extends RecordedRevision {
+  /**
+   * Flip `latest.json` to this revision, making it the baseline the next review
+   * diffs against. Until this is called the object sits in `objects/` and the
+   * plan's history is unchanged.
+   */
+  commit(): RecordedRevision;
+}
+
 /** Root of the snapshot store. Overridable so tests never touch a real home dir. */
 export function getPlansRoot(): string {
   return path.join(process.env.HITL_HOME ?? path.join(homedir(), '.hitl'), 'plans');
@@ -151,15 +161,22 @@ export function readObject(identity: PlanIdentity, digest: string): string | nul
 }
 
 /**
- * Record `content` as the next revision of this plan.
+ * Stage `content` as the next revision of this plan.
  *
  * Byte-identical content still advances the revision: a resubmit is a distinct
  * review event, and the human must still be able to select every line of an
- * unchanged plan (B-3). The object is written before the pointer flips, so a
- * crash between the two leaves an orphaned object rather than a dangling
- * `latest.json`.
+ * unchanged plan (B-3).
+ *
+ * The pointer flip is deliberately a separate step. `latest.json` is what the
+ * next review diffs against, so writing it before the plan has actually reached
+ * the human means a failed publish silently rebases the next review onto a
+ * revision nobody ever saw — the change the human was meant to review vanishes
+ * from the diff (M6). Callers commit once the revision is out the door.
+ *
+ * The object is written either way; it is content-addressed and immutable, so
+ * an uncommitted one costs a few KB of orphaned disk and nothing else.
  */
-export function recordRevision(identity: PlanIdentity, content: string): RecordedRevision {
+export function prepareRevision(identity: PlanIdentity, content: string): PreparedRevision {
   mkdirSync(path.join(identity.dir, 'objects'), { recursive: true, mode: DIR_MODE });
   // The client writes drafts here; the directory is part of the layout either way.
   mkdirSync(path.join(identity.dir, 'drafts'), { recursive: true, mode: DIR_MODE });
@@ -173,20 +190,26 @@ export function recordRevision(identity: PlanIdentity, content: string): Recorde
     writeAtomic(objectFile, content);
   }
 
-  const meta: SnapshotMeta = {
-    displayPath: identity.displayPath,
-    digest,
+  const record: RecordedRevision = {
     revision: (previous?.revision ?? 0) + 1,
-    createdAt: Date.now(),
-  };
-  writeAtomic(path.join(identity.dir, 'latest.json'), JSON.stringify(meta, null, 2) + '\n');
-
-  return {
-    revision: meta.revision,
     digest,
     isNewPlan: previous === null,
     previous,
     previousContent,
+  };
+
+  return {
+    ...record,
+    commit(): RecordedRevision {
+      const meta: SnapshotMeta = {
+        displayPath: identity.displayPath,
+        digest,
+        revision: record.revision,
+        createdAt: Date.now(),
+      };
+      writeAtomic(path.join(identity.dir, 'latest.json'), JSON.stringify(meta, null, 2) + '\n');
+      return record;
+    },
   };
 }
 

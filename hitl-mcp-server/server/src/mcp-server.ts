@@ -35,7 +35,7 @@ import { detectRepoContext } from './git-context.js';
 import { performSetup, ensureClientRunning } from './setup.js';
 import { SERVER_VERSION } from './version.js';
 import { readPlanFile, PlanFileError } from './plan-file.js';
-import { resolvePlanIdentity, recordRevision } from './snapshot-store.js';
+import { resolvePlanIdentity, prepareRevision } from './snapshot-store.js';
 import { resolveBaseline, buildPlanDiff } from './plan-diff.js';
 import { encodePayload, decodePayload, PayloadDecodeError } from './payload.js';
 import type { ReviewPlanResult } from './plan-review.js';
@@ -559,7 +559,7 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
     const identity = resolvePlanIdentity(plan.resolvedPath);
     let recorded;
     try {
-      recorded = recordRevision(identity, plan.content);
+      recorded = prepareRevision(identity, plan.content);
     } catch (err) {
       // The store retries what is transient; anything reaching here is a real
       // filesystem problem, and a raw EPERM stack is not something an agent
@@ -639,6 +639,20 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
         reviewMsg,
         encoded.ref.kind === 'attachment' ? encoded.cipher : undefined
       );
+
+      // The revision is out the door, so it may now become the baseline the
+      // next review diffs against (M6). A failure here only leaves the next
+      // diff rebased on the older revision — worth saying out loud, not worth
+      // abandoning a review the human is already looking at.
+      try {
+        recorded.commit();
+      } catch (err) {
+        console.error(
+          `Published review ${reviewId} but could not update the snapshot pointer for ` +
+            `${identity.displayPath}: ${describeError(err)}. The next review will diff against ` +
+            `revision ${recorded.previous?.revision ?? 0}.`
+        );
+      }
 
       const { msg: response, attachment } = await this.transport.waitFor<PlanReviewResponseMessage>(
         `plan_review_response:${reviewId}`,

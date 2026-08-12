@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from 'fs'
 import { tmpdir } from 'os';
 import path from 'path';
 import { buildPlanDiff, resolveBaseline, splitLinesPreserving } from '../plan-diff.js';
-import { resolvePlanIdentity, recordRevision } from '../snapshot-store.js';
+import { resolvePlanIdentity, prepareRevision } from '../snapshot-store.js';
 
 /** Anchor positions as the review pane sees them: 1-indexed `@@` hunk lines. */
 function hunkLines(patch: string): string[] {
@@ -152,7 +152,7 @@ describe('resolveBaseline', () => {
     writeFileSync(file, 'committed\nplus a new line\n', 'utf8');
 
     const identity = resolvePlanIdentity(realpathSync.native(file));
-    const recorded = recordRevision(identity, 'committed\nplus a new line\n');
+    const recorded = prepareRevision(identity, 'committed\nplus a new line\n');
 
     expect(resolveBaseline(identity, recorded)).toBe('committed\n');
   });
@@ -166,7 +166,7 @@ describe('resolveBaseline', () => {
     writeFileSync(file, 'ignored plan\n', 'utf8');
 
     const identity = resolvePlanIdentity(realpathSync.native(file));
-    const recorded = recordRevision(identity, 'ignored plan\n');
+    const recorded = prepareRevision(identity, 'ignored plan\n');
 
     expect(resolveBaseline(identity, recorded)).toBeNull();
   });
@@ -179,8 +179,8 @@ describe('resolveBaseline', () => {
     execSync('git add plan.md && git commit -q -m init', { cwd: repo, stdio: 'pipe' });
 
     const identity = resolvePlanIdentity(realpathSync.native(file));
-    recordRevision(identity, 'snapshot one\n');
-    const second = recordRevision(identity, 'snapshot two\n');
+    prepareRevision(identity, 'snapshot one\n').commit();
+    const second = prepareRevision(identity, 'snapshot two\n');
 
     expect(second.revision).toBe(2);
     expect(resolveBaseline(identity, second)).toBe('snapshot one\n');
@@ -188,9 +188,9 @@ describe('resolveBaseline', () => {
 
   it('falls back to all-added when a previous object has gone missing', () => {
     const identity = resolvePlanIdentity(realpathSync.native(planOutsideRepo()));
-    recordRevision(identity, 'v1\n');
+    prepareRevision(identity, 'v1\n').commit();
     rmSync(path.join(identity.dir, 'objects'), { recursive: true, force: true });
-    const second = recordRevision(identity, 'v2\n');
+    const second = prepareRevision(identity, 'v2\n');
 
     expect(resolveBaseline(identity, second)).toBeNull();
   });

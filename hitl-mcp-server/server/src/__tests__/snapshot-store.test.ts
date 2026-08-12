@@ -15,7 +15,7 @@ import path from 'path';
 import { pathToFileURL } from 'url';
 import {
   resolvePlanIdentity,
-  recordRevision,
+  prepareRevision,
   readLatest,
   readObject,
   parseLatest,
@@ -64,18 +64,18 @@ describe('snapshot store', () => {
     const file = planAt(work);
     const identity = resolvePlanIdentity(file);
 
-    const r1 = recordRevision(identity, 'v1\n');
+    const r1 = prepareRevision(identity, 'v1\n').commit();
     expect(r1.revision).toBe(1);
     expect(r1.isNewPlan).toBe(true);
     expect(r1.previous).toBeNull();
     expect(r1.previousContent).toBeNull();
 
-    const r2 = recordRevision(identity, 'v2\n');
+    const r2 = prepareRevision(identity, 'v2\n').commit();
     expect(r2.revision).toBe(2);
     expect(r2.isNewPlan).toBe(false);
     expect(r2.previousContent).toBe('v1\n');
 
-    const r3 = recordRevision(identity, 'v3\n');
+    const r3 = prepareRevision(identity, 'v3\n').commit();
     expect(r3.revision).toBe(3);
     expect(r3.previousContent).toBe('v2\n');
 
@@ -87,8 +87,8 @@ describe('snapshot store', () => {
   it('advances the revision on a byte-identical resubmit (B-3)', () => {
     const identity = resolvePlanIdentity(planAt(work));
 
-    recordRevision(identity, 'same\n');
-    const again = recordRevision(identity, 'same\n');
+    prepareRevision(identity, 'same\n').commit();
+    const again = prepareRevision(identity, 'same\n').commit();
 
     expect(again.revision).toBe(2);
     expect(again.isNewPlan).toBe(false);
@@ -146,7 +146,7 @@ describe('snapshot store', () => {
 
   it('leaves the previous latest.json byte-identical when a write fails (B-9)', () => {
     const identity = resolvePlanIdentity(planAt(work));
-    recordRevision(identity, 'good\n');
+    prepareRevision(identity, 'good\n').commit();
 
     const latestFile = path.join(identity.dir, 'latest.json');
     const before = readFileSync(latestFile, 'utf8');
@@ -162,7 +162,7 @@ describe('snapshot store', () => {
 
     deny();
     try {
-      expect(() => recordRevision(identity, 'next\n')).toThrow();
+      expect(() => prepareRevision(identity, 'next\n').commit()).toThrow();
     } finally {
       allow();
     }
@@ -174,7 +174,7 @@ describe('snapshot store', () => {
   it('never renames a torn latest.json into place under concurrent writers (C2)', async () => {
     const planPath = planAt(work);
     const identity = resolvePlanIdentity(planPath);
-    recordRevision(identity, 'seed\n');
+    prepareRevision(identity, 'seed\n').commit();
 
     // Two real processes: the temp file used to be named after its target, and
     // nothing but a distinct name keeps one writer out of the other's
@@ -186,7 +186,7 @@ describe('snapshot store', () => {
       const store = await import(${JSON.stringify(pathToFileURL(storePath).href)});
       const identity = store.resolvePlanIdentity(${JSON.stringify(planPath)});
       for (let i = 0; i < 150; i++) {
-        store.recordRevision(identity, 'writer-' + process.argv[2] + '-' + i + '\\n');
+        store.prepareRevision(identity, 'writer-' + process.argv[2] + '-' + i + '\\n').commit();
       }
     `;
     const spawnWriter = (tag: string) =>
@@ -238,7 +238,7 @@ describe('snapshot store', () => {
 
   it('rejects a corrupt latest.json instead of trusting it', () => {
     const identity = resolvePlanIdentity(planAt(work));
-    recordRevision(identity, 'good\n');
+    prepareRevision(identity, 'good\n').commit();
     const latestFile = path.join(identity.dir, 'latest.json');
 
     for (const bad of [
@@ -261,7 +261,7 @@ describe('snapshot store', () => {
     ).toBeNull();
 
     // A rejected pointer degrades to "no history" — the next record starts over.
-    expect(recordRevision(identity, 'fresh\n').revision).toBe(1);
+    expect(prepareRevision(identity, 'fresh\n').commit().revision).toBe(1);
   });
 
   it('roots the store under HITL_HOME so tests never touch a real home directory', () => {

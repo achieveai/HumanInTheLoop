@@ -1,15 +1,16 @@
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, realpathSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import { HumanInTheLoopServer } from '../mcp-server.js';
+import { resolvePlanIdentity, readLatest } from '../snapshot-store.js';
 import type { HitlConfig } from '../types.js';
 
 /**
- * Two orderings inside `handleReviewPlan` that are correct today and would
- * break silently if a later edit moved them. Nothing else in this file is
- * coverage for the handler — these are pins, not a suite.
+ * Orderings inside `handleReviewPlan` that are correct today and would break
+ * silently if a later edit moved them. Nothing else in this file is coverage
+ * for the handler — these are pins, not a suite.
  */
 
 const CONFIG: HitlConfig = {
@@ -137,5 +138,37 @@ describe('handleReviewPlan orderings', () => {
     // for the life of the process.
     expect(clearSpy).toHaveBeenCalledWith(heartbeats[0]);
     expect(transport.pending.readAll()).toEqual([]);
+  });
+
+  it('advances the stored revision only once the review is published (M6)', async () => {
+    const identity = resolvePlanIdentity(realpathSync.native(planPath));
+    const review = (a: Record<string, unknown>, e: unknown) =>
+      (
+        server as unknown as {
+          handleReviewPlan: (a: Record<string, unknown>, e: unknown) => Promise<unknown>;
+        }
+      ).handleReviewPlan(a, e);
+
+    await expect(
+      review({ filePath: planPath, context: 'publish fails' }, extraWithProgress())
+    ).rejects.toThrow(/ntfy unreachable/);
+
+    // `latest.json` is the baseline the next review diffs against. Flipping it
+    // for a revision that never left the process rebases the next diff onto
+    // content nobody saw, so the change the human was asked about disappears.
+    expect(readLatest(identity)).toBeNull();
+
+    // Now the publish lands and the wait is cancelled straight afterwards: the
+    // revision reached ntfy, so it becomes the baseline — and it is still
+    // revision 1, because the failure above did not consume the number.
+    transport.publishPlan = async () => {};
+    await expect(
+      review(
+        { filePath: planPath, context: 'publish succeeds' },
+        { ...extraWithProgress(), signal: AbortSignal.abort() }
+      )
+    ).rejects.toThrow();
+
+    expect(readLatest(identity)?.revision).toBe(1);
   });
 });
