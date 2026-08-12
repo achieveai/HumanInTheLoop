@@ -15,6 +15,7 @@ mod types;
 mod window_utils;
 
 use config::load_config;
+use tauri::Manager;
 use types::{AnswerMessage, DismissNotificationMessage, InlineComment, PlanReviewResponseBody, SubAnswer};
 
 /// Tauri command: submit an answer from the frontend.
@@ -146,6 +147,15 @@ fn main() {
             });
 
             Ok(())
+        })
+        // A window's staged payload outlives its first read so a reload can ask
+        // again, which makes destruction the only point at which it is safe to
+        // drop. Registered globally rather than per builder so both window
+        // types are covered by construction — a new window kind cannot forget.
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                payload_store::evict(window.app_handle(), window.label());
+            }
         })
         .build(tauri::generate_context!())
         .expect("error while building HITL client")
