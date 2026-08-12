@@ -553,6 +553,20 @@ export class NtfyTransport {
         throw new NtfyPublishError(`Failed to ${describe}: ${verdict.message}`, response.status, verdict.code);
       }
 
+      // NOT idempotent on its own. A retryable 429 is safe — ntfy rejected the
+      // message, so nothing was stored — but a 5xx is ambiguous: a proxy can
+      // return 502/504 after ntfy has already accepted and stored the message,
+      // and this then publishes it a second time. The same is true of the
+      // transport-level retry above for a reset that arrives after the request
+      // was fully sent.
+      //
+      // What makes that safe is on the client, not here: `SeenIds` in
+      // `client/src-tauri/src/ntfy.rs` de-dupes on our own `messageId` across
+      // both the cache replay and the live stream, and a retry re-sends
+      // byte-identical bytes. Remove that de-dupe and this retry starts
+      // double-delivering dialogs — there is nothing at this site that would
+      // stop it. The residual cost today is a doubled attachment upload
+      // against the daily bandwidth quota; the orphan expires in 3 h.
       const elapsed = Date.now() - startedAt;
       if (attempt === this.retry.maxAttempts || elapsed >= this.retry.totalBudgetMs) break;
 
