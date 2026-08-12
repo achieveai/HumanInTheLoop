@@ -48,7 +48,7 @@ pub async fn subscribe_loop(app: AppHandle) {
     log::info!("Fetching cached messages to find pending questions...");
     let cached_body = fetch_cached_body(&base_url).await;
     let answered_ids = extract_answered_ids(&cached_body, &config);
-    log::info!("Found {} answered questions in cache", answered_ids.len());
+    log::info!("Found {} settled questions and reviews in cache", answered_ids.len());
 
     // Show any pending (unanswered) questions from cache
     show_pending_from_cache(&app, &config, &cached_body, &answered_ids).await;
@@ -1065,7 +1065,8 @@ pub struct PlanReviewSubmitResult {
     pub reason: Option<String>,
 }
 
-struct AckWaiter {    review_id: String,
+struct AckWaiter {
+    review_id: String,
     response_id: String,
     tx: tokio::sync::oneshot::Sender<PlanReviewAckMessage>,
 }
