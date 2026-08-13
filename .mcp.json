@@ -3,7 +3,7 @@
     "hitl": {
       "command": "node",
       "args": ["hitl-mcp-server/server/dist/mcp-server.js"],
-      "timeout": 3600000
+      "timeout": 2147483647
     }
   }
 }
