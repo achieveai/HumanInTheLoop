@@ -400,6 +400,40 @@ test.describe('Review states', () => {
   });
 });
 
+// ─── Sender badge ─────────────────────────────────────────────────────────────
+
+test.describe('Sender badge', () => {
+  test('shows a prominent sender badge in the header when the message carries one', async ({ page }) => {
+    await page.goto(url('?fixture=sender-badge'));
+
+    const badge = page.locator('.review-badges .badge-sender');
+    await expect(badge).toBeVisible();
+    await expect(badge).toBeInViewport();
+    await expect(badge).toHaveAttribute('title', 'Kay9 - work-item/1-reviewplan');
+
+    // Header badge row, never inside the scrolling plan panes.
+    await expect(page.locator('#review-pane-diff .badge-sender')).toHaveCount(0);
+    await expect(page.locator('#review-pane-rendered .badge-sender')).toHaveCount(0);
+  });
+
+  test('truncates a long label with ellipsis instead of wrapping', async ({ page }) => {
+    await page.goto(url('?fixture=sender-badge'));
+    const badge = page.locator('.review-badges .badge-sender');
+    const style = await badge.evaluate(el => {
+      const computed = getComputedStyle(el);
+      return { overflow: computed.overflow, textOverflow: computed.textOverflow, whiteSpace: computed.whiteSpace };
+    });
+    expect(style.overflow).toBe('hidden');
+    expect(style.textOverflow).toBe('ellipsis');
+    expect(style.whiteSpace).toBe('nowrap');
+  });
+
+  test('renders no sender badge when the message omits sender', async ({ page }) => {
+    await page.goto(url());
+    await expect(page.locator('.badge-sender')).toHaveCount(0);
+  });
+});
+
 // ─── Performance (E-13 / E-14, measured not mandated) ────────────────────────
 
 /** E-14's budget: a comment edit must stay under this on a 100 KB plan. */

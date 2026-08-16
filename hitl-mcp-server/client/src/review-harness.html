@@ -127,6 +127,16 @@
             return planFixture(lines, lines.map(text => ({ type: ' ', text })));
         }
 
+        // Sender-identity badge fixture: carries a `sender` field the way
+        // Task 5's `handleReviewPlan` populates it on the wire.
+        function senderBadgeFixture() {
+            const lines = ['# Implementation plan', '', 'A short plan to exercise the sender badge.'];
+            const ops = lines.map(text => ({ type: ' ', text }));
+            return planFixture(lines, ops, {
+                sender: { label: 'Kay9 - work-item/1-reviewplan', source: 'worktree' },
+            });
+        }
+
         // W3.6 measurement fixture: a real ~100 KB plan.
         function largeFixture() {
             const lines = [];
@@ -153,6 +163,7 @@
             'no-trailing-newline': noTrailingNewlineFixture,
             security: securityFixture,
             large: largeFixture,
+            'sender-badge': senderBadgeFixture,
         };
 
         // ── wiring ──────────────────────────────────────────────────────────
