@@ -49,6 +49,16 @@ export interface RepoContext {
   remoteUrl?: string;
 }
 
+/** Which resolution tier produced a `SenderIdentity` label. */
+export type SenderIdentitySource = 'session' | 'worktree' | 'path';
+
+/** Resolved, display-ready sender identity for a machine/session sending a message. */
+export interface SenderIdentity {
+  /** Display label, e.g. "Kay9 - work-item/1-reviewplan". Never an absolute path (F-9). */
+  label: string;
+  source: SenderIdentitySource;
+}
+
 // -----------------------------------------------------------
 // ntfy.sh message envelope
 // -----------------------------------------------------------
