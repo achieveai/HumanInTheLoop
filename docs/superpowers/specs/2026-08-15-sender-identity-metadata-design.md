@@ -6,7 +6,7 @@ A user running HITL across several machines and agent sessions cannot tell, with
 
 ## Decisions
 
-- Every question, notification, and plan review carries a resolvable sender identity, shown as an always-visible badge outside any collapsible section.
+- Every question, notification, and plan review carries a resolvable sender identity when the sender has identity publishing enabled (see `identityEnabled` below), shown as an always-visible badge outside any collapsible section whenever present.
 - Machine name is `config.deviceName` (already defaults to `os.hostname()`); nothing new to resolve there.
 - Identity resolution adds a worktree tier and a path-fallback tier on top of the existing machine name, plus an optional session-name override.
 - The four legacy wire types (`question`, `answer`, `notification`, `dismiss_notification`) are never modified: no new fields, no `protocolVersion`. Sender identity for these travels as a separate, encrypted companion message.
@@ -19,7 +19,8 @@ A user running HITL across several machines and agent sessions cannot tell, with
 
 Label is computed per outgoing message, using the same cwd the tool already resolves for repo context — no new cwd concept is introduced:
 
-- `AskUserQuestion` and `Notify`: `process.cwd()` (matches the existing bare `detectRepoContext()` call in `mcp-server.ts`).
+- `AskUserQuestion`: `process.cwd()` (matches the existing bare `detectRepoContext()` call in `mcp-server.ts`).
+- `Notify`: `process.cwd()` as well, for consistency with `AskUserQuestion`. `Notify` has no existing repo-context call today — `NotificationMessage` carries no `repo` field and the notify handler in `mcp-server.ts` never calls `detectRepoContext` — so this is the first place cwd is resolved for it; it does not piggyback on an existing call.
 - `ReviewPlan`: `path.dirname(plan.resolvedPath)` (matches the existing `detectRepoContext(path.dirname(plan.resolvedPath))` call used for the review's `repo` field).
 
 Resolution order, highest precedence first:
@@ -67,7 +68,7 @@ Published through a sibling method mirroring `publishPlan` (`ntfy-transport.ts`)
 
 - Identity data (label, source) only ever travels inside the message body that already goes through `encrypt()`/`X-Message`. It is never added as a new ntfy HTTP header — the only header ntfy attachments already set in plaintext is `Filename` (random hex, per the existing F-9 comment in `ntfy-transport.ts`), and this design adds nothing beside it.
 - Labels never contain an absolute path (F-9): the path-fallback tier truncates to the last two segments before it is ever serialized.
-- `HitlConfig` gains `identityEnabled?: boolean` (default `true` when absent), read the same way `deviceName` is defaulted today in `config.ts`. When `false`, the sending client stops publishing `sender_identity` and stops populating `PlanReviewMessage.sender`; it does not affect whether that client displays badges for *other* senders' identity.
+- `HitlConfig` gains `identityEnabled?: boolean` (default `true` when absent), read the same way `soundEnabled` is defaulted today in `config.ts` — `parsed.identityEnabled !== false` — not the `deviceName` fallback, whose `||`-on-a-string idiom would evaluate `true` even when the config explicitly sets `identityEnabled: false` and silently defeat the opt-out. When `false`, the sending client stops publishing `sender_identity` and stops populating `PlanReviewMessage.sender`; it does not affect whether that client displays badges for *other* senders' identity — this is a settled decision, not an open question (see below).
 
 ## UI
 
@@ -91,7 +92,6 @@ Badge text must truncate gracefully (ellipsis, `title` attribute for full text o
 ## Open questions
 
 - Exact size/TTL bound for the `forMessageId` sender-identity cache used to patch already-open or soon-to-open windows.
-- Whether `identityEnabled: false` on the *receiving* client should hide inbound badges too, or only suppress outbound publishing (current design assumes the latter).
 - Whether a `sender_identity` should be re-published if `deviceName` changes mid-session, or the label is fixed at send time.
 - Character/width budget for badge truncation across the three window types, which differ in layout width.
 
