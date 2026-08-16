@@ -151,6 +151,15 @@ body {
 
 .badge-icon { font-size: 14px; }
 
+/* Sender identity badge — never wraps or pushes out the meta-row; the full
+   label is always available via the title attribute on hover. */
+.badge-sender {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* Question */
 .question { font-size: 18px; color: #2d3748; margin-bottom: 8px; font-weight: 500; }
 

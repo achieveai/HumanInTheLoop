@@ -57,6 +57,38 @@ function updatePreviewPanel(panelId, markdown) {
 }
 
 /**
+ * Render (or update) the sender-identity badge in a dialog's meta-row.
+ *
+ * Shared by the initial render and the live-patch `sender-identity` listener
+ * in app.js, so there is exactly one place that builds this badge. Creates
+ * `.meta-row` if it does not exist yet (e.g. no repo context, but a sender) —
+ * it always lands as the first child of `.dialog-scroll`, above the question
+ * text and the collapsible `.context-section`, so it stays prominent and
+ * visible without scrolling.
+ */
+export function renderSenderBadge(dialogContainer, sender) {
+    if (!sender?.label) return;
+    const label = escapeHtml(sender.label);
+    const badgeHtml = `<span class="badge badge-sender" title="${label}">${label}</span>`;
+
+    let metaRow = dialogContainer.querySelector('.meta-row');
+    if (!metaRow) {
+        metaRow = document.createElement('div');
+        metaRow.className = 'meta-row';
+        const scroll = dialogContainer.querySelector('.dialog-scroll');
+        if (!scroll) return;
+        scroll.insertBefore(metaRow, scroll.firstChild);
+    }
+
+    const existing = metaRow.querySelector('.badge-sender');
+    if (existing) {
+        existing.outerHTML = badgeHtml;
+    } else {
+        metaRow.insertAdjacentHTML('beforeend', badgeHtml);
+    }
+}
+
+/**
  * Render the full dialog HTML for a question into the container.
  */
 export function renderDialog(container, question, callbacks) {
@@ -125,6 +157,8 @@ export function renderDialog(container, question, callbacks) {
             `}
         </div>
     `;
+
+    renderSenderBadge(container, question.sender);
 
     // Render markdown context
     if (llmContext) {

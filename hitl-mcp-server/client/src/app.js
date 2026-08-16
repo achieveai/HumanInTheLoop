@@ -1,7 +1,7 @@
 // Main app entry point for the HITL Tauri client frontend.
 // Pulls the question payload over IPC and renders the dialog.
 
-import { renderDialog, showSuccess } from './dialog.js';
+import { renderDialog, showSuccess, renderSenderBadge } from './dialog.js';
 
 let currentQuestionId = null;
 
@@ -139,6 +139,17 @@ async function init() {
             }
 
             setTimeout(() => getCurrentWindow().close(), 3000);
+        }
+    });
+
+    // Sender identity is decoration published as a separate companion message
+    // (see docs/superpowers/specs/2026-08-15-sender-identity-metadata-design.md)
+    // and can arrive after this window has already rendered — patch it in
+    // place rather than requiring a reload.
+    await listen('sender-identity', (event) => {
+        const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
+        if (payload?.forMessageId === currentQuestionId) {
+            renderSenderBadge(dialogContainer, payload.sender);
         }
     });
 }

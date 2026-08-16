@@ -11,9 +11,17 @@
         // ?fail=1 makes submit_answer reject, so the C-6 / P3 submit-failure
         // path in app.js is exercisable without breaking a real transport.
         const failInvoke = new URLSearchParams(window.location.search).get('fail') === '1';
+        // Captures each listen() callback by event name (rather than the prior
+        // blanket no-op) so tests can drive a live-patch path — e.g. the
+        // sender-identity badge patch — through the real app.js listener
+        // instead of reimplementing its behavior in the harness.
+        window.__listeners = {};
         window.__TAURI__ = {
             event: {
-                listen: () => Promise.resolve(() => {}),
+                listen: (eventName, callback) => {
+                    window.__listeners[eventName] = callback;
+                    return Promise.resolve(() => {});
+                },
             },
             core: {
                 invoke: (cmd, args) => {
@@ -196,6 +204,12 @@
             }
             history.replaceState(null, '', `?${query.toString()}`);
             await import('./app.js');
+            // Dispatches the same event Rust would emit for an already-open
+            // dialog window, through the real listener app.js registers —
+            // not a reimplementation of the patch logic here.
+            window.__simulateSenderIdentity = (sender) => {
+                window.__listeners['sender-identity']?.({ payload: { forMessageId: question.messageId, sender } });
+            };
         } else {
             renderDialog(container, question, {
                 onSubmit: (selected, otherText, subAnswers) => {
