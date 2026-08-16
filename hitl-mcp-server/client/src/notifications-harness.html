@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en" style="background:transparent;">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HITL Notifications — Test Harness</title>
+    <link rel="stylesheet" href="notifications.css">
+    <script src="vendor/marked.umd.js"></script>
+    <!-- Mock window.__TAURI__ so notifications.js runs outside a real Tauri
+         client, mirroring test-harness.html/review-harness.html. Unlike
+         test-notifications.html (which hand-duplicates the card markup),
+         this harness imports the real notifications.js module below, so the
+         badge markup under test is the shipping code, not a copy of it.
+
+         listen() captures each callback by event name (rather than
+         discarding it) so a sender-identity event can be simulated through
+         notifications.js's own real listener, not a reimplementation of its
+         patch logic here. -->
+    <script>
+        window.__listeners = {};
+        window.__TAURI__ = {
+            event: {
+                listen: (eventName, callback) => {
+                    window.__listeners[eventName] = callback;
+                    return Promise.resolve(() => {});
+                },
+            },
+            core: {
+                invoke: (cmd, args) => {
+                    console.log('[TAURI MOCK] invoke:', cmd, args);
+                    return Promise.resolve();
+                },
+            },
+            window: {
+                getCurrentWindow: () => ({
+                    show: () => Promise.resolve(),
+                    setFocus: () => Promise.resolve(),
+                    close: () => console.log('[TAURI MOCK] window.close()'),
+                }),
+            },
+        };
+    </script>
+</head>
+<body style="background: #e2e8f0; padding: 20px;">
+    <div class="notifications-container" id="notifications-container" style="max-width: 500px; height: auto;">
+        <div class="notifications-titlebar">
+            <span class="notifications-titlebar-label">Notifications</span>
+            <span class="notifications-count" id="count-badge">0</span>
+        </div>
+        <div class="notifications-list" id="notifications-list">
+            <div class="empty-state" id="empty-state">
+                <p>No notifications</p>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // Real module import — `loadInitialNotification()` reads the
+        // existing `?notification=<json>` URL param convention (same shape
+        // dialog.js's `?question=` uses), so no separate fixture mechanism
+        // is needed here.
+        import './notifications.js';
+
+        window.__simulateSenderIdentity = (forMessageId, sender) => {
+            window.__listeners['sender-identity']?.({ payload: { forMessageId, sender } });
+        };
+    </script>
+</body>
+</html>

@@ -59,6 +59,17 @@ function renderNotifications() {
     emptyEl.style.display = 'none';
 }
 
+/**
+ * Build the sender-identity badge markup, or '' when there is no sender.
+ * Shared by the initial card render and the live-patch `applySenderIdentity`
+ * path below, so there is exactly one place that builds this badge.
+ */
+function renderSenderBadgeHtml(sender) {
+    if (!sender?.label) return '';
+    const label = escapeHtml(sender.label);
+    return `<span class="badge badge-sender" title="${label}">${label}</span>`;
+}
+
 function addNotificationCard(notification) {
     emptyEl.style.display = 'none';
 
@@ -72,12 +83,14 @@ function addNotificationCard(notification) {
     }
 
     const bodyHtml = renderMarkdown(notification.body);
+    const senderBadgeHtml = renderSenderBadgeHtml(notification.sender);
 
     card.innerHTML = `
         <div class="notification-header">
             <div class="notification-title">${escapeHtml(notification.title)}</div>
             <div class="notification-time">${formatTime(notification.timestamp)}</div>
         </div>
+        ${senderBadgeHtml ? `<div class="notification-badges">${senderBadgeHtml}</div>` : ''}
         <div class="notification-body md-content">${bodyHtml}</div>
         ${contextHtml}
         <div class="notification-dismiss">
@@ -119,6 +132,27 @@ async function dismissNotification(messageId, cardEl) {
         cardEl.remove();
         renderNotifications();
     }, 300);
+}
+
+/**
+ * Patch a sender-identity badge into an already-rendered card. Decoration
+ * only: a `forMessageId` that matches no rendered card is a silent no-op —
+ * the companion message may have arrived for a card that was never opened
+ * here, or after it was dismissed.
+ */
+export function applySenderIdentity(forMessageId, sender) {
+    const card = listEl.querySelector(`[data-id="${forMessageId}"]`);
+    if (!card) return;
+    const badgeHtml = renderSenderBadgeHtml(sender);
+    if (!badgeHtml) return;
+
+    let row = card.querySelector('.notification-badges');
+    if (!row) {
+        row = document.createElement('div');
+        row.className = 'notification-badges';
+        card.querySelector('.notification-header')?.after(row);
+    }
+    row.innerHTML = badgeHtml;
 }
 
 function removeNotificationById(messageId) {
@@ -176,6 +210,14 @@ async function setupListeners() {
     await listen('remove-notification', (event) => {
         const notificationId = event.payload;
         removeNotificationById(notificationId);
+    });
+
+    // Sender identity is decoration published as a separate companion message
+    // (see docs/superpowers/specs/2026-08-15-sender-identity-metadata-design.md)
+    // and can arrive after its card has already rendered.
+    await listen('sender-identity', (event) => {
+        const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
+        applySenderIdentity(payload?.forMessageId, payload?.sender);
     });
 }
 
