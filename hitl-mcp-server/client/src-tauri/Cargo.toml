@@ -1,6 +1,6 @@
 [package]
 name = "hitl-client"
-version = "2.11.0"
+version = "2.11.1"
 description = "Human-in-the-Loop cross-machine notification client"
 authors = ["HITL"]
 edition = "2021"
