@@ -2,6 +2,15 @@ import { execSync } from 'child_process';
 import path from 'path';
 import type { RepoContext } from './types.js';
 
+/** Run a git command in `cwd`, tolerating any failure. Trims stdout; empty output ⇒ undefined. */
+function run(cmd: string, cwd: string): string | undefined {
+  try {
+    return execSync(cmd, { cwd, encoding: 'utf-8', timeout: 5000, stdio: 'pipe' }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Auto-detect git repository context.
  *
@@ -11,29 +20,37 @@ import type { RepoContext } from './types.js';
  * Returns null gracefully if git is unavailable or the directory is not a repo.
  */
 export function detectRepoContext(cwd?: string): RepoContext | null {
-  const opts = { cwd: cwd ?? process.cwd(), encoding: 'utf-8' as const, timeout: 5000 };
+  const resolvedCwd = cwd ?? process.cwd();
 
-  try {
-    // Quick check: are we in a git repo at all?
-    execSync('git rev-parse --is-inside-work-tree', { ...opts, stdio: 'pipe' });
-  } catch {
+  // Quick check: are we in a git repo at all?
+  if (run('git rev-parse --is-inside-work-tree', resolvedCwd) === undefined) {
     return null;
   }
 
-  const run = (cmd: string): string | undefined => {
-    try {
-      return execSync(cmd, { ...opts, stdio: 'pipe' }).trim() || undefined;
-    } catch {
-      return undefined;
-    }
-  };
-
-  const toplevel = run('git rev-parse --show-toplevel');
+  const toplevel = run('git rev-parse --show-toplevel', resolvedCwd);
   const name = toplevel ? toplevel.split('/').pop() ?? toplevel.split('\\').pop() ?? 'unknown' : 'unknown';
-  const branch = run('git branch --show-current') ?? 'HEAD';
-  const remoteUrl = run('git remote get-url origin');
+  const branch = run('git branch --show-current', resolvedCwd) ?? 'HEAD';
+  const remoteUrl = run('git remote get-url origin', resolvedCwd);
 
   return { name, branch, remoteUrl };
+}
+
+/**
+ * Whether `cwd` is inside a *linked* git worktree (created via `git worktree add`),
+ * as opposed to the main working tree or a plain non-worktree repo.
+ *
+ * `--git-dir` and `--git-common-dir` point at the same place in the main working
+ * tree; a linked worktree has its own `--git-dir` under `.git/worktrees/<name>`
+ * while `--git-common-dir` still points at the shared repo. Resolved to absolute
+ * paths before comparing since git may print either relative or absolute output
+ * depending on platform/version. Returns `false` (never throws) when `cwd` isn't
+ * a git repo at all.
+ */
+export function isLinkedWorktree(cwd: string = process.cwd()): boolean {
+  const gitDir = run(`git rev-parse --git-dir`, cwd);
+  const gitCommonDir = run(`git rev-parse --git-common-dir`, cwd);
+  if (gitDir === undefined || gitCommonDir === undefined) return false;
+  return path.resolve(cwd, gitDir) !== path.resolve(cwd, gitCommonDir);
 }
 
 /**
