@@ -35,6 +35,7 @@ export function loadConfig(): HitlConfig {
     deviceName: parsed.deviceName || hostname(),
     soundEnabled: parsed.soundEnabled !== false,
     encryptionKey: parsed.encryptionKey || undefined,
+    identityEnabled: parsed.identityEnabled !== false,
   };
 }
 
@@ -48,6 +49,7 @@ export function generateDefaultConfig(): HitlConfig {
     deviceName: hostname(),
     soundEnabled: true,
     encryptionKey: crypto.randomBytes(32).toString('hex'),
+    identityEnabled: true,
   };
 }
 

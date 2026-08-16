@@ -1,0 +1,59 @@
+import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+
+// --- Module-level mocks ---
+// config.ts always resolves CONFIG_DIR/CONFIG_FILE from homedir() at import
+// time (unlike ntfy-transport.ts/snapshot-store.ts, it does not honor
+// HITL_HOME), so mock os/fs the same way host-settings.test.ts/cli.test.ts do.
+
+const mockExistsSync = jest.fn<(p: string) => boolean>();
+const mockReadFileSync = jest.fn<(p: string, enc: string) => string>();
+const mockWriteFileSync = jest.fn<(...args: unknown[]) => void>();
+const mockMkdirSync = jest.fn<(...args: unknown[]) => void>();
+jest.unstable_mockModule('fs', () => ({
+  existsSync: mockExistsSync,
+  readFileSync: mockReadFileSync,
+  writeFileSync: mockWriteFileSync,
+  mkdirSync: mockMkdirSync,
+}));
+jest.unstable_mockModule('os', () => ({
+  homedir: jest.fn(() => '/mock/home'),
+  hostname: jest.fn(() => 'test-host'),
+}));
+
+// Dynamically import the module under test AFTER mocks are registered.
+const { loadConfig, generateDefaultConfig } = await import('../config.js');
+
+/** Minimal valid config JSON — loadConfig throws without a topicId. */
+function configJson(extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({ topicId: 'hitl-test-topic', ...extra });
+}
+
+describe('config: identityEnabled', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockExistsSync.mockReturnValue(true);
+  });
+
+  describe('loadConfig', () => {
+    it('defaults identityEnabled to true when the key is absent', () => {
+      mockReadFileSync.mockReturnValue(configJson());
+      expect(loadConfig().identityEnabled).toBe(true);
+    });
+
+    it('respects an explicit identityEnabled: true', () => {
+      mockReadFileSync.mockReturnValue(configJson({ identityEnabled: true }));
+      expect(loadConfig().identityEnabled).toBe(true);
+    });
+
+    it('respects an explicit identityEnabled: false (not defeated by a naive || default)', () => {
+      mockReadFileSync.mockReturnValue(configJson({ identityEnabled: false }));
+      expect(loadConfig().identityEnabled).toBe(false);
+    });
+  });
+
+  describe('generateDefaultConfig', () => {
+    it('defaults identityEnabled to true', () => {
+      expect(generateDefaultConfig().identityEnabled).toBe(true);
+    });
+  });
+});

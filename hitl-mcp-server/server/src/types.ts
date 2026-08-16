@@ -308,6 +308,8 @@ export interface HitlConfig {
   soundEnabled: boolean;
   /** Optional AES-256-GCM encryption key (64-char hex string) for encrypting messages */
   encryptionKey?: string;
+  /** Whether this device publishes its own sender identity (default: true) */
+  identityEnabled?: boolean;
 }
 
 export const DEFAULT_NTFY_URL = 'https://ntfy.sh';
