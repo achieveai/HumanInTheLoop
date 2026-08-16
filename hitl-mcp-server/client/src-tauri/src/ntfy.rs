@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use futures_util::StreamExt;
 use reqwest::Client;
 use tauri::{AppHandle, Emitter, Manager};
@@ -13,7 +13,7 @@ use crate::types::{
     AnswerMessage, AttachmentRef, CancelReviewMessage, ChunkMessage, DismissNotificationMessage,
     HitlConfig, MessageEnvelope, NotificationMessage, PlanPayloadRef, PlanReviewAckMessage,
     PlanReviewBody, PlanReviewMessage, PlanReviewResponseBody, PlanReviewResponseMessage,
-    QuestionMessage, SUPPORTED_PROTOCOL_VERSION,
+    QuestionMessage, SenderIdentityMessage, SenderInfo, SUPPORTED_PROTOCOL_VERSION,
 };
 
 /// How many recently-dispatched message IDs to remember for reconnect de-dup.
@@ -287,6 +287,81 @@ impl SeenIds {
     }
 }
 
+/// How many not-yet-open dialog/notification windows' sender identities to
+/// remember at once. Sized for "one entry per pending window", not "every
+/// message ever seen" — much smaller than `SEEN_ID_CAPACITY`.
+const SENDER_IDENTITY_CACHE_CAPACITY: usize = 128;
+
+/// Bounded FIFO cache of resolved sender identities, keyed by the
+/// `forMessageId` of the question/notification they decorate.
+///
+/// Sibling of `SeenIds`: same `VecDeque` + bounded-eviction shape, but a value
+/// store (`HashMap<String, SenderInfo>`) instead of a presence set, since a
+/// `sender_identity` that arrives before its target window opens has to be
+/// retrievable later, not just remembered as "seen". Used when a
+/// `sender_identity` message finds no open window yet (Task 6, Step 6) and
+/// read when that window is later created (Task 6, Step 7).
+struct SenderIdentityCache {
+    order: VecDeque<String>,
+    entries: HashMap<String, SenderInfo>,
+    capacity: usize,
+}
+
+impl SenderIdentityCache {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            order: VecDeque::with_capacity(capacity),
+            entries: HashMap::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// FIFO-evicts the oldest entry when over capacity. Re-inserting an
+    /// existing key updates its value without duplicating the eviction order,
+    /// mirroring `SeenIds::insert`'s dedup-on-reinsert behavior.
+    fn insert(&mut self, for_message_id: &str, sender: SenderInfo) {
+        if self.entries.insert(for_message_id.to_string(), sender).is_none() {
+            self.order.push_back(for_message_id.to_string());
+            if self.order.len() > self.capacity {
+                if let Some(evicted) = self.order.pop_front() {
+                    self.entries.remove(&evicted);
+                }
+            }
+        }
+    }
+
+    /// Absent for an unknown key — no panic, no error. This is the "unmatched
+    /// identity is dropped silently" contract at the cache layer.
+    fn get(&self, for_message_id: &str) -> Option<SenderInfo> {
+        self.entries.get(for_message_id).cloned()
+    }
+}
+
+impl Default for SenderIdentityCache {
+    fn default() -> Self {
+        Self::with_capacity(SENDER_IDENTITY_CACHE_CAPACITY)
+    }
+}
+
+/// Tauri-managed state wrapping `SenderIdentityCache` behind a mutex, mirroring
+/// `OutstandingReviews`/`AckWaiters`'s pattern for interior mutability: unlike
+/// this file's plain unit-tested structs, `app.state::<T>()` only ever hands
+/// back `&T`.
+#[derive(Default)]
+pub struct SenderIdentityCacheState(std::sync::Mutex<SenderIdentityCache>);
+
+impl SenderIdentityCacheState {
+    fn insert(&self, for_message_id: &str, sender: SenderInfo) {
+        if let Ok(mut cache) = self.0.lock() {
+            cache.insert(for_message_id, sender);
+        }
+    }
+
+    fn get(&self, for_message_id: &str) -> Option<SenderInfo> {
+        self.0.lock().ok().and_then(|cache| cache.get(for_message_id))
+    }
+}
+
 /// State that must survive a reconnect.
 ///
 /// The chunk assembler used to be constructed inside `subscribe_live`, so any
@@ -366,6 +441,62 @@ fn window_label(prefix: &str, id: &str) -> String {
         .map(|(i, _)| i)
         .unwrap_or(id.len());
     format!("{}-{}", prefix, &id[..cut])
+}
+
+/// What dispatching a `sender_identity` message should do.
+#[derive(Debug, PartialEq, Eq)]
+enum SenderIdentityAction {
+    /// Patch the window at this label — it is already open.
+    Emit(String),
+    /// No window open yet — remember it in `SenderIdentityCacheState` for when
+    /// one is created (Task 6, Step 7).
+    Cache,
+    /// `forMessageId` was empty, or `forType` is neither "question" nor
+    /// "notification" — dropped silently. Identity is decoration only; it
+    /// never blocks, retries, or surfaces an error.
+    Drop,
+}
+
+/// Decide what to do with a `sender_identity` message, without touching a real
+/// window. Window lookups are I/O this crate has no test harness for (no
+/// `tauri` "test" feature, no dev-dependencies) — this pure extraction is what
+/// keeps the routing decision unit-testable, the same way `window_label` and
+/// `extract_answered_ids` keep the rest of dispatch testable.
+///
+/// `window_is_open` is called with the resolved label at most once, and only
+/// when `for_message_id` and `for_type` are both valid — a real caller passes
+/// `|label| app.get_webview_window(label).is_some()`.
+fn decide_sender_identity_action(
+    for_message_id: &str,
+    for_type: &str,
+    window_is_open: impl FnOnce(&str) -> bool,
+) -> SenderIdentityAction {
+    if for_message_id.is_empty() {
+        return SenderIdentityAction::Drop;
+    }
+
+    let label = match for_type {
+        "question" => window_label("dialog", for_message_id),
+        "notification" => "notifications".to_string(),
+        _ => return SenderIdentityAction::Drop,
+    };
+
+    if window_is_open(&label) {
+        SenderIdentityAction::Emit(label)
+    } else {
+        SenderIdentityAction::Cache
+    }
+}
+
+/// Merge a cached sender identity into a window's initial payload, if one was
+/// found — the "cache-then-seed-later-window" path (Task 6, Step 7). A no-op
+/// when nothing was cached, or when `payload` is not a JSON object (should
+/// never happen for the two callers, but this must never panic).
+fn merge_cached_sender(payload: &mut serde_json::Value, sender: Option<SenderInfo>) {
+    let (Some(obj), Some(sender)) = (payload.as_object_mut(), sender) else {
+        return;
+    };
+    obj.insert("sender".to_string(), serde_json::to_value(sender).unwrap_or_default());
 }
 
 /// Extract the IDs of questions and reviews the cache shows are already settled.
@@ -787,6 +918,42 @@ async fn dispatch_message(
                 Err(e) => log::error!("cancel_review {} parse failed: {}", env.message_id, e),
             }
         }
+
+        // Decoration for a question/notification, published separately so the
+        // four legacy wire shapes never gain a field. No `Origin::Cache` gate,
+        // unlike the settlement arms above: this is not a settling event, and
+        // a client starting up with pending cached questions still needs their
+        // badges — the same message is handled identically from either origin.
+        // Never blocks, retries, or surfaces a user-visible error: a parse
+        // failure or an unmatched target is dropped silently.
+        "sender_identity" => match serde_json::from_str::<SenderIdentityMessage>(raw) {
+            Ok(msg) => {
+                match decide_sender_identity_action(&msg.for_message_id, &msg.for_type, |label| {
+                    app.get_webview_window(label).is_some()
+                }) {
+                    SenderIdentityAction::Emit(label) => {
+                        if let Some(window) = app.get_webview_window(&label) {
+                            let event_payload = serde_json::json!({
+                                "forMessageId": msg.for_message_id,
+                                "sender": msg.sender,
+                            });
+                            if let Err(e) = window.emit("sender-identity", event_payload) {
+                                log::error!("Failed to emit sender-identity to {}: {}", label, e);
+                            }
+                        }
+                    }
+                    SenderIdentityAction::Cache => {
+                        app.state::<SenderIdentityCacheState>()
+                            .insert(&msg.for_message_id, msg.sender);
+                    }
+                    SenderIdentityAction::Drop => log::debug!(
+                        "sender_identity dropped: empty forMessageId or unrecognized forType '{}'",
+                        msg.for_type
+                    ),
+                }
+            }
+            Err(e) => log::error!("sender_identity parse failed: {}", e),
+        },
 
         // Only reachable when `resolve_chunked_message` could NOT parse the
         // fragment as a `ChunkMessage` — a parsed one is either held for its
@@ -1229,6 +1396,10 @@ fn show_notification(
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("_wasEncrypted".to_string(), serde_json::Value::Bool(was_encrypted));
     }
+    // The cache-then-seed-later-window path (Task 6, Step 7): a
+    // sender_identity that arrived before this notification card existed.
+    let cached_sender = app.state::<SenderIdentityCacheState>().get(&notification.message_id);
+    merge_cached_sender(&mut payload, cached_sender);
     let notification_json = serde_json::to_string(&payload).unwrap_or_default();
     let label = "notifications";
 
@@ -1280,7 +1451,12 @@ fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessag
         crate::sound::play_notification();
     }
 
-    let question_json = serde_json::to_string(question).unwrap_or_default();
+    // The cache-then-seed-later-window path (Task 6, Step 7): a
+    // sender_identity that arrived before this dialog window existed.
+    let mut payload = serde_json::to_value(question).unwrap_or_default();
+    let cached_sender = app.state::<SenderIdentityCacheState>().get(&question.message_id);
+    merge_cached_sender(&mut payload, cached_sender);
+    let question_json = serde_json::to_string(&payload).unwrap_or_default();
 
     // The whole question used to be URL-encoded into the query string, which
     // does not survive a large payload and leaks content into anything that
@@ -1765,6 +1941,135 @@ mod tests {
 
         assert_eq!(seen.order.len(), 1);
         assert_eq!(seen.ids.len(), 1);
+    }
+
+    // --- Sender identity cache (Task 6) ---
+    //
+    // Sibling of SeenIds: same VecDeque + bounded-eviction FIFO shape, but a
+    // value store (HashMap<String, SenderInfo>) rather than a presence set,
+    // since a sender_identity that arrives before its window opens has to be
+    // retrievable later, not just remembered as "seen".
+
+    fn a_sender(label: &str) -> SenderInfo {
+        SenderInfo { label: label.to_string(), source: "worktree".to_string() }
+    }
+
+    #[test]
+    fn sender_identity_cache_returns_what_was_inserted() {
+        let mut cache = SenderIdentityCache::with_capacity(8);
+        cache.insert("q-1", a_sender("Kay9 - work-item/1"));
+
+        assert_eq!(cache.get("q-1").unwrap().label, "Kay9 - work-item/1");
+    }
+
+    #[test]
+    fn sender_identity_cache_get_on_an_unknown_key_is_none_not_a_panic() {
+        // This is the "unmatched identity is dropped" contract at the cache
+        // layer: a miss must be an ordinary Option, never a panic or an error.
+        let cache = SenderIdentityCache::with_capacity(8);
+        assert!(cache.get("never-inserted").is_none());
+    }
+
+    #[test]
+    fn sender_identity_cache_evicts_the_oldest_entry_once_over_capacity() {
+        let mut cache = SenderIdentityCache::with_capacity(2);
+        cache.insert("a", a_sender("A"));
+        cache.insert("b", a_sender("B"));
+        cache.insert("c", a_sender("C")); // evicts "a"
+
+        assert!(cache.get("a").is_none(), "the oldest entry must have been evicted");
+        assert_eq!(cache.get("b").unwrap().label, "B");
+        assert_eq!(cache.get("c").unwrap().label, "C");
+    }
+
+    #[test]
+    fn sender_identity_cache_reinsertion_does_not_grow_past_capacity() {
+        let mut cache = SenderIdentityCache::with_capacity(4);
+        for i in 0..10 {
+            cache.insert("same", a_sender(&format!("v{i}")));
+        }
+
+        assert_eq!(cache.order.len(), 1);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.get("same").unwrap().label, "v9", "the latest value wins");
+    }
+
+    // --- Sender identity dispatch decision (Task 6) ---
+    //
+    // dispatch_message needs a real AppHandle (window lookups are I/O), which
+    // this crate has no test harness for (no tauri "test" feature, no
+    // dev-dependencies) — the same reason every other piece of dispatch logic
+    // in this file (window_label, extract_answered_ids, review_window_payload)
+    // is tested as a pure function rather than through dispatch_message itself.
+    // decide_sender_identity_action is that pure extraction for the
+    // sender_identity arm: window-open-ness is injected as a closure so tests
+    // never touch a real window.
+
+    #[test]
+    fn sender_identity_targets_the_dialog_window_when_it_is_already_open() {
+        let action = decide_sender_identity_action("q-123", "question", |label| {
+            label == "dialog-q-123"
+        });
+
+        match action {
+            SenderIdentityAction::Emit(label) => assert_eq!(label, "dialog-q-123"),
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sender_identity_targets_the_shared_notifications_window_when_open() {
+        let action = decide_sender_identity_action("n-456", "notification", |label| {
+            label == "notifications"
+        });
+
+        match action {
+            SenderIdentityAction::Emit(label) => assert_eq!(label, "notifications"),
+            other => panic!("expected Emit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sender_identity_with_no_open_window_is_cached_not_emitted() {
+        let action = decide_sender_identity_action("q-789", "question", |_| false);
+        assert_eq!(action, SenderIdentityAction::Cache);
+    }
+
+    #[test]
+    fn sender_identity_with_an_empty_for_message_id_is_dropped_not_panicked() {
+        let action = decide_sender_identity_action("", "question", |_| {
+            panic!("must not probe for a window when forMessageId is empty")
+        });
+        assert_eq!(action, SenderIdentityAction::Drop);
+    }
+
+    #[test]
+    fn sender_identity_with_an_unrecognized_for_type_is_dropped() {
+        let action = decide_sender_identity_action("q-1", "carrier_pigeon", |_| {
+            panic!("must not probe for a window when forType is unrecognized")
+        });
+        assert_eq!(action, SenderIdentityAction::Drop);
+    }
+
+    // --- Seeding a newly-created window from the cache (Task 6, Step 7) ---
+
+    #[test]
+    fn merge_cached_sender_inserts_sender_when_present() {
+        let mut payload = serde_json::json!({"messageId": "q-1"});
+        merge_cached_sender(&mut payload, Some(a_sender("Kay9 - work-item/1")));
+
+        assert_eq!(payload["sender"]["label"], "Kay9 - work-item/1");
+        assert_eq!(payload["sender"]["source"], "worktree");
+        // Existing fields must survive untouched.
+        assert_eq!(payload["messageId"], "q-1");
+    }
+
+    #[test]
+    fn merge_cached_sender_is_a_no_op_when_nothing_was_cached() {
+        let mut payload = serde_json::json!({"messageId": "q-1"});
+        merge_cached_sender(&mut payload, None);
+
+        assert!(payload.get("sender").is_none());
     }
 
     // --- Window labels (W2.3 / W2.4) ---

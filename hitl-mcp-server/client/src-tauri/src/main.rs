@@ -125,6 +125,7 @@ fn main() {
         .manage(payload_store::PayloadStore::default())
         .manage(ntfy::AckWaiters::default())
         .manage(ntfy::OutstandingReviews::default())
+        .manage(ntfy::SenderIdentityCacheState::default())
         .manage(tray::AppState::default())
         .invoke_handler(tauri::generate_handler![
             submit_answer,

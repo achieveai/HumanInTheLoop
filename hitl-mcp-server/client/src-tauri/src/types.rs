@@ -404,6 +404,26 @@ pub struct CancelReviewMessage {
     pub reason: String,
 }
 
+/// Decorates a question or notification with the sender's resolved identity.
+///
+/// Mirrors `SenderIdentityMessage` in `server/src/types.ts`. Deliberately does
+/// NOT extend any message envelope shape and carries no `messageId` of its
+/// own — only `forMessageId`, a pointer back to the message it decorates.
+/// Client-received only, so no `Serialize` derive. Every field
+/// `#[serde(default)]`: this is decoration, never required, so a malformed or
+/// partial payload must still parse instead of vanishing silently.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SenderIdentityMessage {
+    #[serde(default)]
+    pub for_message_id: String,
+    /// "question" | "notification".
+    #[serde(default)]
+    pub for_type: String,
+    #[serde(default)]
+    pub sender: SenderInfo,
+}
+
 /// Application config from ~/.hitl/config.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -967,5 +987,37 @@ mod tests {
             serde_json::from_str(r#"{"url":"https://ntfy.sh/file/x.bin"}"#).unwrap();
         assert_eq!(att.name, "");
         assert!(att.size.is_none());
+    }
+
+    // --- SenderIdentityMessage (Task 6) ---
+
+    #[test]
+    fn sender_identity_message_deserializes_a_well_formed_payload() {
+        let raw = r#"{
+            "type": "sender_identity",
+            "forMessageId": "q-123",
+            "forType": "question",
+            "sender": {"label": "Kay9 - work-item/1", "source": "worktree"}
+        }"#;
+
+        let msg: SenderIdentityMessage = serde_json::from_str(raw).unwrap();
+        assert_eq!(msg.for_message_id, "q-123");
+        assert_eq!(msg.for_type, "question");
+        assert_eq!(msg.sender.label, "Kay9 - work-item/1");
+        assert_eq!(msg.sender.source, "worktree");
+    }
+
+    /// Decoration only — a payload missing every field but `type` must still
+    /// parse rather than fail the whole message's deserialization silently,
+    /// matching this file's established per-field tolerance convention.
+    #[test]
+    fn sender_identity_message_tolerates_every_field_absent() {
+        let msg: SenderIdentityMessage =
+            serde_json::from_str(r#"{"type":"sender_identity"}"#).expect("must tolerate a bare type");
+
+        assert_eq!(msg.for_message_id, "");
+        assert_eq!(msg.for_type, "");
+        assert_eq!(msg.sender.label, "");
+        assert_eq!(msg.sender.source, "");
     }
 }
