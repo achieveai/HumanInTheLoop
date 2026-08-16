@@ -7,6 +7,7 @@ import type {
   AnswerMessage,
   HitlMessage,
   PlanMessage,
+  SenderIdentityMessage,
   AnyHitlMessage,
   AttachmentRef,
   HitlConfig,
@@ -435,6 +436,28 @@ export class NtfyTransport {
    * exactly one ntfy message (C-1).
    */
   async publishPlan(msg: PlanMessage, attachmentCipher?: string): Promise<void> {
+    const body = this.config.encryptionKey
+      ? encrypt(JSON.stringify(msg), this.config.encryptionKey)
+      : JSON.stringify(msg);
+
+    assertNoChunk(body);
+
+    if (attachmentCipher === undefined) {
+      await this.publishRaw(body);
+      return;
+    }
+
+    await this.uploadAttachment(attachmentCipher, body);
+  }
+
+  /**
+   * Publish a `sender_identity` companion message. Never chunks.
+   *
+   * Sibling of `publishPlan` — same encrypt -> assertNoChunk ->
+   * publishRaw/uploadAttachment shape, but for the small decoration message
+   * that follows a question or notification rather than a `PlanMessage`.
+   */
+  async publishSenderIdentity(msg: SenderIdentityMessage, attachmentCipher?: string): Promise<void> {
     const body = this.config.encryptionKey
       ? encrypt(JSON.stringify(msg), this.config.encryptionKey)
       : JSON.stringify(msg);

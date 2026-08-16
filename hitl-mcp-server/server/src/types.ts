@@ -152,6 +152,25 @@ export interface DismissNotificationMessage extends BaseMessage {
   dismissedFrom: string;
 }
 
+/**
+ * Decorates a question or notification with the sender's resolved identity.
+ *
+ * Deliberately NOT part of the `HitlMessage` union and does not extend
+ * `BaseMessage` — this carries no identity of its own, only a pointer back to
+ * the message it decorates. Published once, right after that message, by a
+ * sibling of `publishPlan`. Delivery order versus the message it decorates is
+ * not guaranteed; a client that cannot match `forMessageId` to an open or
+ * soon-to-open window drops it silently — sender identity is decoration only,
+ * never required.
+ */
+export interface SenderIdentityMessage {
+  type: 'sender_identity';
+  /** messageId of the question/notification this decorates. */
+  forMessageId: string;
+  forType: 'question' | 'notification';
+  sender: SenderIdentity;
+}
+
 // -----------------------------------------------------------
 // Transport-level chunking (for messages exceeding ntfy's size limit)
 // -----------------------------------------------------------

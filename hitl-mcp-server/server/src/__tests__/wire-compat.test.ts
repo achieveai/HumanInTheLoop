@@ -268,7 +268,7 @@ describe('question construction', () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('builds a question whose bytes are the frozen bytes', async () => {
+  it('builds a question whose bytes are the frozen bytes, plus a sender_identity companion by default', async () => {
     // The tool handler is registered on the SDK Server rather than exposed as a
     // method, so this reaches for it directly. An in-memory client pair would
     // be the public route, but it also means a 60 s SDK request timeout with
@@ -302,7 +302,10 @@ describe('question construction', () => {
       )
     ).rejects.toThrow();
 
-    expect(bodies).toHaveLength(1);
+    // identityEnabled defaults to true, so a sender_identity companion
+    // follows the question — see the "identityEnabled is false" test below
+    // for proof this second body is skippable and never alters the first.
+    expect(bodies).toHaveLength(2);
 
     // Three values cannot be frozen — a uuid, a clock reading, and whatever
     // repo the suite happens to run in. Substituting them *into the golden
@@ -310,13 +313,122 @@ describe('question construction', () => {
     // added or reordered field still fails.
     const emitted = bodies[0];
     const live = JSON.parse(emitted) as { messageId: string; timestamp: number; repo: unknown };
-    const expected = GOLDEN_QUESTION.replace(
+    expect(emitted).toBe(substituteQuestionGolden(live));
+
+    const identityMsg = JSON.parse(bodies[1]) as { type: string; forMessageId: string; forType: string };
+    expect(identityMsg.type).toBe('sender_identity');
+    expect(identityMsg.forMessageId).toBe(live.messageId);
+    expect(identityMsg.forType).toBe('question');
+  });
+
+  /** Substitute the three per-invocation values into a golden literal, the same way the test above does. */
+  function substituteQuestionGolden(live: { messageId: string; timestamp: number; repo: unknown }): string {
+    return GOLDEN_QUESTION.replace(
       '"21ba33d7-08a8-4761-9abf-5f4e6ba364b1"',
       JSON.stringify(live.messageId)
     )
       .replace('1700000000000', String(live.timestamp))
       .replace('"repo":null', `"repo":${JSON.stringify(live.repo)}`);
+  }
 
-    expect(emitted).toBe(expected);
+  function substituteNotificationGolden(live: { messageId: string; timestamp: number }): string {
+    return GOLDEN_NOTIFICATION.replace(
+      '"31ba33d7-08a8-4761-9abf-5f4e6ba364b2"',
+      JSON.stringify(live.messageId)
+    ).replace('1700000000000', String(live.timestamp));
+  }
+
+  /**
+   * Non-negotiable #2: sender_identity publishing must never alter the four
+   * frozen bytes, whether it is on (the default, proven above) or off. This
+   * proves the golden question bytes are unchanged with identity publishing
+   * disabled, and that no second body is published at all in that case.
+   */
+  it('publishes only the golden question bytes when identityEnabled is false', async () => {
+    const disabledServer = new HumanInTheLoopServer({ ...CONFIG, identityEnabled: false });
+    (disabledServer as unknown as { requireClient: () => void }).requireClient = () => {};
+
+    try {
+      const handlers = (
+        disabledServer as unknown as { server: { _requestHandlers: Map<string, unknown> } }
+      ).server._requestHandlers;
+      const callTool = handlers.get('tools/call') as (req: unknown, extra: unknown) => Promise<unknown>;
+
+      await expect(
+        callTool(
+          {
+            method: 'tools/call',
+            params: {
+              name: 'AskUserQuestion',
+              arguments: {
+                context: 'ctx',
+                question: 'Proceed?',
+                options: [{ label: 'Yes', value: 'yes' }],
+                allowMultiple: false,
+                allowOther: true,
+              },
+            },
+          },
+          { signal: AbortSignal.abort() }
+        )
+      ).rejects.toThrow();
+
+      expect(bodies).toHaveLength(1);
+      const live = JSON.parse(bodies[0]) as { messageId: string; timestamp: number; repo: unknown };
+      expect(bodies[0]).toBe(substituteQuestionGolden(live));
+    } finally {
+      (disabledServer as unknown as { transport: { close: () => void } }).transport.close();
+    }
+  });
+
+  it('publishes sender_identity as a second body after a notification, by default', async () => {
+    const handlers = (
+      server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
+    ).server._requestHandlers;
+    const callTool = handlers.get('tools/call') as (req: unknown, extra: unknown) => Promise<unknown>;
+
+    await callTool(
+      {
+        method: 'tools/call',
+        params: { name: 'Notify', arguments: { title: 'Build complete', body: 'All green.' } },
+      },
+      {}
+    );
+
+    expect(bodies).toHaveLength(2);
+
+    const live = JSON.parse(bodies[0]) as { messageId: string; timestamp: number };
+    expect(bodies[0]).toBe(substituteNotificationGolden(live));
+
+    const identityMsg = JSON.parse(bodies[1]) as { type: string; forMessageId: string; forType: string };
+    expect(identityMsg.type).toBe('sender_identity');
+    expect(identityMsg.forMessageId).toBe(live.messageId);
+    expect(identityMsg.forType).toBe('notification');
+  });
+
+  it('publishes only the golden notification bytes when identityEnabled is false', async () => {
+    const disabledServer = new HumanInTheLoopServer({ ...CONFIG, identityEnabled: false });
+    (disabledServer as unknown as { requireClient: () => void }).requireClient = () => {};
+
+    try {
+      const handlers = (
+        disabledServer as unknown as { server: { _requestHandlers: Map<string, unknown> } }
+      ).server._requestHandlers;
+      const callTool = handlers.get('tools/call') as (req: unknown, extra: unknown) => Promise<unknown>;
+
+      await callTool(
+        {
+          method: 'tools/call',
+          params: { name: 'Notify', arguments: { title: 'Build complete', body: 'All green.' } },
+        },
+        {}
+      );
+
+      expect(bodies).toHaveLength(1);
+      const live = JSON.parse(bodies[0]) as { messageId: string; timestamp: number };
+      expect(bodies[0]).toBe(substituteNotificationGolden(live));
+    } finally {
+      (disabledServer as unknown as { transport: { close: () => void } }).transport.close();
+    }
   });
 });

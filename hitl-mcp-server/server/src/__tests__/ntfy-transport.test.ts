@@ -17,6 +17,7 @@ import type {
   AnyHitlMessage,
   PlanReviewMessage,
   PlanReviewResponseMessage,
+  SenderIdentityMessage,
 } from '../types.js';
 import { PROTOCOL_VERSION } from '../types.js';
 
@@ -480,6 +481,53 @@ describe('NtfyTransport', () => {
     expect(JSON.parse(bodies[0])).toEqual(review);
   });
 
+  // --- publishSenderIdentity: sibling of publishPlan, same
+  // encrypt -> assertNoChunk -> publishRaw/uploadAttachment shape, but for the
+  // sender_identity companion message instead of a PlanMessage.
+
+  it('publishes an inline sender_identity message as a single POST', async () => {
+    const bodies: string[] = [];
+    globalThis.fetch = jest.fn(async (_url: unknown, init: unknown) => {
+      bodies.push((init as { body: string }).body);
+      return { ok: true, status: 200, statusText: 'OK' } as Response;
+    }) as unknown as typeof fetch;
+
+    transport = new NtfyTransport(CONFIG, FAST);
+    const identity = senderIdentityMessage();
+    await transport.publishSenderIdentity(identity);
+
+    expect(bodies).toHaveLength(1);
+    expect(JSON.parse(bodies[0])).toEqual(identity);
+  });
+
+  it('uploads a sender_identity attachment as one PUT carrying the outer message in X-Message', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    globalThis.fetch = jest.fn(async (url: unknown, init: unknown) => {
+      calls.push({ url: String(url), init: init as RequestInit });
+      return { ok: true, status: 200, statusText: 'OK' } as Response;
+    }) as unknown as typeof fetch;
+
+    transport = new NtfyTransport(CONFIG, FAST);
+    const identity = senderIdentityMessage();
+    await transport.publishSenderIdentity(identity, 'CIPHERTEXT');
+
+    expect(calls).toHaveLength(1);
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(calls[0].init.method).toBe('PUT');
+    expect(calls[0].init.body).toBe('CIPHERTEXT');
+    expect(JSON.parse(headers['X-Message'])).toEqual(identity);
+    expect(headers.Filename).toMatch(/^[0-9a-f]{24}\.bin$/);
+  });
+
+  it('refuses to publish a sender_identity message that would have to chunk (C-1)', async () => {
+    globalThis.fetch = jest.fn() as unknown as typeof fetch;
+    transport = new NtfyTransport(CONFIG, FAST);
+
+    const huge = { ...senderIdentityMessage(), sender: { label: 'x'.repeat(9000), source: 'path' as const } };
+    await expect(transport.publishSenderIdentity(huge, 'CIPHER')).rejects.toThrow(/must never chunk/);
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
   it('reports an expired attachment distinctly from a failed one (C-4/C-12)', async () => {
     globalThis.fetch = jest.fn(async () =>
       ({ ok: false, status: 404, statusText: 'Not Found' } as Response)
@@ -699,5 +747,14 @@ function planReviewMessage(): PlanReviewMessage {
     isNewPlan: true,
     snapshotHash: `sha256:${'b'.repeat(64)}`,
     body: { kind: 'attachment', contentHash: 'c'.repeat(64), contentLength: 4096 },
+  };
+}
+
+function senderIdentityMessage(): SenderIdentityMessage {
+  return {
+    type: 'sender_identity',
+    forMessageId: 'question-1',
+    forType: 'question',
+    sender: { label: 'Kay9 hitl-mcp-server/server', source: 'path' },
   };
 }

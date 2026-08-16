@@ -27,11 +27,13 @@ import type {
   CancelReviewMessage,
   HitlConfig,
   PlanVerdict,
+  SenderIdentityMessage,
 } from './types.js';
 import { PROTOCOL_VERSION } from './types.js';
 import { NtfyTransport, AttachmentExpiredError, AbortedWaitError } from './ntfy-transport.js';
 import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
+import { resolveSenderIdentity } from './identity.js';
 import { performSetup, ensureClientRunning } from './setup.js';
 import { SERVER_VERSION } from './version.js';
 import { readPlanFile, PlanFileError } from './plan-file.js';
@@ -370,6 +372,7 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
           };
 
           await this.transport.publish(notification);
+          await this.publishSenderIdentityFor(notification.messageId, 'notification');
 
           return {
             content: [{ type: 'text', text: JSON.stringify({ success: true, messageId: notification.messageId }) }],
@@ -454,6 +457,8 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
         console.error(`Publishing question ${questionMsg.messageId} to ntfy...`);
         await this.transport.publish(questionMsg);
         console.error('Question published. Waiting for answer...');
+
+        await this.publishSenderIdentityFor(questionMsg.messageId, 'question');
 
         this.transport.pending.record({
           kind: 'question',
@@ -793,6 +798,35 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
       );
     }
     return await this.transport.downloadAttachment(attachment);
+  }
+
+  /**
+   * Publish the sender's own identity as a companion to a question or
+   * notification just published, unless the operator opted out.
+   *
+   * Shared by AskUserQuestion and Notify — both resolve identity from
+   * `process.cwd()` (ReviewPlan resolves from the plan's own directory
+   * instead, so it is not part of this shared path). Decoration only: never
+   * lets a publish failure escape past the tool call it decorates, matching
+   * `publishAck`'s log-and-continue pattern below.
+   */
+  private async publishSenderIdentityFor(
+    forMessageId: string,
+    forType: SenderIdentityMessage['forType']
+  ): Promise<void> {
+    if (this.config.identityEnabled === false) return;
+
+    try {
+      const senderIdentity = resolveSenderIdentity(process.cwd(), this.config.deviceName);
+      await this.transport.publishSenderIdentity({
+        type: 'sender_identity',
+        forMessageId,
+        forType,
+        sender: senderIdentity,
+      });
+    } catch (err) {
+      console.error(`Could not publish sender identity for ${forMessageId}: ${err}`);
+    }
   }
 
   /** Tell the client whether its submission actually landed. */
