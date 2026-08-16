@@ -298,3 +298,84 @@ describe('abort remediation (honest wait-cancelled wording)', () => {
     assertHonestAbortWording((caught as Error).message);
   });
 });
+
+/**
+ * `sender` on `PlanReviewMessage` is resolved from the plan's own directory
+ * (`path.dirname(plan.resolvedPath)`), not `process.cwd()`, matching the
+ * existing `repo` field a few lines above it in `handleReviewPlan` — and it
+ * must be entirely absent from the published JSON, not `null`, when the
+ * operator has opted out via `identityEnabled: false`.
+ */
+describe('handleReviewPlan sender identity', () => {
+  const realFetch = globalThis.fetch;
+  const originalHome = process.env.HITL_HOME;
+  let home: string;
+  let planPath: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), 'hitl-mcp-server-sender-'));
+    process.env.HITL_HOME = home;
+    planPath = path.join(home, 'plan.md');
+    writeFileSync(planPath, '# Plan\n\n- step one\n', 'utf8');
+
+    // Only the plan-review flow up to (not including) the wait is under test;
+    // parking the subscription keeps `watch()` from ever resolving on its own.
+    globalThis.fetch = jest.fn(async () => parkedStream()) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (originalHome === undefined) delete process.env.HITL_HOME;
+    else process.env.HITL_HOME = originalHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  /**
+   * Build a server, capture what it hands `transport.publishPlan`, then let
+   * the wait fail fast. Round-tripped through JSON, same as the real wire
+   * path (`ntfy-transport.ts` calls `JSON.stringify` on this exact object) —
+   * an `undefined`-valued `sender` must vanish here exactly as it does there,
+   * not merely read as `undefined` on the in-memory object.
+   */
+  async function capturePublishedReview(config: HitlConfig): Promise<unknown> {
+    const server = new HumanInTheLoopServer(config);
+    (server as unknown as { requireClient: () => void }).requireClient = () => {};
+    const transport = (
+      server as unknown as { transport: { publishPlan: (...args: unknown[]) => Promise<void>; close: () => void } }
+    ).transport;
+
+    let published: unknown;
+    transport.publishPlan = async (msg: unknown) => {
+      published = JSON.parse(JSON.stringify(msg));
+      throw new Error('stop before waiting for a response');
+    };
+
+    try {
+      await expect(
+        (
+          server as unknown as {
+            handleReviewPlan: (a: Record<string, unknown>, e: unknown) => Promise<unknown>;
+          }
+        ).handleReviewPlan({ filePath: planPath, context: 'checking sender identity' }, extraWithProgress())
+      ).rejects.toThrow();
+    } finally {
+      transport.close();
+    }
+
+    return published;
+  }
+
+  it('attaches a sender identity resolved from the plan directory when identity is enabled', async () => {
+    const published = (await capturePublishedReview(CONFIG)) as { sender?: { label: string; source: string } };
+
+    expect(published.sender).toBeDefined();
+    expect(published.sender?.label).toContain(CONFIG.deviceName);
+    expect(['session', 'worktree', 'path']).toContain(published.sender?.source);
+  });
+
+  it('omits sender entirely from the published JSON when identityEnabled is false', async () => {
+    const published = await capturePublishedReview({ ...CONFIG, identityEnabled: false });
+
+    expect(published).not.toHaveProperty('sender');
+  });
+});

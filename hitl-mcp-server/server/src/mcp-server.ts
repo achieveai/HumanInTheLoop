@@ -606,6 +606,14 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
     const body: PlanReviewBody = { content: plan.content, diff };
     const encoded = encodePayload(body, this.config.encryptionKey);
 
+    // Resolved from the plan's own directory, matching the `repo` field just
+    // above — not process.cwd(), and not named `identity` since that local is
+    // already bound to `resolvePlanIdentity(...)` a few lines up.
+    const senderIdentity =
+      this.config.identityEnabled !== false
+        ? resolveSenderIdentity(path.dirname(plan.resolvedPath), this.config.deviceName)
+        : undefined;
+
     const reviewMsg: PlanReviewMessage = {
       type: 'plan_review',
       messageId: reviewId,
@@ -618,6 +626,7 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
       planId: identity.planId,
       revision: recorded.revision,
       isNewPlan: recorded.isNewPlan,
+      sender: senderIdentity,
       snapshotHash,
       body: encoded.ref,
     };

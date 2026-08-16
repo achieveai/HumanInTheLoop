@@ -251,6 +251,8 @@ export interface PlanReviewMessage extends BaseMessage {
   /** 'sha256:<hex>' of the plan file content */
   snapshotHash: string;
   body: PlanPayloadRef;
+  /** Resolved from `path.dirname(plan.resolvedPath)`; absent when identityEnabled is false. */
+  sender?: SenderIdentity;
 }
 
 /** A single line-anchored comment, in source-line space. */

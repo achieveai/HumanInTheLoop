@@ -241,6 +241,21 @@ pub struct PlanPayloadRef {
     pub content_length: u64,
 }
 
+/// Resolved, display-ready sender identity for a machine/session sending a
+/// message — mirrors `SenderIdentity` in `server/src/types.ts`. Every field
+/// `#[serde(default)]`, matching this file's established per-field tolerance
+/// convention for optional/new metadata (see the block comment above
+/// `PlanReviewMessage`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SenderInfo {
+    #[serde(default)]
+    pub label: String,
+    /// "session" | "worktree" | "path".
+    #[serde(default)]
+    pub source: String,
+}
+
 /// The gzipped body of a plan_review message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -284,6 +299,10 @@ pub struct PlanReviewMessage {
     pub snapshot_hash: String,
     #[serde(default)]
     pub body: Option<PlanPayloadRef>,
+    /// Absent when the sender opted out via `identityEnabled: false`, or when
+    /// the publishing server predates sender-identity metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<SenderInfo>,
 }
 
 /// A single line-anchored comment, in source-line space.
@@ -765,6 +784,57 @@ mod tests {
         assert_eq!(body.kind, "attachment");
         assert!(body.data.is_none());
         assert_eq!(body.content_length, 7120);
+        assert!(msg.sender.is_none());
+    }
+
+    /// `sender` is new (sender-identity metadata) and must be tolerated as
+    /// absent from a payload that populates every other field — an
+    /// already-installed client (or an older server) omits it entirely.
+    #[test]
+    fn plan_review_deserializes_with_no_sender_field() {
+        let raw = r#"{
+            "type": "plan_review",
+            "messageId": "rev-1",
+            "timestamp": 1700000000000,
+            "protocolVersion": 2,
+            "repo": {"name": "HumanInTheLoop", "branch": "master"},
+            "context": "Reviewing S0",
+            "summary": "Contract gate",
+            "displayPath": "docs/plan.md",
+            "planId": "aaaa",
+            "revision": 3,
+            "isNewPlan": false,
+            "snapshotHash": "sha256:bbbb",
+            "body": {"kind":"attachment","contentHash":"cccc","contentLength":7120}
+        }"#;
+
+        let msg: PlanReviewMessage =
+            serde_json::from_str(raw).expect("must tolerate a payload with no sender field");
+        assert!(msg.sender.is_none());
+        // Every other field still deserialized normally — omitting `sender`
+        // must not be confused with a bare/malformed payload.
+        assert_eq!(msg.revision, 3);
+        assert_eq!(msg.display_path, "docs/plan.md");
+    }
+
+    /// The other half: a payload that *does* carry `sender` round-trips its
+    /// label/source, following the same tolerance shape as every other
+    /// optional field on this struct (each sub-field `#[serde(default)]`).
+    #[test]
+    fn plan_review_deserializes_and_round_trips_sender() {
+        let raw = r#"{
+            "type": "plan_review",
+            "messageId": "rev-1",
+            "sender": {"label": "Kay9 - work-item/1", "source": "worktree"}
+        }"#;
+
+        let msg: PlanReviewMessage = serde_json::from_str(raw).unwrap();
+        let sender = msg.sender.clone().expect("sender must deserialize when present");
+        assert_eq!(sender.label, "Kay9 - work-item/1");
+        assert_eq!(sender.source, "worktree");
+
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""sender":{"label":"Kay9 - work-item/1","source":"worktree"}"#), "{json}");
     }
 
     #[test]
