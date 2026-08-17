@@ -28,7 +28,11 @@ jobs:
           - platform: macos-latest
             target: aarch64-apple-darwin
             artifact: hitl-client-macos-arm64
-          - platform: macos-13
+          # Cross-compiled from the arm64 `macos-latest` runner: GitHub is
+          # retiring the Intel `macos-13` runners and jobs queued on them never
+          # start. Apple's SDK carries both slices, so `--target
+          # x86_64-apple-darwin` (passed to Tauri below) is a real cross-compile.
+          - platform: macos-latest
             target: x86_64-apple-darwin
             artifact: hitl-client-macos-x64
 
@@ -192,6 +196,28 @@ jobs:
 
           echo "Bundled binaries:"
           find hitl-mcp-server/server/dist/bin -type f | head -20
+
+      # Every cp above ends in `|| true`, and build-client sets fail-fast: false,
+      # so a failed or unscheduled matrix leg would otherwise publish a package
+      # silently missing that platform's client. 2.11.0 shipped with none at all
+      # this way. Fail loudly instead.
+      - name: Verify all client binaries are bundled
+        run: |
+          missing=0
+          for p in windows-x64/hitl-client.exe \
+                   linux-x64/hitl-client \
+                   macos-arm64/hitl-client \
+                   macos-x64/hitl-client; do
+            if [ ! -s "hitl-mcp-server/server/dist/bin/$p" ]; then
+              echo "::error::client binary missing or empty: $p"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "Refusing to publish an incomplete package."
+            exit 1
+          fi
+          echo "All 4 client binaries present."
 
       # Runs only when an npm automation token is configured. Without one the
       # maintainer publishes by hand (the npm account requires interactive 2FA),
