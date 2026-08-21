@@ -19,6 +19,9 @@ use hitl_transport::types::{
     NotificationMessage, PlanReviewAckMessage, PlanReviewMessage, PlanReviewResponseMessage,
     QuestionMessage, SenderIdentityMessage,
 };
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::capture::{self, BodyJob};
 
 /// `rusqlite::Connection` is `Send` but not `Sync`, and the subscribe loop and
 /// the command handlers both reach for the store, so it is shared behind a
@@ -42,6 +45,12 @@ pub struct InboxSink {
     /// `unacknowledged` — telling the reviewer their work may not have landed
     /// when the agent had in fact confirmed it seconds earlier.
     waiters: Arc<AckWaiters>,
+    /// Attachment bodies to fetch before ntfy drops them (spec §8.3).
+    ///
+    /// Unbounded on purpose: the send happens inline in the subscribe loop, and
+    /// a bounded channel that filled would either block ingest or drop the one
+    /// thing that cannot be recovered afterwards.
+    jobs: UnboundedSender<BodyJob>,
     /// The highest seq this sink has already announced.
     ///
     /// `Store::append` is idempotent and hands back the seq the row already
@@ -53,11 +62,17 @@ pub struct InboxSink {
 }
 
 impl InboxSink {
-    pub fn new(store: SharedStore, waiters: Arc<AckWaiters>, changed: OnChanged) -> Self {
+    pub fn new(
+        store: SharedStore,
+        waiters: Arc<AckWaiters>,
+        jobs: UnboundedSender<BodyJob>,
+        changed: OnChanged,
+    ) -> Self {
         Self {
             store,
             changed,
             waiters,
+            jobs,
             announced: AtomicI64::new(0),
         }
     }
@@ -95,6 +110,18 @@ impl NtfySink for InboxSink {
         if self.record(event, decrypted) {
             (self.changed)();
         }
+
+        // Every delivery, not just the new ones. A replay is exactly how a
+        // fetch that died with the window gets retried, and the attachment URL
+        // lives only on this envelope — it is never written into our payload,
+        // so nothing recoverable from the log could raise it later.
+        //
+        // Run even when `record` reported nothing new (including an append that
+        // failed): a plan body ntfy is about to delete must not be lost because
+        // of a row that did not write.
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(decrypted) {
+            capture::capture(&self.store, &self.jobs, &payload, event);
+        }
     }
 
     fn on_connected(&self, connected: bool) {
@@ -110,6 +137,13 @@ impl NtfySink for InboxSink {
     fn on_notification(&self, _msg: &NotificationMessage, _was_encrypted: bool) {}
     fn on_dismiss_notification(&self, _msg: &DismissNotificationMessage) {}
 
+    /// `_attachment` is genuinely unused, and that is not the bug it looks like.
+    ///
+    /// The attachment is captured in [`NtfySink::on_event`] above, off
+    /// `event.attachment` — upstream of `dispatch_message`, which drops settled
+    /// messages and anything from a future protocol version. Capturing here
+    /// instead would silently skip exactly those, and would miss
+    /// `plan_review_response` bodies, which spill the same way.
     fn on_plan_review(
         &self,
         _msg: &PlanReviewMessage,
@@ -156,17 +190,20 @@ mod tests {
         store: SharedStore,
         redraws: Arc<AtomicI64>,
         waiters: Arc<AckWaiters>,
+        jobs: tokio::sync::mpsc::UnboundedReceiver<BodyJob>,
     }
 
     fn harness() -> Harness {
         let store: SharedStore = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let redraws = Arc::new(AtomicI64::new(0));
         let waiters = Arc::new(AckWaiters::default());
+        let (tx, jobs) = tokio::sync::mpsc::unbounded_channel();
         let counter = redraws.clone();
         Harness {
             sink: InboxSink::new(
                 store.clone(),
                 waiters.clone(),
+                tx,
                 Box::new(move || {
                     counter.fetch_add(1, Ordering::SeqCst);
                 }),
@@ -174,6 +211,7 @@ mod tests {
             store,
             redraws,
             waiters,
+            jobs,
         }
     }
 
@@ -252,6 +290,53 @@ mod tests {
 
         assert_eq!(h.store.lock().unwrap().count_events().unwrap(), 1);
         assert_eq!(h.redraws.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_plan_reviews_attachment_is_captured_by_the_event_that_carried_it() {
+        // The seam this sink used to drop on the floor. `on_plan_review` is
+        // handed the attachment too, but it runs downstream of dispatch's
+        // filtering — `on_event` sees every delivery, which is what makes the
+        // capture survive a replay.
+        let mut h = harness();
+        let (_, body_ref) = crate::capture::tests::spilled(None);
+        let event = crate::capture::tests::attached(
+            "ntfy-1",
+            "https://n/file/p.bin",
+            Some(crate::capture::tests::far_ahead()),
+        );
+
+        h.sink
+            .on_event(&event, &crate::capture::tests::plan_review(&body_ref));
+
+        assert_eq!(
+            h.jobs.try_recv().ok().map(|j| j.content_hash),
+            Some(body_ref.content_hash),
+            "an attachment body must be reached for at ingest, not on selection"
+        );
+        assert_eq!(h.store.lock().unwrap().count_events().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_body_capture_is_attempted_on_a_replay_too() {
+        // A fetch that died with the window is retried only by the startup
+        // replay, so a capture gated on "was this event new" would lose exactly
+        // the bodies this exists to keep.
+        let mut h = harness();
+        let (_, body_ref) = crate::capture::tests::spilled(None);
+        let event = crate::capture::tests::attached(
+            "ntfy-1",
+            "https://n/file/p.bin",
+            Some(crate::capture::tests::far_ahead()),
+        );
+        let payload = crate::capture::tests::plan_review(&body_ref);
+
+        h.sink.on_event(&event, &payload);
+        h.sink.on_event(&event, &payload);
+
+        assert_eq!(h.redraws.load(Ordering::SeqCst), 1, "announced once");
+        assert!(h.jobs.try_recv().is_ok());
+        assert!(h.jobs.try_recv().is_ok(), "but reached for on both deliveries");
     }
 
     #[test]

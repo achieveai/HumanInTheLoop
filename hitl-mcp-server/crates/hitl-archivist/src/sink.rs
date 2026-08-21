@@ -31,30 +31,6 @@ pub struct BodyJob {
     pub ntfy_id: String,
 }
 
-/// Slack on the expiry comparison.
-///
-/// `expires` is ntfy's clock and `now` is ours, and the two are compared here —
-/// the one place in this crate that mixes them. It is safe only because the
-/// question is "is it worth spending a fetch", never "what order did this
-/// happen in": being wrong near the boundary costs one wasted request or one
-/// skipped retry, not a mis-ordered log. The margin buys errs-toward-trying.
-const EXPIRY_SKEW_MARGIN_SECS: u64 = 5 * 60;
-
-/// Whether ntfy has certainly already dropped this attachment.
-///
-/// `expires` comes from ntfy itself, so this needs no knowledge of how the
-/// server is configured — which matters, because `attachment-expiry-duration`
-/// is tunable and the 3 h in the spec is only the default.
-///
-/// An absent `expires` means ntfy told us nothing, so we try: a wasted request
-/// is far cheaper than a body abandoned while it was still there.
-fn attachment_is_gone(expires: Option<u64>, now: u64) -> bool {
-    match expires {
-        Some(expires) => now > expires.saturating_add(EXPIRY_SKEW_MARGIN_SECS),
-        None => false,
-    }
-}
-
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -146,7 +122,7 @@ impl ArchivistSink {
                 // without this, every boot would re-fetch every body ever
                 // missed, forever, and the storm would grow with the cache
                 // duration the user is raising.
-                if attachment_is_gone(attachment.expires, now_secs()) {
+                if attachment.is_gone(now_secs()) {
                     log::debug!(
                         "attachment for {content_hash} expired at {:?}; not fetching",
                         attachment.expires
@@ -591,24 +567,6 @@ mod tests {
 
         assert_eq!(h.jobs.try_recv().ok(), None, "a dead URL must not be fetched even once");
         assert_eq!(h.archive.count_events().unwrap(), 1, "the event is still recorded");
-    }
-
-    #[test]
-    fn expiry_is_judged_by_ntfys_own_deadline_and_errs_toward_trying() {
-        let now = 1_786_504_000;
-
-        assert!(!attachment_is_gone(Some(now + 3600), now), "still live");
-        assert!(attachment_is_gone(Some(now - 3600), now), "an hour dead");
-
-        // ntfy said nothing: try anyway. A wasted request is far cheaper than a
-        // body abandoned while it was still there.
-        assert!(!attachment_is_gone(None, now));
-
-        // Inside the skew margin, both ways, we still try — `expires` is ntfy's
-        // clock and `now` is ours.
-        assert!(!attachment_is_gone(Some(now - 1), now));
-        assert!(!attachment_is_gone(Some(now - EXPIRY_SKEW_MARGIN_SECS), now));
-        assert!(attachment_is_gone(Some(now - EXPIRY_SKEW_MARGIN_SECS - 1), now));
     }
 
     #[test]

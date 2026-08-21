@@ -26,6 +26,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+pub use bodies::CaptureOutcome;
 pub use events::Event;
 pub use failures::{BodyFailure, BodyStatus, FailureReason};
 pub use fold::{fold, MessageState, Status, Verdict};

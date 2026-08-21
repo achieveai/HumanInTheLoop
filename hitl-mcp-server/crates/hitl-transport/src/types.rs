@@ -223,6 +223,36 @@ pub struct AttachmentRef {
     pub expires: Option<u64>,
 }
 
+/// Slack on the expiry comparison.
+///
+/// `expires` is ntfy's clock and `now` is the caller's, and [`AttachmentRef::is_gone`]
+/// is where the two meet. That is safe only because the question is "is it worth
+/// spending a fetch", never "what order did this happen in": being wrong near the
+/// boundary costs one wasted request or one skipped retry, not a mis-ordered log.
+/// The margin buys errs-toward-trying.
+const EXPIRY_SKEW_MARGIN_SECS: u64 = 5 * 60;
+
+impl AttachmentRef {
+    /// Whether ntfy has certainly already dropped these bytes.
+    ///
+    /// `expires` comes from ntfy itself, so this needs no knowledge of how the
+    /// server is configured — which matters, because `attachment-expiry-duration`
+    /// is tunable and the 3 h in the spec is only the default.
+    ///
+    /// An absent `expires` means ntfy told us nothing, so we try: a wasted
+    /// request is far cheaper than a body abandoned while it was still there.
+    ///
+    /// Every ingest path that races the expiry asks this — the archivist's sink
+    /// and the Inbox's alike — because a build that answered differently would
+    /// either burn a request per boot on dead URLs or give up on live ones.
+    pub fn is_gone(&self, now: u64) -> bool {
+        match self.expires {
+            Some(expires) => now > expires.saturating_add(EXPIRY_SKEW_MARGIN_SECS),
+            None => false,
+        }
+    }
+}
+
 /// Where a plan-review body lives, and how to verify it once fetched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -453,6 +483,31 @@ impl Default for HitlConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expiry_is_judged_by_ntfys_own_deadline_and_errs_toward_trying() {
+        let now = 1_786_504_000;
+        let at = |expires: Option<u64>| AttachmentRef {
+            name: String::new(),
+            url: "https://n/file/p.bin".to_string(),
+            content_type: None,
+            size: None,
+            expires,
+        };
+
+        assert!(!at(Some(now + 3600)).is_gone(now), "still live");
+        assert!(at(Some(now - 3600)).is_gone(now), "an hour dead");
+
+        // ntfy said nothing: try anyway. A wasted request is far cheaper than a
+        // body abandoned while it was still there.
+        assert!(!at(None).is_gone(now));
+
+        // Inside the skew margin, both ways, we still try — `expires` is ntfy's
+        // clock and `now` is the caller's.
+        assert!(!at(Some(now - 1)).is_gone(now));
+        assert!(!at(Some(now - EXPIRY_SKEW_MARGIN_SECS)).is_gone(now));
+        assert!(at(Some(now - EXPIRY_SKEW_MARGIN_SECS - 1)).is_gone(now));
+    }
 
     // --- Golden-byte serialization of the two client-published shipping
     // types (S0/audit) ---

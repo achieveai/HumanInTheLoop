@@ -5,6 +5,7 @@
 
 mod backfill;
 mod body;
+mod capture;
 mod detail;
 mod identity;
 mod reply;
@@ -167,7 +168,7 @@ async fn get_body(
         .unwrap_or_default()
         .encryption_key;
 
-    Ok(body::load(&request, key.as_deref(), &backfill::archivist_base()).await)
+    Ok(body::load(&store, &request, key.as_deref(), &backfill::archivist_base()).await)
 }
 
 fn init_logging() {
@@ -226,6 +227,11 @@ fn main() {
     // ack that resolves it.
     let waiters = Arc::new(AckWaiters::default());
 
+    // Attachment bodies, from the sink that sees the envelope to the task that
+    // fetches them. Created here so the sender can be handed to the sink and
+    // the receiver to the fetcher, both inside `setup`.
+    let (body_jobs, pending_bodies) = tokio::sync::mpsc::unbounded_channel();
+
     tauri::Builder::default()
         .manage(store)
         .manage(waiters.clone())
@@ -250,12 +256,16 @@ fn main() {
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(catch_up(store.clone()));
+            // Off the subscribe loop on purpose: an attachment gets 60 s, and
+            // awaiting one inline would stall every event behind it.
+            tauri::async_runtime::spawn(capture::run(store.clone(), pending_bodies));
 
             tauri::async_runtime::spawn(async move {
                 let notify = handle.clone();
                 let sink = InboxSink::new(
                     store,
                     waiters,
+                    body_jobs,
                     Box::new(move || {
                         if let Err(e) = notify.emit(CHANGED_EVENT, ()) {
                             log::warn!("could not notify the window of new events: {e}");

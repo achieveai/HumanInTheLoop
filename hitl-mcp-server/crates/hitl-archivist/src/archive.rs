@@ -10,9 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use hitl_store::{BodyFailure, BodyStatus, Event, FailureReason, Store};
-use hitl_transport::crypto;
 use hitl_transport::ntfy::subscribe::NtfyEvent;
-use hitl_transport::payload::sha256_hex;
 
 /// Ceiling on one backfill response, so a consumer that has been away for a
 /// year does not ask for a single reply the size of the whole database.
@@ -20,24 +18,11 @@ pub const DEFAULT_BACKFILL_LIMIT: usize = 1000;
 
 /// What happened to one attachment body.
 ///
-/// Every variant is a fact the operator can act on; none of them is silence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BodyOutcome {
-    /// Fetched, verified against `contentHash`, and persisted.
-    Stored,
-    /// Already held under that hash. The hash *is* the content, so there is
-    /// nothing to re-fetch and nothing to compare.
-    AlreadyHeld,
-    /// The bytes did not hash to what the message said they would. Quarantined
-    /// under the hash they actually have — see [`Archive::capture_body`].
-    HashMismatch { expected: String, actual: String },
-    /// Encrypted with a key this machine does not have, or the envelope did not
-    /// decrypt. Nothing to verify, so nothing is stored.
-    Undecryptable(String),
-    /// The fetch or the write failed. The body may still be retrievable while
-    /// the attachment lives.
-    Failed(String),
-}
+/// The store's own vocabulary, under this crate's older name. The verification
+/// policy behind it moved to `hitl_store::Store::capture_body` when the Inbox
+/// grew an ingest path of its own: two processes capturing the same bytes have
+/// to reach the same verdict, and a second copy would eventually not.
+pub use hitl_store::CaptureOutcome as BodyOutcome;
 
 /// The answer to "give me this body", which is never just bytes-or-nothing.
 ///
@@ -182,25 +167,13 @@ impl Archive {
             .map_err(|e| format!("could not read body statuses: {e}"))
     }
 
-    /// Verify `cipher` against `expected_hash` and persist it.
+    /// Verify `cipher` against `expected_hash` and persist it, keeping the
+    /// running totals `GET /health` reports.
     ///
-    /// What gets stored is the **payload plaintext** — the `base64(gzip(json))`
-    /// string — not the encrypted bytes that came off the wire. That string is
-    /// the exact preimage of `contentHash` (see `payload.rs`), so anything
-    /// reading this table later can re-verify the body against the hash it
-    /// asked for, without holding the encryption key. Storing the ciphertext
-    /// instead would key the table by a hash of something it does not contain.
-    ///
-    /// **On a mismatch the bytes are stored under the hash they actually have,
-    /// never under the one the message claimed.** The two obvious alternatives
-    /// are both worse. Storing them under `expected_hash` makes `get_body` a
-    /// liar: every later reader trusts that key as verified, and spec §8.3
-    /// requires a mismatch to render read-only with a warning — it cannot warn
-    /// about something it can no longer detect. Dropping them makes the body
-    /// indistinguishable from one that simply expired, which is the normal,
-    /// blameless case, so a real corruption would read as routine. Quarantining
-    /// gives both properties: a lookup by `expected_hash` correctly misses, and
-    /// the bytes survive for whoever has to work out what went wrong.
+    /// The verification, the quarantine and the failure row are all
+    /// [`hitl_store::Store::capture_body`]'s — see there for why a mismatch is
+    /// stored under the hash the bytes actually have and never under the
+    /// claimed one. What this adds is the stats and the diagnosis in the log.
     pub fn capture_body(
         &self,
         expected_hash: &str,
@@ -208,70 +181,25 @@ impl Archive {
         key: Option<&str>,
         ntfy_id: Option<&str>,
     ) -> BodyOutcome {
-        if expected_hash.is_empty() {
-            // Nothing to key a failure row by, and nothing a reader could ever
-            // look up — the hash *is* the identity here.
-            return self.fail(BodyOutcome::Failed(
-                "payload reference carries no contentHash to verify against".to_string(),
-            ));
-        }
-        if self.has_body(expected_hash) {
-            return BodyOutcome::AlreadyHeld;
-        }
-
-        let plaintext = match plaintext_of(cipher, key) {
-            Ok(p) => p,
-            Err(e) => {
-                self.note(&BodyFailure {
-                    content_hash: expected_hash,
-                    reason: FailureReason::Undecryptable,
-                    actual_hash: None,
-                    detail: Some(e.as_str()),
-                    ntfy_id,
-                });
-                return self.fail(BodyOutcome::Undecryptable(e));
-            }
+        let Ok(store) = self.store.lock() else {
+            return self.fail(BodyOutcome::Failed("archive lock poisoned".to_string()));
         };
+        let outcome = store.capture_body(expected_hash, cipher, key, ntfy_id);
+        drop(store);
 
-        let actual = sha256_hex(&plaintext);
-        if actual != expected_hash {
+        if let BodyOutcome::HashMismatch { expected, actual } = &outcome {
             log::error!(
-                "attachment body hash mismatch: message claimed {expected_hash}, bytes hash to \
+                "attachment body hash mismatch: message claimed {expected}, bytes hash to \
                  {actual}. Quarantined under the hash the bytes actually have; nothing is stored \
                  under the claimed one."
             );
-            let _ = self.put(&actual, plaintext.as_bytes());
-            let detail = format!(
-                "claimed {expected_hash}, {} bytes hash to {actual}",
-                plaintext.len()
-            );
-            self.note(&BodyFailure {
-                content_hash: expected_hash,
-                reason: FailureReason::Corrupt,
-                actual_hash: Some(actual.as_str()),
-                detail: Some(detail.as_str()),
-                ntfy_id,
-            });
-            return self.fail(BodyOutcome::HashMismatch {
-                expected: expected_hash.to_string(),
-                actual,
-            });
         }
-
-        match self.put(expected_hash, plaintext.as_bytes()) {
-            Ok(()) => {
-                Stats::bump(&self.stats.bodies_stored);
-                // A body that turned up after a failure was recorded — a proxy
-                // that 404d during a restart, say. The bytes are here and
-                // verified, so the old explanation is now false.
-                self.clear_failure(expected_hash);
-                BodyOutcome::Stored
-            }
-            // Deliberately not recorded as a body failure: the fetch worked and
-            // the bytes were right. The database is what is broken, and saying
-            // "this body is unrecoverable" would be both wrong and unwritable.
-            Err(e) => self.fail(BodyOutcome::Failed(e)),
+        match &outcome {
+            BodyOutcome::Stored => Stats::bump(&self.stats.bodies_stored),
+            BodyOutcome::AlreadyHeld => {}
+            _ => Stats::bump(&self.stats.body_failures),
         }
+        outcome
     }
 
     /// Record a body as gone before any fetch was spent on it.
@@ -317,12 +245,6 @@ impl Archive {
         }
     }
 
-    fn clear_failure(&self, content_hash: &str) {
-        if let Ok(store) = self.store.lock() {
-            let _ = store.clear_body_failure(content_hash);
-        }
-    }
-
     /// Seed bytes under a hash without verifying them.
     ///
     /// Test-only, and it must stay that way: skipping verification is precisely
@@ -331,14 +253,8 @@ impl Archive {
     /// honest path can produce.
     #[cfg(test)]
     pub fn put_body_for_test(&self, content_hash: &str, bytes: &[u8]) {
-        self.put(content_hash, bytes).expect("test seed must store");
-    }
-
-    fn put(&self, content_hash: &str, bytes: &[u8]) -> Result<(), String> {
-        let store = self.store.lock().map_err(|_| "archive lock poisoned".to_string())?;
-        store
-            .put_body(content_hash, bytes)
-            .map_err(|e| format!("could not store body {content_hash}: {e}"))
+        let store = self.store.lock().expect("test seed must lock");
+        store.put_body(content_hash, bytes).expect("test seed must store");
     }
 
     /// Count an outcome as a failure and hand it back unchanged.
@@ -348,32 +264,11 @@ impl Archive {
     }
 }
 
-/// The payload plaintext behind a wire `cipher`.
-///
-/// Decides by inspecting the envelope rather than by whether a key is
-/// configured. A topic can carry unencrypted payloads on a machine that has a
-/// key (an older publisher, or one with encryption off), and assuming
-/// otherwise would turn a perfectly readable body into a decrypt failure.
-fn plaintext_of(cipher: &str, key: Option<&str>) -> Result<String, String> {
-    let cipher = cipher.trim();
-
-    match serde_json::from_str::<serde_json::Value>(cipher) {
-        Ok(value) if crypto::is_encrypted(&value) => {
-            let key = key.ok_or_else(|| {
-                "payload is encrypted but no encryptionKey is configured".to_string()
-            })?;
-            crypto::decrypt_value(&value, key)
-        }
-        // Not an envelope: with no key in play the cipher *is* the plaintext.
-        _ => Ok(cipher.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use hitl_transport::payload::encode_payload;
+    use hitl_transport::payload::{encode_payload, sha256_hex};
     use hitl_transport::types::PlanReviewBody;
 
     const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";

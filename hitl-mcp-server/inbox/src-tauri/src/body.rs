@@ -1,12 +1,19 @@
 //! Resolving a plan-review body for pane 3 (spec §8.3, §11).
 //!
-//! Two sources, and the difference matters:
+//! Three sources, tried in that order, and the differences matter:
 //!
 //! - **inline** — the bytes rode in the message. They are already in the log,
 //!   so resolving one touches nothing outside this process.
-//! - **attachment** — the bytes spilled to a ntfy attachment, which ntfy
-//!   deletes after 3 hours. Past that window the archivist's capture is the
-//!   only copy left anywhere, and `GET /bodies/{hash}` is the only way to it.
+//! - **our own capture** — the bytes spilled to a ntfy attachment and
+//!   [`crate::capture`] pulled them down at ingest, while the URL was still
+//!   alive. Also nothing outside this process, which is the whole point: spec
+//!   §11 requires every client to work with the archivist stopped, and before
+//!   this existed an attachment-backed plan read as "could not fetch" the
+//!   moment that daemon was not running.
+//! - **the archivist** — for bodies this Inbox never captured: messages that
+//!   predate the capture path, or that arrived while the window was closed.
+//!   Past ntfy's 3 h attachment window its copy is the only one left anywhere,
+//!   and `GET /bodies/{hash}` is the only way to it.
 //!
 //! # This never runs on the paint path
 //!
@@ -26,12 +33,14 @@
 //! down, so that state is not an error at all, and the Inbox says so rather
 //! than implying the plan is lost.
 
-use hitl_store::Event;
+use hitl_store::{BodyStatus, Event};
 use serde::Serialize;
 use serde_json::Value;
 
 use hitl_transport::payload::{decode_payload, PayloadError};
 use hitl_transport::types::{PlanPayloadRef, PlanReviewBody};
+
+use crate::sink::SharedStore;
 
 /// How long to wait on the archivist. Loopback, so a slow answer means the
 /// process is wedged rather than that the network is far away; the Inbox would
@@ -204,8 +213,77 @@ pub async fn fetch_captured(base: &str, content_hash: &str) -> Result<String, Bo
     })
 }
 
+/// What this Inbox's own capture left behind for one hash.
+enum Local {
+    /// The captured bytes. Holding them under the claimed hash *is* the proof
+    /// they were verified against it — nothing else is ever written there.
+    Held(Vec<u8>),
+    /// We reached for this body and it will never arrive. Kept as an outcome
+    /// rather than a status so the vocabulary the UI branches on stays one.
+    Failed(BodyOutcome),
+    /// Nothing captured, and nothing that failed. The archivist may still have
+    /// it — this Inbox may simply never have seen the message arrive.
+    Nothing,
+}
+
+/// Ask the local store, under one lock and without touching the network.
+///
+/// One call rather than `get_body` then `body_status`, for the reason the
+/// archivist gives about its own pair: between two calls a fetch can land, and
+/// the pair can then report "missing" and explain that the body is verified —
+/// a state that never existed.
+fn local(store: &SharedStore, content_hash: &str) -> Local {
+    let guard = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    match guard.get_body(content_hash) {
+        Ok(Some(bytes)) => return Local::Held(bytes),
+        Ok(None) => {}
+        Err(e) => {
+            // A broken database is not a missing body, and must not be reported
+            // as one. Fall through to the archivist and let it answer.
+            log::warn!("could not read the captured body for {content_hash}: {e}");
+            return Local::Nothing;
+        }
+    }
+
+    match guard.body_status(content_hash) {
+        // `Gone` / `Undecryptable` / `Corrupt` / `Unknown` stay four separate
+        // facts, in the same vocabulary the archivist's own 404 uses, so a
+        // local answer and a remote one render identically.
+        Ok(BodyStatus::Gone { detail, .. }) => Local::Failed(missing("gone", detail, None)),
+        Ok(BodyStatus::Undecryptable { detail, .. }) => {
+            Local::Failed(missing("undecryptable", detail, None))
+        }
+        Ok(BodyStatus::Corrupt { detail, .. }) => Local::Failed(missing("corrupt", detail, None)),
+        Ok(BodyStatus::Unknown { reason, detail, .. }) => {
+            Local::Failed(missing("unknown", detail, Some(reason)))
+        }
+        // `Unattempted` is not a failure — it is a body still on its way, or one
+        // this Inbox never saw. `Verified` cannot happen: the bytes would have
+        // come back above, under the same lock.
+        Ok(_) => Local::Nothing,
+        Err(e) => {
+            log::warn!("could not read the body status for {content_hash}: {e}");
+            Local::Nothing
+        }
+    }
+}
+
+fn missing(status: &str, detail: Option<String>, reason: Option<String>) -> BodyOutcome {
+    BodyOutcome::Missing {
+        status: status.to_string(),
+        detail,
+        reason,
+    }
+}
+
 /// Resolve one plan review's body, from wherever it actually lives.
-pub async fn load(request: &Event, key: Option<&str>, base: &str) -> BodyOutcome {
+pub async fn load(
+    store: &SharedStore,
+    request: &Event,
+    key: Option<&str>,
+    base: &str,
+) -> BodyOutcome {
     let Some(reference) = body_ref(request) else {
         return BodyOutcome::Absent;
     };
@@ -228,10 +306,38 @@ pub async fn load(request: &Event, key: Option<&str>, base: &str) -> BodyOutcome
         };
     }
 
-    // `attachment`, and any spill kind a newer build invents: if it is not
-    // inline the bytes are not here, and the archive is the only place to look.
+    // `attachment`, and any spill kind a newer build invents: the bytes did not
+    // ride in the message, so they are either in our own capture or nowhere
+    // this process can reach without help.
+    //
+    // The lock is taken and dropped inside `local`, before anything is awaited.
+    let captured = local(store, &reference.content_hash);
+    if let Local::Held(bytes) = captured {
+        return match String::from_utf8(bytes) {
+            // Stored decrypted, as the exact preimage of the hash it is keyed
+            // by, so no key is needed to read it back — and `decode` still
+            // verifies, because a body nothing re-checked is a body nothing can
+            // vouch for.
+            Ok(plaintext) => decode(&plaintext, None, &reference.content_hash),
+            Err(_) => BodyOutcome::Undecodable {
+                kind: "corrupt".to_string(),
+                detail: "the captured plan body is not the text it was stored as".to_string(),
+            },
+        };
+    }
+
     match fetch_captured(base, &reference.content_hash).await {
         Ok(plaintext) => decode(&plaintext, None, &reference.content_hash),
+        // The archivist is allowed to be down (spec §11). When it is, anything
+        // we found out ourselves beats "not reachable" — telling someone to
+        // start a daemon that cannot help is worse than telling them the plan
+        // expired.
+        Err(BodyOutcome::Unreachable { detail }) => match captured {
+            Local::Failed(outcome) => outcome,
+            _ => BodyOutcome::Unreachable { detail },
+        },
+        // Anything else means the archivist answered, and it knows more about
+        // its own archive than our failure row does about ours.
         Err(outcome) => outcome,
     }
 }
@@ -239,9 +345,22 @@ pub async fn load(request: &Event, key: Option<&str>, base: &str) -> BodyOutcome
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::{Arc, Mutex};
+
+    use hitl_store::Store;
     use hitl_transport::payload::encode_payload;
 
     const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    /// Deliberately unroutable. Every test below points at it, so a path that
+    /// starts reaching for the archivist fails loudly instead of quietly
+    /// passing against the one that happens to be running on this machine.
+    const NO_ARCHIVIST: &str = "http://127.0.0.1:1";
+
+    fn store() -> SharedStore {
+        Arc::new(Mutex::new(Store::open_in_memory().expect("opens")))
+    }
 
     fn event(payload: &str) -> Event {
         Event {
@@ -365,12 +484,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_message_with_no_body_resolves_to_absent_without_a_round_trip() {
-        // The base is deliberately unroutable: if this ever starts reaching for
-        // the network the test fails by timing out rather than passing quietly.
         let outcome = load(
+            &store(),
             &event(r#"{"type":"plan_review","messageId":"p-1"}"#),
             None,
-            "http://127.0.0.1:1",
+            NO_ARCHIVIST,
         )
         .await;
 
@@ -389,7 +507,7 @@ mod tests {
         ));
 
         assert_eq!(
-            load(&request, Some(KEY), "http://127.0.0.1:1").await,
+            load(&store(), &request, Some(KEY), NO_ARCHIVIST).await,
             BodyOutcome::Ok {
                 content: plan().content,
                 diff: plan().diff
@@ -400,12 +518,13 @@ mod tests {
     #[tokio::test]
     async fn an_inline_reference_carrying_no_data_says_so_rather_than_fetching() {
         let outcome = load(
+            &store(),
             &event(
                 r#"{"type":"plan_review","messageId":"p-1",
                     "body":{"kind":"inline","contentHash":"ab"}}"#,
             ),
             None,
-            "http://127.0.0.1:1",
+            NO_ARCHIVIST,
         )
         .await;
 
@@ -422,12 +541,13 @@ mod tests {
     async fn a_reference_with_no_hash_is_refused_rather_than_requested() {
         // An empty hash would be asked of the archivist and 404 forever.
         let outcome = load(
+            &store(),
             &event(
                 r#"{"type":"plan_review","messageId":"p-1",
                     "body":{"kind":"attachment","contentHash":""}}"#,
             ),
             None,
-            "http://127.0.0.1:1",
+            NO_ARCHIVIST,
         )
         .await;
 
@@ -443,12 +563,13 @@ mod tests {
         // a plan that is gone, corrupt or undecryptable, and must not read as
         // one — port 1 on loopback refuses the connection immediately.
         let outcome = load(
+            &store(),
             &event(
                 r#"{"type":"plan_review","messageId":"p-1",
                     "body":{"kind":"attachment","contentHash":"ab"}}"#,
             ),
             None,
-            "http://127.0.0.1:1",
+            NO_ARCHIVIST,
         )
         .await;
 
@@ -456,6 +577,162 @@ mod tests {
             BodyOutcome::Unreachable { detail } => assert!(!detail.is_empty()),
             other => panic!("expected unreachable, got {other:?}"),
         }
+    }
+
+    // --- our own capture, with nothing else running ---
+
+    /// A plan review whose body spilled to a ntfy attachment, plus the cipher
+    /// that came down the wire for it.
+    fn spilled_review(key: Option<&str>) -> (String, Event) {
+        let encoded = encode_payload(&plan(), key).expect("encodes");
+        let mut body_ref = encoded.payload_ref;
+        body_ref.kind = "attachment".to_string();
+        body_ref.data = None;
+
+        let request = event(&format!(
+            r#"{{"type":"plan_review","messageId":"p-1","body":{}}}"#,
+            serde_json::to_string(&body_ref).expect("serializes")
+        ));
+        (encoded.cipher, request)
+    }
+
+    /// What `crate::capture` does when the fetch comes back, without the fetch.
+    fn capture(store: &SharedStore, claimed_hash: &str, cipher: &str, key: Option<&str>) {
+        let guard = store.lock().expect("locks");
+        guard.capture_body(claimed_hash, cipher, key, Some("ntfy-1"));
+    }
+
+    fn claimed_hash(request: &Event) -> String {
+        body_ref(request).expect("a body reference").content_hash
+    }
+
+    #[tokio::test]
+    async fn an_attachment_captured_at_ingest_is_readable_with_no_archivist_running() {
+        // The defect, in one test. The bytes were on ntfy when the message
+        // arrived and this Inbox pulled them down then; spec §11 says the plan
+        // must still render with the archivist stopped. Before the capture
+        // path this was `unreachable` — "could not fetch the plan" — for a plan
+        // sitting in our own database.
+        let store = store();
+        let (cipher, request) = spilled_review(None);
+        capture(&store, &claimed_hash(&request), &cipher, None);
+
+        assert_eq!(
+            load(&store, &request, None, NO_ARCHIVIST).await,
+            BodyOutcome::Ok {
+                content: plan().content,
+                diff: plan().diff,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_attachment_reads_back_without_the_key_it_arrived_under() {
+        // What is captured is the payload plaintext — the exact preimage of
+        // `contentHash` — so reading it back needs no key at all. Storing the
+        // wire ciphertext instead would key the table by a hash of something it
+        // does not contain, and this would fail as a mismatch.
+        let store = store();
+        let (cipher, request) = spilled_review(Some(KEY));
+        capture(&store, &claimed_hash(&request), &cipher, Some(KEY));
+
+        assert_eq!(
+            load(&store, &request, None, NO_ARCHIVIST).await,
+            BodyOutcome::Ok {
+                content: plan().content,
+                diff: plan().diff,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn bytes_that_fail_the_hash_check_never_become_a_readable_plan() {
+        // Spec §8.3's central rule, on the capture path. The bytes are real and
+        // decode perfectly; they are simply not the plan this message
+        // describes, and approving the wrong plan is the failure the whole
+        // review feature exists to prevent. Nothing may be stored under the
+        // claimed hash, so the claimed hash must still miss afterwards.
+        let store = store();
+        let (cipher, _) = spilled_review(None);
+        let claimed = "0".repeat(64);
+        let request = event(&format!(
+            r#"{{"type":"plan_review","messageId":"p-1",
+                 "body":{{"kind":"attachment","contentHash":"{claimed}"}}}}"#
+        ));
+        capture(&store, &claimed, &cipher, None);
+
+        let outcome = load(&store, &request, None, NO_ARCHIVIST).await;
+
+        assert_eq!(
+            outcome,
+            BodyOutcome::Missing {
+                status: "corrupt".to_string(),
+                detail: Some(format!(
+                    "claimed {claimed}, {} bytes hash to {}",
+                    cipher.len(),
+                    hitl_transport::payload::sha256_hex(&cipher)
+                )),
+                reason: None,
+            },
+            "a body we cannot vouch for must never render as content"
+        );
+        assert!(!store.lock().expect("locks").has_body(&claimed).expect("reads"));
+    }
+
+    #[tokio::test]
+    async fn a_local_capture_that_gave_up_beats_saying_the_archivist_is_down() {
+        // `gone` and `unreachable` send a reader to opposite places: one says
+        // the plan is unrecoverable, the other says start a daemon. With the
+        // archivist stopped and our own row saying the attachment expired,
+        // "start the archivist" would be advice that cannot possibly help.
+        let store = store();
+        let (_, request) = spilled_review(None);
+        crate::capture::note_gone(
+            &store,
+            &claimed_hash(&request),
+            "ntfy-1",
+            "ntfy dropped the attachment",
+        );
+
+        assert_eq!(
+            load(&store, &request, None, NO_ARCHIVIST).await,
+            BodyOutcome::Missing {
+                status: "gone".to_string(),
+                detail: Some("ntfy dropped the attachment".to_string()),
+                reason: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_we_never_reached_for_still_reads_as_the_archivist_being_down() {
+        // The other half, and the reason `Unattempted` is not a failure: a
+        // message that arrived while this Inbox was closed has no local row at
+        // all, and the archivist genuinely is the place to look. Reporting our
+        // silence as a verdict would declare a live plan dead.
+        let store = store();
+        let (_, request) = spilled_review(None);
+
+        match load(&store, &request, None, NO_ARCHIVIST).await {
+            BodyOutcome::Unreachable { detail } => assert!(!detail.is_empty()),
+            other => panic!("expected unreachable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_local_copy_is_preferred_even_when_an_archivist_would_answer() {
+        // An archivist may well be running on this machine — one is, on the
+        // developer box this was written on. A local hit must short-circuit it
+        // anyway, or the Inbox keeps the dependency the capture was added to
+        // remove. The port here is not one anything answers on.
+        let store = store();
+        let (cipher, request) = spilled_review(None);
+        capture(&store, &claimed_hash(&request), &cipher, None);
+
+        assert!(matches!(
+            load(&store, &request, None, "http://127.0.0.1:1").await,
+            BodyOutcome::Ok { .. }
+        ));
     }
 
     // --- the archivist's 404 vocabulary ---
