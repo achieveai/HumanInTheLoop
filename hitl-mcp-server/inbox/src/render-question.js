@@ -16,6 +16,16 @@
 // and the winning selection marked. Building a separate read-only view would
 // mean two descriptions of what an option looks like, and the read-only one
 // would be the one nobody noticed had drifted.
+//
+// # Losing the race must not cost the typing
+//
+// A question has no draft store — nothing persists "Additional Context" to
+// disk the way `drafts.rs` persists review comments. So when another device
+// answers first, the form is locked *in place*: `applyRow` redraws the header,
+// slides in the banner and disables the inputs, and never rebuilds the body.
+// Re-rendering would be simpler and would silently discard a paragraph the
+// reader had been typing for a minute, which is the one outcome §9.3 rules out
+// in as many words.
 
 import {
     actionButton,
@@ -23,8 +33,12 @@ import {
     detailHeader,
     el,
     isOpen,
+    removeNotice,
     renderMarkdownInto,
+    replaceHeader,
+    showNotice,
 } from './detail-shell.js';
+import { orphanNotice, raceNotice } from './reply.js';
 
 /** The value an option submits. Matches dialog.js: `value`, else the label. */
 function optionValue(option) {
@@ -244,11 +258,15 @@ function stepper(container, count) {
     };
 }
 
+/** The footer note on a question that closed with this device's answer. */
+const SETTLED = 'This question is settled. The selection above is what the agent received.';
+
 export function renderQuestion(container, detail, actions = {}) {
     const { row, request, settlement } = detail;
     const subQuestions = Array.isArray(request?.questions) ? request.questions : [];
     const isBatch = subQuestions.length > 0;
     const locked = !isOpen(row);
+    const kicker = isBatch ? `Question · ${subQuestions.length} parts` : 'Question';
 
     container.textContent = '';
     const root = el('article', 'detail-root detail-question');
@@ -256,7 +274,7 @@ export function renderQuestion(container, detail, actions = {}) {
     root.dataset.status = row.status;
     root.dataset.mode = isBatch ? 'batch' : 'single';
 
-    root.appendChild(detailHeader(detail, isBatch ? `Question · ${subQuestions.length} parts` : 'Question'));
+    root.appendChild(detailHeader(detail, kicker));
 
     const scroll = el('div', 'detail-scroll');
 
@@ -308,15 +326,90 @@ export function renderQuestion(container, detail, actions = {}) {
     error.hidden = true;
     error.setAttribute('role', 'alert');
     scroll.appendChild(error);
+
+    // Submitting is a state, not a moment (spec §9.3): the publish is a network
+    // round trip and the window must not look frozen while it happens.
+    const progress = el('p', 'detail-progress');
+    progress.hidden = true;
+    progress.setAttribute('role', 'status');
+    scroll.appendChild(progress);
+
     root.appendChild(scroll);
 
     const footer = el('footer', 'detail-actions');
     root.appendChild(footer);
     container.appendChild(root);
 
+    // Spec §16.5, on first paint: a decayed request is marked as the probable
+    // orphan it is rather than drawn as ordinary live work.
+    showNotice(root, orphanNotice(row));
+
     function showError(message) {
         error.textContent = message;
         error.hidden = false;
+        progress.hidden = true;
+    }
+
+    function showProgress(message) {
+        progress.textContent = message;
+        progress.hidden = false;
+        error.hidden = true;
+    }
+
+    /** Nobody may act on this any more: it settled, here or somewhere else. */
+    let settled = locked;
+    /** A publish is in flight. Distinct from `settled` — this one can be undone. */
+    let busy = false;
+
+    function setBusy(value) {
+        busy = value;
+        for (const button of footer.querySelectorAll('.button')) {
+            button.disabled = value || settled;
+        }
+    }
+
+    function lockForm() {
+        settled = true;
+        for (const input of scroll.querySelectorAll('input, textarea')) {
+            input.disabled = true;
+        }
+        setBusy(false);
+    }
+
+    /**
+     * The message's folded status moved while this pane was open (spec §9.3).
+     *
+     * Called by `pane-detail.js` instead of a re-render, which is the whole
+     * point: everything below the header — including whatever the reader has
+     * typed into "Additional Context" — is left exactly where it is.
+     */
+    function applyRow(nextRow) {
+        root.dataset.status = nextRow.status;
+        replaceHeader(root, { ...detail, row: nextRow }, kicker);
+
+        if (isOpen(nextRow)) {
+            // Still open. The only move available here is pending → stale, so
+            // the orphan mark may need to appear.
+            showNotice(root, orphanNotice(nextRow));
+            return;
+        }
+
+        removeNotice(root, 'orphan');
+        lockForm();
+        progress.hidden = true;
+        error.hidden = true;
+        footer.textContent = '';
+
+        const notice = raceNotice(nextRow, actions.myResponseId?.(nextRow.messageId) ?? null);
+        if (notice) {
+            // The banner says what happened and that the writing survives.
+            // A footer note underneath would only say it a second time — and
+            // the settled note would be false, since what is on screen is this
+            // device's own selection and not the answer the agent received.
+            showNotice(root, notice);
+        } else {
+            footer.appendChild(el('p', 'detail-retained', SETTLED));
+        }
     }
 
     function selectionFor(name) {
@@ -327,8 +420,32 @@ export function renderQuestion(container, detail, actions = {}) {
         return root.querySelector(`#other-${name}`)?.value.trim() ?? '';
     }
 
+    /**
+     * Publish, and keep the form locked afterwards (spec §9.3).
+     *
+     * Optimistic on purpose: the controls stay disabled once the answer is on
+     * the wire, because from here it is a race and offering to send a second
+     * answer would only add a second loser. The next fold says whether this
+     * device's answer is the one the agent received, and `applyRow` reports it.
+     *
+     * A *failure* is different, and unlocks: nothing left the machine, so
+     * everything typed is still submittable.
+     */
+    async function send(publish) {
+        if (settled || busy) return;
+        setBusy(true);
+        showProgress('Sending your answer…');
+        try {
+            await publish();
+            showProgress('Sent. Waiting for the log to confirm it is the answer that won.');
+        } catch (err) {
+            setBusy(false);
+            showError(`Could not send your answer — nothing left this machine. ${err?.message ?? err}`);
+        }
+    }
+
     function collectAndSubmit() {
-        if (locked || !actions.onSubmit) return;
+        if (settled || !actions.onSubmit) return;
         error.hidden = true;
 
         if (!isBatch) {
@@ -338,8 +455,7 @@ export function renderQuestion(container, detail, actions = {}) {
                 showError('Please select at least one option and/or provide additional context.');
                 return;
             }
-            actions.onSubmit({ row, selectedValues, otherText, subAnswers: null });
-            return;
+            return send(() => actions.onSubmit({ row, selectedValues, otherText, subAnswers: null }));
         }
 
         const subAnswers = subQuestions.map((sub, i) => {
@@ -362,22 +478,22 @@ export function renderQuestion(container, detail, actions = {}) {
             showError('Please answer at least one question.');
             return;
         }
-        actions.onSubmit({ row, selectedValues: [], otherText: '', subAnswers });
+        return send(() => actions.onSubmit({ row, selectedValues: [], otherText: '', subAnswers }));
     }
 
     if (locked) {
         // Nothing to press. The header already says who closed it and when.
-        footer.appendChild(el('p', 'detail-retained', 'This question is settled. The selection above is what the agent received.'));
-        return { locked: true };
+        footer.appendChild(el('p', 'detail-retained', SETTLED));
+        return { locked: true, applyRow };
     }
 
     footer.appendChild(actionButton('Skip', 'button-secondary',
-        actions.onSkip ? () => actions.onSkip(row) : null));
+        actions.onSkip ? () => send(() => actions.onSkip(row)) : null));
 
     if (!isBatch) {
         footer.appendChild(actionButton('Submit Response', 'button-primary',
             actions.onSubmit ? collectAndSubmit : null));
-        return { locked: false };
+        return { locked: false, applyRow };
     }
 
     const previous = actionButton('Previous', 'button-secondary', () => steps.go(steps.current - 1));
@@ -416,5 +532,5 @@ export function renderQuestion(container, detail, actions = {}) {
     root.querySelector('.stepper-body')?.addEventListener('input', paint);
     paint();
 
-    return { locked: false, steps };
+    return { locked: false, steps, applyRow };
 }

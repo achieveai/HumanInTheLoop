@@ -52,6 +52,28 @@
                     if (cmd === 'get_body') {
                         return resolveKeyed(fixture.bodies, args?.messageId, { outcome: 'absent' });
                     }
+
+                    // The reply commands (spec §9). Each returns the messageId
+                    // it minted, exactly as the Rust does — that id is what
+                    // `reply.js` compares against `row.responseId` to decide
+                    // whether this device won the race, so a mock that returned
+                    // nothing would make every submission look lost.
+                    //
+                    // `window.__REPLIES` lets a test pin the id (to match a
+                    // fixture row's `responseId`) or make a publish fail.
+                    if (cmd === 'submit_answer' || cmd === 'dismiss_notification') {
+                        return reply(cmd, `resp-${window.__INVOCATIONS.length}`);
+                    }
+                    if (cmd === 'submit_plan_review') {
+                        return reply(cmd, { status: 'received', responseId: 'resp-review', reason: null });
+                    }
+                    if (cmd === 'save_review_draft' || cmd === 'clear_review_draft') {
+                        return reply(cmd, null);
+                    }
+                    if (cmd === 'load_review_draft') {
+                        return reply(cmd, null);
+                    }
+
                     return Promise.reject(new Error(`unmocked command: ${cmd}`));
                 },
             },
@@ -62,6 +84,16 @@
                 },
             },
         };
+
+        // A reply command's answer. `window.__REPLIES[cmd]` overrides the
+        // default; `{ __error }` there is a publish that never left the
+        // machine, which is a distinct outcome from one that lost a race.
+        function reply(cmd, fallback) {
+            const pinned = window.__REPLIES?.[cmd];
+            if (pinned === undefined) return Promise.resolve(fallback);
+            if (pinned && pinned.__error) return Promise.reject(new Error(pinned.__error));
+            return Promise.resolve(pinned);
+        }
 
         function emptyTree() {
             return { projects: [], totalPending: 0, totalMessages: 0, scopeKey: 'all', now: 0 };

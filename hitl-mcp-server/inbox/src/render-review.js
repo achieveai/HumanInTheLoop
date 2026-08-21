@@ -31,10 +31,20 @@
 // apart for tests and for anyone reading the DOM, without touching `review.js`.
 
 import { renderPlanReview, renderReviewPanel } from './review.js';
-import { detailHeader, el, isOpen } from './detail-shell.js';
+import {
+    detailHeader,
+    el,
+    isOpen,
+    removeNotice,
+    replaceHeader,
+    showNotice,
+} from './detail-shell.js';
+import { orphanNotice, raceNotice } from './reply.js';
 
-/** The reply path is Task 9's. Until then, saying so beats a silent no-op. */
-const UNATTACHED = 'Replying from the Inbox is not attached yet.';
+/** No handler was supplied. Saying so beats a silent no-op. */
+const UNATTACHED = 'This pane has no reply handler attached.';
+
+const KICKER = 'Plan review';
 
 /**
  * Map a `BodyOutcome` onto a `renderReviewPanel` state.
@@ -201,14 +211,33 @@ function planMessage(detail, body) {
     };
 }
 
-export function renderReview(container, detail, body, actions = {}) {
-    const { row } = detail;
+/**
+ * Lock a settled review without taking anything off the screen.
+ *
+ * `setSuperseded` / `setCancelled` are `review.js`'s own resolved states: they
+ * disable the verdict buttons, keep every inline comment visible, and push the
+ * draft one last time. They are already what the desktop client uses when the
+ * race is lost mid-review, so the Inbox opening an already-closed review looks
+ * the same as watching one close under you — one behaviour to learn, not two.
+ */
+function lock(controller, row) {
+    if (row.status === 'cancelled') {
+        controller.setCancelled('cancelled');
+    } else if (row.status === 'agent_gone') {
+        controller.setCancelled('agent_gone');
+    } else {
+        controller.setSuperseded(row.responder);
+    }
+}
+
+export function renderReview(container, detail, body, actions = {}, draft = null) {
+    const { row, request } = detail;
 
     container.textContent = '';
     const root = el('article', 'detail-root detail-review');
     root.dataset.messageId = row.messageId;
     root.dataset.status = row.status;
-    root.appendChild(detailHeader(detail, 'Plan review'));
+    root.appendChild(detailHeader(detail, KICKER));
 
     const host = el('div', 'detail-review-host');
     root.appendChild(host);
@@ -220,36 +249,93 @@ export function renderReview(container, detail, body, actions = {}) {
         const panel = host.querySelector('.review-panel');
         if (panel) panel.dataset.reason = state.reason;
         root.dataset.readOnly = 'true';
+        // No `applyRow`: there is no form to lock and no plan on screen, so a
+        // status change has nothing here to change.
         return { readOnly: true, reason: state.reason, kind: state.kind };
     }
 
     root.dataset.readOnly = String(!isOpen(row));
 
-    // No handler means no reply path yet (Task 9). Rejecting is what makes
-    // review.js print "nothing was sent" — which is true — instead of its
-    // "sent but unconfirmed" notice, which would not be.
-    const controller = renderPlanReview(host, planMessage(detail, body), {
-        onSubmit: actions.onSubmit ?? (() => Promise.reject(new Error(UNATTACHED))),
-        onSkip: actions.onSkip ?? (() => Promise.reject(new Error(UNATTACHED))),
+    const planId = request?.planId || '';
+    const snapshotHash = request?.snapshotHash || '';
+
+    // Declared before the call because the callbacks below close over it, and
+    // `review.js` is free to invoke one of them while it is still rendering.
+    let controller;
+    controller = renderPlanReview(host, planMessage(detail, body), {
+        // `review.js` validates the verdict — `changes_requested` and
+        // `rejected` need overall feedback or at least one inline comment —
+        // and refuses before ever calling this. That client-side check is the
+        // spec §8.3 requirement, met by reuse: re-implementing it here would be
+        // a third copy of the server's `normalizeResponseBody()` rule.
+        onSubmit: actions.onSubmitReview
+            ? payload => actions.onSubmitReview(row, payload)
+            : () => Promise.reject(new Error(UNATTACHED)),
+
+        // Skip has no verdict buttons behind it, so it composes its own
+        // payload; it is otherwise the same publish.
+        onSkip: actions.onSubmitReview
+            ? () => actions.onSubmitReview(row, {
+                reviewId: row.messageId,
+                snapshotHash,
+                verdict: 'skipped',
+                overallFeedback: '',
+                inlineComments: [],
+            })
+            : () => Promise.reject(new Error(UNATTACHED)),
+
+        // Fired on every edit. A failure is recorded rather than swallowed:
+        // the resolved banners read this flag and stop claiming the draft was
+        // saved, and claiming a save that failed is how someone loses twenty
+        // minutes of review and only finds out later.
+        onDraftChange: actions.onSaveDraft
+            ? d => actions.onSaveDraft(d).catch(err => {
+                console.error('save_review_draft failed:', err);
+                controller?.noteDraftSaveFailed();
+            })
+            : undefined,
+
+        // Fired only on a confirmed `received`. On `lost`, `unacknowledged`,
+        // or a lost race, the draft is the only surviving copy.
+        onReceived: actions.onClearDraft
+            ? () => actions.onClearDraft({ planId, reviewId: row.messageId }).catch(err => {
+                console.error('clear_review_draft failed:', err);
+                controller?.noteDraftClearFailed();
+            })
+            : undefined,
+
         onCancel: actions.onCancel,
-        onDraftChange: actions.onDraftChange,
-        onReceived: actions.onReceived,
     });
 
-    // A settled review keeps its plan and its comments on screen and loses its
-    // controls. `setSuperseded`/`setCancelled` are exactly that, and they are
-    // already what the client uses when the race is lost mid-review — so the
-    // Inbox opening an already-closed review looks the same as watching one
-    // close under you, which is one behaviour to learn instead of two.
+    if (draft) controller.restoreDraft(draft);
+
     if (!isOpen(row)) {
-        if (row.status === 'cancelled') {
-            controller.setCancelled('cancelled');
-        } else if (row.status === 'agent_gone') {
-            controller.setCancelled('agent_gone');
-        } else {
-            controller.setSuperseded(row.responder);
-        }
+        lock(controller, row);
+    } else {
+        showNotice(root, orphanNotice(row));
     }
 
-    return { readOnly: !isOpen(row), controller };
+    /**
+     * The folded status moved while this review was open (spec §9.3).
+     *
+     * The draft is not touched. `setSuperseded` leaves every comment on screen
+     * and `notifyDraft` has already persisted them, so losing a race costs the
+     * reply and nothing else — which is the whole promise of §9.3's fourth row.
+     */
+    function applyRow(nextRow) {
+        root.dataset.status = nextRow.status;
+        root.dataset.readOnly = String(!isOpen(nextRow));
+        replaceHeader(root, { ...detail, row: nextRow }, KICKER);
+
+        if (isOpen(nextRow)) {
+            showNotice(root, orphanNotice(nextRow));
+            return;
+        }
+
+        removeNotice(root, 'orphan');
+        lock(controller, nextRow);
+        showNotice(root, raceNotice(nextRow, actions.myResponseId?.(nextRow.messageId) ?? null));
+    }
+
+    return { readOnly: !isOpen(row), controller, applyRow };
 }

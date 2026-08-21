@@ -22,6 +22,15 @@
 // `show()` takes a generation token and drops its own result if the selection
 // moved on, so a slow fetch for a message you have already navigated away from
 // cannot paint over the one you are looking at.
+//
+// # A status change is not a reason to re-render
+//
+// `update()` exists so that somebody else answering the message you are typing
+// into does not cost you what you typed (spec §9.3). The renderer that is
+// already on screen is handed the new row and locks itself in place; the DOM
+// underneath the header — options, checkboxes, "Additional Context", every
+// inline review comment — is left exactly as the reader left it. Re-rendering
+// would be one line shorter and would throw all of it away.
 
 import { el } from './detail-shell.js';
 import { renderNotification } from './render-notification.js';
@@ -42,12 +51,17 @@ export function createDetailPane({ container, invoke, onError = console.error, a
     // stale is discarded rather than rendered.
     let generation = 0;
 
+    /** What is on screen: `{ messageId, status, controller }`, or `null`. */
+    let painted = null;
+
     function empty() {
+        painted = null;
         panel(container, 'detail-empty', 'Nothing selected', 'Pick a message to see it here.');
     }
 
     async function show(message) {
         const token = ++generation;
+        painted = null;
 
         // Named immediately, from the row we already have. The alternative is a
         // pane that goes blank on every click and fills in a moment later.
@@ -76,11 +90,11 @@ export function createDetailPane({ container, invoke, onError = console.error, a
         }
 
         if (detail.row.msgType === 'notification') {
-            renderNotification(container, detail, actions);
+            remember(detail.row, renderNotification(container, detail, actions));
             return;
         }
         if (detail.row.msgType !== 'plan_review') {
-            renderQuestion(container, detail, actions);
+            remember(detail.row, renderQuestion(container, detail, actions));
             return;
         }
 
@@ -95,7 +109,47 @@ export function createDetailPane({ container, invoke, onError = console.error, a
         }
         if (token !== generation) return;
 
-        renderReview(container, detail, body, actions);
+        // Only worth asking for once there is a plan to anchor comments to.
+        // A failure here is not a reason to refuse the review: the draft is a
+        // convenience, and losing it is much less bad than not being able to
+        // open the plan at all.
+        let draft = null;
+        if (body?.outcome === 'ok' && actions.onLoadDraft) {
+            try {
+                draft = await actions.onLoadDraft({
+                    planId: detail.request?.planId || '',
+                    reviewId: detail.row.messageId,
+                    snapshotHash: detail.request?.snapshotHash || '',
+                });
+            } catch (err) {
+                onError?.(err);
+            }
+            if (token !== generation) return;
+        }
+
+        remember(detail.row, renderReview(container, detail, body, actions, draft));
+    }
+
+    function remember(row, controller) {
+        painted = { messageId: row.messageId, status: row.status, controller };
+    }
+
+    /**
+     * The selected message's folded status moved (spec §9.3).
+     *
+     * Handed to the renderer that is already on screen, which locks itself and
+     * says why. Falls back to a full `show()` only when there is nothing to
+     * update — a different message, or a renderer with no `applyRow`, which is
+     * the read-only review panel that has no form to lose.
+     */
+    async function update(message) {
+        if (!painted || painted.messageId !== message.messageId) return show(message);
+        if (painted.status === message.status) return;
+
+        painted.status = message.status;
+        if (!painted.controller?.applyRow) return show(message);
+
+        painted.controller.applyRow(message);
     }
 
     function clear() {
@@ -104,5 +158,5 @@ export function createDetailPane({ container, invoke, onError = console.error, a
     }
 
     empty();
-    return { show, clear };
+    return { show, update, clear };
 }

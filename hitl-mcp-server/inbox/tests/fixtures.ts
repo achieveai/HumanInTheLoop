@@ -34,6 +34,14 @@ export interface MessageRow {
   ageSeconds: number;
   responder: string | null;
   respondedAt: number | null;
+  /**
+   * The `messageId` of the *winning* response, named by the fold (spec §9.2).
+   *
+   * Never rendered. It exists so a device can compare it against the id its own
+   * publish returned and learn whether it won the race — which for a question is
+   * the only way to learn it, since questions have no `plan_review_ack`.
+   */
+  responseId: string | null;
   contextSnippet: string | null;
   badges: Badges;
   /** Set only on a spilled body; what pane 3 fetches with. Never rendered here. */
@@ -160,6 +168,7 @@ export function message(over: Partial<MessageRow> & { messageId: string }): Mess
     ageSeconds: Math.max(0, NOW - createdAt),
     responder: null,
     respondedAt: null,
+    responseId: null,
     contextSnippet: null,
     contentHash: null,
     sessionKey: 'Hitl_MCP · master · a3f2',

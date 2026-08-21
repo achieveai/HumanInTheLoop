@@ -176,6 +176,14 @@ pub struct MessageRow {
     /// Who closed it and from which device. Blank while pending.
     pub responder: Option<String>,
     pub responded_at: Option<u64>,
+    /// The `messageId` of the response that won (spec §9.2), or `None` when
+    /// nobody replied — including when a `cancel_review` closed it.
+    ///
+    /// Pane 2 never renders it. It is here so a device that has just published
+    /// a reply can tell "the winner is mine" from "the winner is somebody
+    /// else's" without asking anything but the log — which is the only way to
+    /// resolve the race for a *question*, since questions have no ack.
+    pub response_id: Option<String>,
     pub context_snippet: Option<String>,
     pub badges: Badges,
     /// The attachment's content hash, when the body spilled out of the
@@ -219,6 +227,7 @@ fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
             age_seconds: now.saturating_sub(request.ntfy_time),
             responder: state.responder.clone(),
             responded_at: state.responded_at,
+            response_id: state.response_id.clone(),
             context_snippet: context_snippet(request),
             badges: badges_of(request),
             content_hash: content_hash_of(request),
@@ -1471,6 +1480,7 @@ mod tests {
                 "projectKey",
                 "respondedAt",
                 "responder",
+                "responseId",
                 "sessionKey",
                 "sessionLabel",
                 "status",
@@ -1483,6 +1493,43 @@ mod tests {
             keys(&list["messages"][0]["badges"]),
             ["attachment", "batchCount", "plaintext", "repo", "revision"]
         );
+    }
+
+    #[test]
+    fn a_row_names_the_response_that_won_and_nothing_else() {
+        // The whole of pane 3's race decision (spec §9.3). A device compares
+        // the id it minted against this one; if the row carried the *losing*
+        // response, or none at all, a device that lost would report itself the
+        // winner and show the agent an answer the agent never received.
+        let events = [
+            question("q-1", NOW - 2 * MINUTE, "Hitl_MCP"),
+            ev(
+                "ntfy-late",
+                NOW - MINUTE,
+                r#"{"type":"answer","messageId":"resp-laptop","questionId":"q-1",
+                    "respondedFrom":"laptop","selectedValues":["no"],"skipped":false}"#,
+            ),
+            ev(
+                "ntfy-early",
+                NOW - 90,
+                r#"{"type":"answer","messageId":"resp-phone","questionId":"q-1",
+                    "respondedFrom":"phone","selectedValues":["yes"],"skipped":false}"#,
+            ),
+        ];
+
+        let row = &build_list(&events, None, Some("all"), NOW).messages[0];
+        assert_eq!(row.response_id.as_deref(), Some("resp-phone"));
+
+        // Pending, and closed by a cancel: two different ways for there to be
+        // no reply, and neither may hand out an id to match against.
+        let pending = [question("q-2", NOW - MINUTE, "Hitl_MCP")];
+        assert_eq!(build_list(&pending, None, Some("all"), NOW).messages[0].response_id, None);
+
+        let cancelled = [
+            ev("ntfy-p", NOW - 2 * MINUTE, r#"{"type":"plan_review","messageId":"p-1","displayPath":"p.md"}"#),
+            ev("ntfy-c", NOW - MINUTE, r#"{"type":"cancel_review","messageId":"c-1","reviewId":"p-1","reason":"agent_exited"}"#),
+        ];
+        assert_eq!(build_list(&cancelled, None, Some("all"), NOW).messages[0].response_id, None);
     }
 
     #[test]

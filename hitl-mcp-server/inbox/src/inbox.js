@@ -9,6 +9,7 @@
 import { renderAgentTree } from './pane-agents.js';
 import { createDetailPane } from './pane-detail.js';
 import { renderFilterBar, renderMessageList } from './pane-list.js';
+import { createReplyActions } from './reply.js';
 
 /** Emitted by the Rust side when a genuinely new event lands. */
 const CHANGED_EVENT = 'inbox-changed';
@@ -53,15 +54,18 @@ export function createInbox({ invoke, elements, onError = console.error, actions
             onSelect: selectMessage,
         });
 
-        // Pane 3 is redrawn only when the *selected* message's folded status
+        // Pane 3 is told only when the *selected* message's folded status
         // actually moved — someone answered it on another device, the agent
-        // exited. Redrawing on every event instead would throw away scroll
+        // exited. Reacting to every event instead would throw away scroll
         // position and half-typed review comments each time an unrelated
         // message arrived, which is a worse failure than a stale pane.
+        //
+        // `update` rather than `show`: the pane locks itself in place and keeps
+        // everything the reader has typed (spec §9.3).
         const selected = list.messages.find(m => m.messageId === state.selectedId);
         if (selected && selected.status !== state.selectedStatus) {
             state.selectedStatus = selected.status;
-            run(detailPane.show(selected));
+            run(detailPane.update(selected));
         }
     }
 
@@ -98,8 +102,14 @@ async function main() {
     const tauri = window.__TAURI__;
     if (!tauri) return;
 
+    const invoke = tauri.core.invoke;
+
     const inbox = createInbox({
-        invoke: tauri.core.invoke,
+        invoke,
+        // Replies go out through `hitl-transport` on the shared topic, exactly
+        // as any other device's do (spec §9.1). Nothing here records a status:
+        // the reply is an event, and the next fold decides what it meant.
+        actions: createReplyActions({ invoke }),
         elements: {
             agents: document.getElementById('pane-agents'),
             filterBar: document.getElementById('filter-bar'),

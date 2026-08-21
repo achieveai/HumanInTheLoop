@@ -7,6 +7,7 @@ mod backfill;
 mod body;
 mod detail;
 mod identity;
+mod reply;
 mod session;
 mod sink;
 mod view;
@@ -14,6 +15,7 @@ mod view;
 use std::sync::{Arc, Mutex};
 
 use hitl_store::{Event, Store};
+use hitl_transport::ntfy::review::{AckWaiters, OutstandingReviews};
 use hitl_transport::ntfy::subscribe::subscribe_loop;
 use hitl_transport::status::ConnectionStatus;
 use tauri::{Emitter, Manager};
@@ -219,15 +221,31 @@ fn main() {
     };
     log::info!("inbox database at {}", path.display());
 
+    // Shared between the submit command, which registers a waiter and blocks on
+    // it, and the subscribe loop, which is the only thing that will ever see the
+    // ack that resolves it.
+    let waiters = Arc::new(AckWaiters::default());
+
     tauri::Builder::default()
         .manage(store)
+        .manage(waiters.clone())
+        // Nothing in the Inbox cancels a review — that is the popup client's
+        // tray, and a second thing offering to release the same agent would be
+        // two. `submit_review_response` still needs one to settle into.
+        .manage(OutstandingReviews::default())
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             list_messages,
             get_message,
-            get_body
+            get_body,
+            reply::submit_answer,
+            reply::dismiss_notification,
+            reply::submit_plan_review,
+            reply::save_review_draft,
+            reply::load_review_draft,
+            reply::clear_review_draft
         ])
-        .setup(|app| {
+        .setup(move |app| {
             let store = app.state::<SharedStore>().inner().clone();
 
             let handle = app.handle().clone();
@@ -237,6 +255,7 @@ fn main() {
                 let notify = handle.clone();
                 let sink = InboxSink::new(
                     store,
+                    waiters,
                     Box::new(move || {
                         if let Err(e) = notify.emit(CHANGED_EVENT, ()) {
                             log::warn!("could not notify the window of new events: {e}");

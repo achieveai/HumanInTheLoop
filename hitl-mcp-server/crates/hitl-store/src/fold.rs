@@ -85,6 +85,16 @@ pub struct MessageState {
     /// ntfy time of the settling event — never the payload's own `timestamp`,
     /// which is set by whichever machine composed the message.
     pub responded_at: Option<u64>,
+    /// The `messageId` of the winning *response*, when a human replied.
+    ///
+    /// `None` while pending and `None` when a `cancel_review` settled it —
+    /// nobody replied, so there is no response to name.
+    ///
+    /// This is what lets a device tell "I won the race" from "somebody else
+    /// did" with nothing but the log: it published a response, it knows the id
+    /// it minted, and it compares. Questions have no `plan_review_ack`, so
+    /// there is no other way to make that distinction (spec §9.2, §9.3).
+    pub response_id: Option<String>,
 }
 
 impl Default for MessageState {
@@ -94,6 +104,7 @@ impl Default for MessageState {
             verdict: None,
             responder: None,
             responded_at: None,
+            response_id: None,
         }
     }
 }
@@ -114,10 +125,6 @@ pub fn fold(events: &[Event]) -> MessageState {
 
     let mut state = MessageState::default();
     let mut settled = false;
-    // Set only when an actual *response* settled the message, never when a
-    // `cancel_review` did. The ack below is about a response, so a cancelled
-    // review has nothing for it to name.
-    let mut winning_response: Option<String> = None;
 
     for event in &ordered {
         // Spec §9.2: the winning response is the *first* settling event in
@@ -137,8 +144,11 @@ pub fn fold(events: &[Event]) -> MessageState {
                 state.verdict = settlement.verdict;
                 state.responder = settlement.responder;
                 state.responded_at = Some(event.ntfy_time);
+                // Set only when an actual *response* settled the message, never
+                // when a `cancel_review` did: the ack below is about a response,
+                // so a cancelled review has nothing for it to name.
                 if settlement.is_response {
-                    winning_response = Some(event.message_id.clone());
+                    state.response_id = Some(event.message_id.clone());
                 }
                 settled = true;
             }
@@ -159,8 +169,8 @@ pub fn fold(events: &[Event]) -> MessageState {
     // `lost` on every device, including the one that actually answered it, and
     // would mislabel every contested message in the Inbox (spec §9.2, §9.3).
     // The device that lost learns so from the ack it received directly.
-    if let Some(winner) = &winning_response {
-        if ordered.iter().any(|e| is_lost_ack_for(e, winner)) {
+    if let Some(winner) = state.response_id.clone() {
+        if ordered.iter().any(|e| is_lost_ack_for(e, &winner)) {
             state.status = Status::Lost;
         }
     }
@@ -558,6 +568,31 @@ mod tests {
         ]);
 
         assert_eq!(st.status, Status::AgentGone);
+    }
+
+    #[test]
+    fn the_winning_responses_own_id_comes_back_with_the_state() {
+        // The whole of the Inbox's race decision for a *question*, which has no
+        // ack of any kind: a device that published `resp-A` and reads `resp-A`
+        // back here knows it won, and any other id means it lost (spec §9.3).
+        let st = fold(&[
+            plan_review("p-1"),
+            review_response_at("p-1", "approved", "resp-A", "phone", 100),
+            review_response_at("p-1", "rejected", "resp-B", "laptop", 200),
+        ]);
+
+        assert_eq!(st.response_id.as_deref(), Some("resp-A"), "the earlier response won");
+    }
+
+    #[test]
+    fn a_message_nobody_replied_to_names_no_response() {
+        // Pending, and cancelled: two different ways for there to be no reply,
+        // and neither may hand back an id a device could match itself against.
+        assert_eq!(fold(&[question("q-1")]).response_id, None);
+        assert_eq!(
+            fold(&[plan_review("p-1"), cancel("p-1", "agent_exited")]).response_id,
+            None
+        );
     }
 
     #[test]

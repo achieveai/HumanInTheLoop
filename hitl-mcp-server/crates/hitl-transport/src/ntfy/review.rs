@@ -97,7 +97,13 @@ fn ack_matches(ack: &PlanReviewAckMessage, review_id: &str, response_id: &str) -
 }
 
 impl AckWaiters {
-    fn register(
+    /// Wait for the ack that names this submission.
+    ///
+    /// Public because `deliver` is: a host application owns the `AckWaiters`
+    /// and owns the sink that feeds it, so it is the host — not this crate —
+    /// that can be wrong about whether the two are joined up. Registering a
+    /// waiter is the only way to observe that they are.
+    pub fn register(
         &self,
         review_id: &str,
         response_id: &str,

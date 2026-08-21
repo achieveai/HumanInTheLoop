@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hitl_store::Store;
+use hitl_transport::ntfy::review::AckWaiters;
 use hitl_transport::ntfy::subscribe::NtfyEvent;
 use hitl_transport::ntfy::NtfySink;
 use hitl_transport::types::{
@@ -31,6 +32,16 @@ pub type OnChanged = Box<dyn Fn() + Send + Sync>;
 pub struct InboxSink {
     store: SharedStore,
     changed: OnChanged,
+    /// The submissions from *this* Inbox that are still waiting to hear whether
+    /// the agent read them.
+    ///
+    /// The one per-message callback below that is not a no-op, and it has to
+    /// be: `submit_review_response` registers a waiter and then blocks on it
+    /// for 30 s. With nothing delivering the ack, every review submitted from
+    /// the Inbox would stall for the full timeout and then report
+    /// `unacknowledged` — telling the reviewer their work may not have landed
+    /// when the agent had in fact confirmed it seconds earlier.
+    waiters: Arc<AckWaiters>,
     /// The highest seq this sink has already announced.
     ///
     /// `Store::append` is idempotent and hands back the seq the row already
@@ -42,10 +53,11 @@ pub struct InboxSink {
 }
 
 impl InboxSink {
-    pub fn new(store: SharedStore, changed: OnChanged) -> Self {
+    pub fn new(store: SharedStore, waiters: Arc<AckWaiters>, changed: OnChanged) -> Self {
         Self {
             store,
             changed,
+            waiters,
             announced: AtomicI64::new(0),
         }
     }
@@ -106,8 +118,18 @@ impl NtfySink for InboxSink {
     ) {
     }
     fn on_plan_review_response(&self, _msg: &PlanReviewResponseMessage) {}
-    fn on_plan_review_ack(&self, _msg: &PlanReviewAckMessage) {}
     fn on_cancel_review(&self, _msg: &CancelReviewMessage) {}
+
+    /// The one exception to the no-ops above (spec §9.3).
+    ///
+    /// `on_event` has already written this ack down, and the fold will read it
+    /// — but a submit in flight is blocked on a `oneshot` right now, not on the
+    /// next repaint. Delivering here is what turns a 30 s stall into an
+    /// immediate answer. Every ack is offered; `AckWaiters` drops the ones that
+    /// name nothing this process is waiting for, including another device's.
+    fn on_plan_review_ack(&self, msg: &PlanReviewAckMessage) {
+        self.waiters.deliver(msg.clone());
+    }
 
     /// Recorded by `on_event` like anything else, and joined onto its message
     /// by `crate::identity` when the tree is next built. Nothing to route: the
@@ -133,21 +155,25 @@ mod tests {
         sink: InboxSink,
         store: SharedStore,
         redraws: Arc<AtomicI64>,
+        waiters: Arc<AckWaiters>,
     }
 
     fn harness() -> Harness {
         let store: SharedStore = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let redraws = Arc::new(AtomicI64::new(0));
+        let waiters = Arc::new(AckWaiters::default());
         let counter = redraws.clone();
         Harness {
             sink: InboxSink::new(
                 store.clone(),
+                waiters.clone(),
                 Box::new(move || {
                     counter.fetch_add(1, Ordering::SeqCst);
                 }),
             ),
             store,
             redraws,
+            waiters,
         }
     }
 
@@ -232,5 +258,46 @@ mod tests {
     fn the_inbox_never_claims_a_view_is_open() {
         let h = harness();
         assert!(!h.sink.is_view_open("q-1", "question"));
+    }
+
+    fn ack(review_id: &str, response_id: &str, status: &str) -> PlanReviewAckMessage {
+        serde_json::from_str(&format!(
+            r#"{{"type":"plan_review_ack","reviewId":"{review_id}",
+                 "responseId":"{response_id}","status":"{status}"}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_ack_reaches_the_submission_that_is_waiting_for_it() {
+        // `submit_plan_review` blocks on this for 30 s. Before the ack was
+        // routed here it never arrived, so every review submitted from the
+        // Inbox timed out and reported `unacknowledged` — "your work may not
+        // have landed" — for a review the agent had already confirmed.
+        let h = harness();
+        let mut rx = h.waiters.register("r-1", "resp-A");
+
+        h.sink.on_plan_review_ack(&ack("r-1", "resp-A", "received"));
+
+        assert_eq!(rx.try_recv().unwrap().status, "received");
+    }
+
+    #[test]
+    fn another_devices_ack_does_not_resolve_our_submission() {
+        // Every device sees every ack: they are on the shared topic. Ours must
+        // stay waiting, or a sibling's confirmation would be reported as our
+        // own and the draft would be cleared on the strength of it.
+        let h = harness();
+        let mut rx = h.waiters.register("r-1", "resp-mine");
+
+        h.sink.on_plan_review_ack(&ack("r-1", "resp-theirs", "received"));
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn an_ack_for_nothing_we_submitted_is_harmless() {
+        let h = harness();
+        h.sink.on_plan_review_ack(&ack("r-9", "resp-Z", "lost"));
     }
 }

@@ -36,7 +36,7 @@ const FIXTURE: Fixture = {
   messages: list({ messages: [NOTE, QUESTION, PLAN] }),
   details: {
     'n-1': detail(NOTE, { request: { body: 'All green.' } }),
-    'q-1': detail(QUESTION, { request: { question: 'Which storage backend?', options: [{ label: 'SQLite', value: 'sqlite' }] } }),
+    'q-1': detail(QUESTION, { request: { question: 'Which storage backend?', allowOther: true, options: [{ label: 'SQLite', value: 'sqlite' }] } }),
     'p-1': detail(PLAN, { request: { snapshotHash: 'abc123', displayPath: 'docs/plans/inbox.md', revision: 1, isNewPlan: true } }),
   },
   bodies: { 'p-1': bodyOk('# Plan\n\nOne step.\n') },
@@ -93,7 +93,12 @@ test.describe('Pane 3 — when bodies are fetched (spec §11)', () => {
     await page.locator('.message-row[data-message-id="p-1"]').click();
     await expect(page.locator('.review-root')).toHaveCount(1);
 
-    expect(await commands(page)).toEqual(['list_sessions', 'list_messages', 'get_message', 'get_body']);
+    // `load_review_draft` joins `get_body` on the selection path, and only there
+    // — it is asked for after the body succeeds, because a draft is a set of
+    // comments anchored to lines of a plan and there is no point restoring them
+    // against a plan that could not be shown.
+    expect(await commands(page))
+      .toEqual(['list_sessions', 'list_messages', 'get_message', 'get_body', 'load_review_draft']);
   });
 });
 
@@ -148,7 +153,13 @@ test.describe('Pane 3 — when a command does not answer (spec §11)', () => {
 });
 
 test.describe('Pane 3 — staying in step with the log (spec §4.2)', () => {
-  test('an answer from another device redraws the selected message', async ({ page }) => {
+  test('an answer from another device locks the selected message in place', async ({ page }) => {
+    // Task 8 re-rendered here, which showed the winning selection but threw
+    // away whatever the reader had typed. Spec §9.3 rules that out in as many
+    // words, so the pane is now *told* the new row instead: the header and the
+    // banner change, and everything below them is left exactly where it was.
+    // What the winner actually chose is one click away — reselect the message —
+    // and a paragraph of half-written context is not recoverable at all.
     const answered = message({
       messageId: 'q-1',
       msgType: 'question',
@@ -170,6 +181,7 @@ test.describe('Pane 3 — staying in step with the log (spec §4.2)', () => {
 
     await page.locator('.message-row[data-message-id="q-1"]').click();
     await expect(page.locator('.detail-root')).toHaveAttribute('data-status', 'pending');
+    await page.locator('.other-input').fill('Only if it survives a restart.');
 
     // The log moves: the question is now answered, everywhere.
     await page.evaluate(f => {
@@ -186,6 +198,13 @@ test.describe('Pane 3 — staying in step with the log (spec §4.2)', () => {
     await page.evaluate(() => (window as any).__simulateChange());
 
     await expect(page.locator('.detail-root')).toHaveAttribute('data-status', 'answered');
-    await expect(page.locator('.option.is-chosen')).toHaveCount(1);
+    await expect(page.locator('.detail-banner[data-banner="answered-elsewhere"] .detail-banner-title'))
+      .toHaveText('Answered elsewhere');
+    await expect(page.locator('.detail-responder')).toHaveText('Kay9 phone');
+
+    // The part that matters: locked, and every word still on screen.
+    await expect(page.locator('.other-input')).toHaveValue('Only if it survives a restart.');
+    await expect(page.locator('.other-input')).toBeDisabled();
+    await expect(page.locator('.detail-actions .button')).toHaveCount(0);
   });
 });

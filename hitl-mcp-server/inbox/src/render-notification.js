@@ -22,8 +22,16 @@ import {
     detailHeader,
     el,
     isOpen,
+    removeNotice,
     renderMarkdownInto,
+    replaceHeader,
+    showNotice,
 } from './detail-shell.js';
+import { raceNotice } from './reply.js';
+
+const KICKER = 'Notification';
+const RETAINED =
+    'Dismissed everywhere. This message is kept in the Inbox so the agent’s history stays readable.';
 
 export function renderNotification(container, detail, actions = {}) {
     const { row, request } = detail;
@@ -33,7 +41,7 @@ export function renderNotification(container, detail, actions = {}) {
     root.dataset.messageId = row.messageId;
     root.dataset.status = row.status;
 
-    root.appendChild(detailHeader(detail, 'Notification'));
+    root.appendChild(detailHeader(detail, KICKER));
 
     const scroll = el('div', 'detail-scroll');
 
@@ -44,28 +52,67 @@ export function renderNotification(container, detail, actions = {}) {
     const context = contextBlock(request?.context);
     if (context) scroll.appendChild(context);
 
+    const error = el('p', 'detail-error');
+    error.hidden = true;
+    error.setAttribute('role', 'alert');
+    scroll.appendChild(error);
+
     root.appendChild(scroll);
-    root.appendChild(footer(row, actions));
-    container.appendChild(root);
-}
 
-function footer(row, actions) {
     const bar = el('footer', 'detail-actions');
+    root.appendChild(bar);
+    container.appendChild(root);
 
-    if (isOpen(row)) {
-        bar.appendChild(actionButton('Dismiss', 'button-primary', actions.onDismiss
-            ? () => actions.onDismiss(row)
-            : null));
-        return bar;
+    let settled = !isOpen(row);
+    drawFooter();
+
+    function drawFooter() {
+        bar.textContent = '';
+        if (!settled) {
+            bar.appendChild(actionButton('Dismiss', 'button-primary',
+                actions.onDismiss ? dismiss : null));
+            return;
+        }
+        // Already dismissed. The button is gone rather than disabled — there is
+        // nothing left to do — and the note says plainly that the message is
+        // kept, because a row that survives its own Dismiss otherwise reads as
+        // a bug.
+        bar.appendChild(el('p', 'detail-retained', RETAINED));
     }
 
-    // Already dismissed. The button is gone rather than disabled — there is
-    // nothing left to do — and the note says plainly that the message is kept,
-    // because a row that survives its own Dismiss otherwise reads as a bug.
-    bar.appendChild(el(
-        'p',
-        'detail-retained',
-        'Dismissed everywhere. This message is kept in the Inbox so the agent’s history stays readable.',
-    ));
-    return bar;
+    /**
+     * A dismissal is published like any other reply and races like one: two
+     * devices can dismiss the same notification, and the fold names whichever
+     * was first in ntfy order. It matters much less here than it does for a
+     * question — both devices asked for the same outcome and both got it — so
+     * the button simply locks and the header reports who the log credits.
+     */
+    async function dismiss() {
+        if (settled) return;
+        const button = bar.querySelector('.button');
+        if (button) button.disabled = true;
+        error.hidden = true;
+        try {
+            await actions.onDismiss(row);
+        } catch (err) {
+            if (button) button.disabled = false;
+            error.textContent = `Could not dismiss this — nothing left this machine. ${err?.message ?? err}`;
+            error.hidden = false;
+        }
+    }
+
+    /** The folded status moved while this pane was open (spec §9.3). */
+    function applyRow(nextRow) {
+        root.dataset.status = nextRow.status;
+        replaceHeader(root, { ...detail, row: nextRow }, KICKER);
+        if (isOpen(nextRow)) return;
+
+        settled = true;
+        error.hidden = true;
+        removeNotice(root, 'orphan');
+        drawFooter();
+        showNotice(root, raceNotice(nextRow, actions.myResponseId?.(nextRow.messageId) ?? null));
+    }
+
+    return { applyRow };
 }

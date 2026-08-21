@@ -152,6 +152,52 @@ export function closedLine(row) {
 }
 
 /**
+ * Redraw the header from a newer row, in place (spec §9.3).
+ *
+ * The status pill, the responder and the closed line all live in the header,
+ * and all three change the moment somebody else replies. Rebuilding just this
+ * block is what lets the pane tell the truth about a settled message without
+ * re-rendering the body underneath it — which is where the reader's half-typed
+ * reply is.
+ */
+export function replaceHeader(root, detail, kicker) {
+    const existing = root.querySelector('.detail-header');
+    if (!existing) return;
+    root.replaceChild(detailHeader(detail, kicker), existing);
+}
+
+/**
+ * A banner between the header and the body — the "Answered elsewhere" of spec
+ * §9.3 and the orphan mark of §16.5.
+ *
+ * Keyed by `kind` and replaced in place, so a message that settles while you
+ * watch gets one banner rather than one per repaint. Built here rather than in
+ * each renderer so all three say it the same way; *what* it says is decided in
+ * `reply.js`, where it can be asserted without a DOM.
+ */
+export function showNotice(root, notice) {
+    if (!notice) return null;
+
+    let bar = root.querySelector(`.detail-banner[data-banner="${notice.kind}"]`);
+    if (!bar) {
+        bar = el('aside', `detail-banner detail-banner--${notice.kind}`);
+        bar.dataset.banner = notice.kind;
+        bar.setAttribute('role', 'status');
+        root.querySelector('.detail-header')?.after(bar);
+    }
+
+    bar.textContent = '';
+    bar.appendChild(el('strong', 'detail-banner-title', notice.title));
+    bar.appendChild(el('span', 'detail-banner-detail', notice.detail));
+    return bar;
+}
+
+/** Take a banner back down — an orphan that has since been settled, say. */
+export function removeNotice(root, kind) {
+    root.querySelector(`.detail-banner[data-banner="${kind}"]`)?.remove();
+}
+
+/**
  * The agent's `context` — why you are being asked — in a collapsible block.
  *
  * Collapsed by default in pane 3 for the same reason it is in dialog.js: the
@@ -186,10 +232,11 @@ export function contextBlock(text) {
 /**
  * A footer action.
  *
- * `handler` of `null` means the reply path for this action is not attached.
- * The control is still rendered — hiding it would misrepresent what the
- * message affords — but it is disabled and says why, rather than silently
- * doing nothing when clicked.
+ * `handler` of `null` means this pane was given no handler for the action —
+ * a harness, or a caller that built the detail pane without `actions`. The
+ * control is still rendered, because hiding it would misrepresent what the
+ * message affords, but it is disabled and says why rather than silently doing
+ * nothing when clicked.
  */
 export function actionButton(label, className, handler) {
     const button = el('button', `button ${className}`, label);
@@ -199,7 +246,7 @@ export function actionButton(label, className, handler) {
     } else {
         button.disabled = true;
         button.dataset.unattached = 'true';
-        button.title = 'Replying from the Inbox is not attached yet.';
+        button.title = 'This pane has no reply handler attached.';
     }
     return button;
 }

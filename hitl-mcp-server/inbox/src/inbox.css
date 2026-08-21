@@ -521,6 +521,51 @@ body {
     padding: 8px 10px;
 }
 
+/* A publish is in flight (spec §9.3). Deliberately quieter than an error and
+ * louder than nothing: the window must not look frozen for the round trip. */
+.detail-progress {
+    background: #ebf8ff;
+    border-left: 3px solid #4299e1;
+    color: #2b6cb0;
+    font-size: 12px;
+    margin-top: 12px;
+    padding: 8px 10px;
+}
+
+/* --- the "Answered elsewhere" banner (spec §9.3) and the orphan mark (§16.5)
+ *
+ * Sits between the header and the body, full width, so it is read before the
+ * controls it has just disabled. Matches review.js's own `.review-banner`
+ * treatment, because inside a plan review the two appear together. */
+
+.detail-banner {
+    border-left: 3px solid #a0aec0;
+    background: #f7fafc;
+    display: block;
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 10px 12px;
+}
+
+.detail-banner--answered-elsewhere,
+.detail-banner--closed-elsewhere {
+    background: #fffaf0;
+    border-left-color: #dd6b20;
+    color: #7b341e;
+}
+
+.detail-banner--orphan {
+    background: #fffff0;
+    border-left-color: #d69e2e;
+    color: #744210;
+}
+
+.detail-banner-title {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 2px;
+}
+
 /* --- questions (spec §8.2) --- */
 
 .question-text,
