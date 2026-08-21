@@ -10,6 +10,7 @@
 pub mod chunking;
 pub mod config;
 pub mod crypto;
+pub mod drafts;
 pub mod ntfy;
 pub mod payload;
 pub mod status;

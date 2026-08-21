@@ -347,7 +347,7 @@ fn review_window_payload(
     decoded: &Result<PlanReviewBody, ReviewBodyError>,
     was_encrypted: bool,
     device_name: &str,
-    draft: Option<crate::drafts::ReviewDraft>,
+    draft: Option<hitl_transport::drafts::ReviewDraft>,
 ) -> String {
     let mut payload = serde_json::to_value(review).unwrap_or_default();
 
@@ -522,7 +522,7 @@ fn show_review(
             &decoded,
             was_encrypted,
             &config.device_name,
-            crate::drafts::load_for_window(
+            hitl_transport::drafts::load_for_window(
                 &review.plan_id,
                 &review.message_id,
                 &review.snapshot_hash,
@@ -847,7 +847,7 @@ mod tests {
             content: "# Plan\n".to_string(),
             diff: "@@ -1 +1 @@\n".to_string(),
         });
-        let draft = crate::drafts::ReviewDraft {
+        let draft = hitl_transport::drafts::ReviewDraft {
             review_id: "rev-12345678".to_string(),
             plan_id: "plan-abc".to_string(),
             snapshot_hash: "sha256:aa".to_string(),
