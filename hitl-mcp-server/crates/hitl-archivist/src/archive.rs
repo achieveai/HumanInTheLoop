@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use hitl_store::{BodyFailure, Event, FailureReason, Store};
+use hitl_store::{BodyFailure, BodyStatus, Event, FailureReason, Store};
 use hitl_transport::crypto;
 use hitl_transport::ntfy::subscribe::NtfyEvent;
 use hitl_transport::payload::sha256_hex;
@@ -37,6 +37,18 @@ pub enum BodyOutcome {
     /// The fetch or the write failed. The body may still be retrievable while
     /// the attachment lives.
     Failed(String),
+}
+
+/// The answer to "give me this body", which is never just bytes-or-nothing.
+///
+/// Three outcomes, because they mean three different things to a caller: here
+/// it is; it is not here and this is why; and the archive could not tell you.
+/// Collapsing the last two would report a broken database as a missing body.
+#[derive(Debug)]
+pub enum BodyLookup {
+    Found(Vec<u8>),
+    Missing(BodyStatus),
+    Unavailable(String),
 }
 
 /// Running totals, for `GET /health`.
@@ -130,23 +142,44 @@ impl Archive {
             .unwrap_or(false)
     }
 
-    /// Test-only for now. Nothing in this binary reads a body back — the
-    /// backfill endpoint serves events, and the Inbox keeps its own store — so
-    /// exposing it unconditionally would be an API with no caller.
-    #[cfg(test)]
     pub fn get_body(&self, content_hash: &str) -> Option<Vec<u8>> {
         self.store.lock().ok().and_then(|s| s.get_body(content_hash).ok().flatten())
     }
 
-    /// Test-only for the same reason as [`Archive::get_body`]: the consumer of
-    /// this distinction is the Inbox, which reads it off its own `Store`.
     #[cfg(test)]
-    pub fn body_status(&self, content_hash: &str) -> hitl_store::BodyStatus {
-        self.store
-            .lock()
-            .ok()
-            .and_then(|s| s.body_status(content_hash).ok())
-            .unwrap_or(hitl_store::BodyStatus::Unattempted)
+    pub fn body_status(&self, content_hash: &str) -> BodyStatus {
+        match self.look_up_body(content_hash) {
+            BodyLookup::Found(_) => BodyStatus::Verified,
+            BodyLookup::Missing(status) => status,
+            BodyLookup::Unavailable(_) => BodyStatus::Unattempted,
+        }
+    }
+
+    /// The body, or why there isn't one — decided under a single lock.
+    ///
+    /// One call rather than `get_body` then `body_status`, because between two
+    /// calls a fetch can land: the pair can report "missing" and then explain
+    /// that the body is `Verified`, which is not a state that ever existed.
+    pub fn look_up_body(&self, content_hash: &str) -> BodyLookup {
+        let Ok(store) = self.store.lock() else {
+            return BodyLookup::Unavailable("archive lock poisoned".to_string());
+        };
+
+        match store.get_body(content_hash) {
+            Ok(Some(bytes)) => BodyLookup::Found(bytes),
+            Ok(None) => match store.body_status(content_hash) {
+                Ok(status) => BodyLookup::Missing(status),
+                Err(e) => BodyLookup::Unavailable(e.to_string()),
+            },
+            Err(e) => BodyLookup::Unavailable(e.to_string()),
+        }
+    }
+
+    pub fn body_statuses(&self, content_hashes: &[&str]) -> Result<Vec<(String, BodyStatus)>, String> {
+        let store = self.store.lock().map_err(|_| "archive lock poisoned".to_string())?;
+        store
+            .body_statuses(content_hashes)
+            .map_err(|e| format!("could not read body statuses: {e}"))
     }
 
     /// Verify `cipher` against `expected_hash` and persist it.
@@ -288,6 +321,17 @@ impl Archive {
         if let Ok(store) = self.store.lock() {
             let _ = store.clear_body_failure(content_hash);
         }
+    }
+
+    /// Seed bytes under a hash without verifying them.
+    ///
+    /// Test-only, and it must stay that way: skipping verification is precisely
+    /// what [`Archive::capture_body`] exists to prevent. Tests of the *serving*
+    /// path need bytes that are deliberately not a valid payload, which no
+    /// honest path can produce.
+    #[cfg(test)]
+    pub fn put_body_for_test(&self, content_hash: &str, bytes: &[u8]) {
+        self.put(content_hash, bytes).expect("test seed must store");
     }
 
     fn put(&self, content_hash: &str, bytes: &[u8]) -> Result<(), String> {

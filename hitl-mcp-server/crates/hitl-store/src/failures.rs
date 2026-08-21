@@ -32,9 +32,35 @@
 //! this machine last try", for a human reading a log. Two machines will
 //! disagree about it and both will be right.
 
-use rusqlite::{params, OptionalExtension};
+use std::collections::{HashMap, HashSet};
+
+use rusqlite::{params, params_from_iter, OptionalExtension};
 
 use crate::{Result, Store};
+
+/// Host parameters per `IN (...)`. Comfortably under SQLite's
+/// `SQLITE_MAX_VARIABLE_NUMBER` on every build we might be linked against.
+const CHUNK: usize = 400;
+
+/// The one place a stored `reason` becomes a [`BodyStatus`], so the batch and
+/// single-hash paths cannot drift into disagreeing about the same row.
+fn decode_status(
+    reason: String,
+    actual_hash: Option<String>,
+    detail: Option<String>,
+    at: i64,
+) -> BodyStatus {
+    match reason.as_str() {
+        "corrupt" => BodyStatus::Corrupt {
+            actual_hash,
+            detail,
+            at,
+        },
+        "gone" => BodyStatus::Gone { detail, at },
+        "undecryptable" => BodyStatus::Undecryptable { detail, at },
+        _ => BodyStatus::Unknown { reason, detail, at },
+    }
+}
 
 /// Why a fetch ended without a usable body. Only outcomes a retry cannot fix
 /// belong here — a transient network error is *not* a failure, it is a body
@@ -174,16 +200,74 @@ impl Store {
             return Ok(BodyStatus::Unattempted);
         };
 
-        Ok(match reason.as_str() {
-            "corrupt" => BodyStatus::Corrupt {
-                actual_hash,
-                detail,
-                at,
-            },
-            "gone" => BodyStatus::Gone { detail, at },
-            "undecryptable" => BodyStatus::Undecryptable { detail, at },
-            _ => BodyStatus::Unknown { reason, detail, at },
-        })
+        Ok(decode_status(reason, actual_hash, detail, at))
+    }
+
+    /// [`Store::body_status`] for many hashes, in two queries rather than two
+    /// per hash.
+    ///
+    /// The Inbox's message list asks this for every row it draws, so the
+    /// one-at-a-time version is an N+1 on the first pane that renders. Results
+    /// come back in the order asked, including duplicates, so a caller can zip
+    /// them straight against its own list without a lookup table.
+    pub fn body_statuses(&self, content_hashes: &[&str]) -> Result<Vec<(String, BodyStatus)>> {
+        let mut held = HashSet::new();
+        let mut failed = HashMap::new();
+
+        // SQLite caps host parameters per statement (`SQLITE_MAX_VARIABLE_NUMBER`),
+        // so the work is chunked rather than trusting the caller to be modest.
+        for chunk in content_hashes.chunks(CHUNK) {
+            let places = vec!["?"; chunk.len()].join(",");
+
+            let mut stmt = self
+                .conn
+                .prepare(&format!("SELECT content_hash FROM bodies WHERE content_hash IN ({places})"))?;
+            let rows = stmt.query_map(params_from_iter(chunk.iter()), |r| r.get::<_, String>(0))?;
+            for hash in rows {
+                held.insert(hash?);
+            }
+
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT content_hash, reason, actual_hash, detail, at
+                 FROM body_failures WHERE content_hash IN ({places})"
+            ))?;
+            let rows = stmt.query_map(params_from_iter(chunk.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (hash, reason, actual_hash, detail, at) = row?;
+                failed.insert(hash, (reason, actual_hash, detail, at));
+            }
+        }
+
+        Ok(content_hashes
+            .iter()
+            .map(|hash| {
+                // Same precedence as the single-hash path: held bytes were
+                // verified against this name, and that outranks any older
+                // record of a failed attempt.
+                let status = if held.contains(*hash) {
+                    BodyStatus::Verified
+                } else {
+                    match failed.get(*hash) {
+                        Some((reason, actual_hash, detail, at)) => decode_status(
+                            reason.clone(),
+                            actual_hash.clone(),
+                            detail.clone(),
+                            *at,
+                        ),
+                        None => BodyStatus::Unattempted,
+                    }
+                };
+                ((*hash).to_string(), status)
+            })
+            .collect())
     }
 
     /// Whether reaching for this body again could only fail the same way.
@@ -397,6 +481,78 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
+    }
+
+    #[test]
+    fn a_batch_answers_every_hash_in_the_order_asked() {
+        // The Inbox zips these against its own message list, so a reordered or
+        // short result silently attaches each verdict to the wrong message —
+        // which is worse than no answer at all.
+        let s = Store::open_in_memory().unwrap();
+        s.put_body("sha-ok", b"plan").unwrap();
+        s.record_body_failure(&failure("sha-gone", FailureReason::Gone)).unwrap();
+
+        let got = s
+            .body_statuses(&["sha-gone", "sha-none", "sha-ok", "sha-gone"])
+            .unwrap();
+
+        let hashes: Vec<&str> = got.iter().map(|(h, _)| h.as_str()).collect();
+        assert_eq!(
+            hashes,
+            vec!["sha-gone", "sha-none", "sha-ok", "sha-gone"],
+            "order preserved, duplicates kept"
+        );
+        assert!(matches!(got[0].1, BodyStatus::Gone { .. }));
+        assert_eq!(got[1].1, BodyStatus::Unattempted);
+        assert_eq!(got[2].1, BodyStatus::Verified);
+        assert!(matches!(got[3].1, BodyStatus::Gone { .. }));
+    }
+
+    #[test]
+    fn a_batch_agrees_with_asking_one_at_a_time() {
+        // Two code paths, one truth. If these ever disagree, a list and the
+        // detail view of the same message contradict each other on screen.
+        let s = Store::open_in_memory().unwrap();
+        s.put_body("sha-ok", b"plan").unwrap();
+        s.record_body_failure(&BodyFailure {
+            content_hash: "sha-bad",
+            reason: FailureReason::Corrupt,
+            actual_hash: Some("sha-actual"),
+            detail: Some("why"),
+            ntfy_id: Some("ntfy-1"),
+        })
+        .unwrap();
+        s.record_body_failure(&failure("sha-locked", FailureReason::Undecryptable))
+            .unwrap();
+
+        let hashes = ["sha-ok", "sha-bad", "sha-locked", "sha-none"];
+        let batch = s.body_statuses(&hashes).unwrap();
+
+        for (hash, status) in batch {
+            assert_eq!(status, s.body_status(&hash).unwrap(), "disagreed about {hash}");
+        }
+    }
+
+    #[test]
+    fn a_batch_larger_than_one_sql_chunk_still_answers_everything() {
+        // Guards the chunking: SQLite caps host parameters per statement, and
+        // exceeding it fails the whole query rather than degrading.
+        let s = Store::open_in_memory().unwrap();
+        let hashes: Vec<String> = (0..CHUNK * 2 + 7).map(|i| format!("sha-{i}")).collect();
+        s.put_body(&hashes[CHUNK + 3], b"plan").unwrap();
+        let refs: Vec<&str> = hashes.iter().map(String::as_str).collect();
+
+        let got = s.body_statuses(&refs).unwrap();
+
+        assert_eq!(got.len(), refs.len(), "every hash asked about must come back");
+        assert_eq!(got[CHUNK + 3].1, BodyStatus::Verified, "across a chunk boundary");
+        assert_eq!(got[0].1, BodyStatus::Unattempted);
+    }
+
+    #[test]
+    fn an_empty_batch_is_an_empty_answer_rather_than_an_error() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.body_statuses(&[]).unwrap(), vec![]);
     }
 
     #[test]
