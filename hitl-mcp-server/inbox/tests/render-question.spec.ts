@@ -52,6 +52,36 @@ function pending(request: Record<string, unknown>, over = {}) {
 }
 
 test.describe('Pane 3 — a single question (spec §8.2)', () => {
+  // Reported from a screenshot: the radio sat "almost a line above" its label.
+  //
+  // Two causes, and neither was the radio. `align-items: flex-start` top-aligns
+  // a 13px control against a 22.4px line box, and `.md-content p` (review.css,
+  // generated from the client) gives the label's wrapping `<p>` a 6px top margin
+  // that collapses through the label and drags it down 6px more.
+  //
+  // Asserted as a geometric relationship rather than as fixed coordinates, so
+  // this still holds if the font, the padding or the line-height change — and
+  // still fails if either cause comes back.
+  test('the control is centred on its label, not floating above it', async ({ page }) => {
+    await mount(page, 'question', pending(SINGLE));
+
+    for (const label of ['SQLite', 'Flat file']) {
+      const offset = await page
+        .locator('.option', { hasText: label })
+        .evaluate(option => {
+          const centre = (el: Element) => {
+            const box = el.getBoundingClientRect();
+            return box.top + box.height / 2;
+          };
+          const text = option.querySelector('.option-label')!;
+          // The label's own box is its first line: the description is a sibling.
+          return centre(option.querySelector('input')!) - centre(text);
+        });
+
+      expect(Math.abs(offset), `radio is off-centre against "${label}" by ${offset}px`).toBeLessThan(1);
+    }
+  });
+
   test('renders the context, radio options and the additional-context field', async ({ page }) => {
     await mount(page, 'question', pending(SINGLE));
 

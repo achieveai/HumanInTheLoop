@@ -596,6 +596,42 @@ body {
     display: flex;
     gap: 10px;
     padding: 10px 12px;
+
+    /* `.md-content` (review.css) sets `line-height: 1.6`, so at the body's 14px
+       the label's first line box is 22.4px. A native radio or checkbox is 13px.
+       Named here so the centring calc below reads as arithmetic rather than as
+       two magic numbers. */
+    --option-line: 22.4px;
+    --option-control: 13px;
+}
+
+/* Centre the control on the label's *first line*, not on the top of the option
+   box. `align-items: flex-start` is right for the block as a whole — the label
+   and its description can run to several lines and the control must stay by the
+   label — but it top-aligns a 13px control against a 22.4px line box, which
+   reads as the radio floating half a line above its own text. */
+.option > input {
+    flex: none;
+    margin-top: calc((var(--option-line) - var(--option-control)) / 2);
+}
+
+/* `renderMarkdownInto` wraps even a one-word label in a `<p>`, and
+   `.md-content p` (review.css, generated from the client — not ours to edit)
+   gives every paragraph `margin: 6px 0`. The label has no border or padding, so
+   that top margin *collapses through it* and drags the whole block 6px further
+   down, on top of the centring offset above.
+
+   A label and a description are each a run of text, not a paragraph in a
+   document. Strip the outer margins and leave any inner ones alone, so a
+   genuinely multi-paragraph description still breaks properly. */
+.option-label > p:first-child,
+.option-description > p:first-child {
+    margin-top: 0;
+}
+
+.option-label > p:last-child,
+.option-description > p:last-child {
+    margin-bottom: 0;
 }
 
 .option:hover {
