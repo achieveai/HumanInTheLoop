@@ -6,3 +6,9 @@ target/
 Thumbs.db
 scratchpad/
 .claude/worktrees/
+
+# Local-only cargo target redirect (machine-specific absolute path).
+# Must NOT be committed: release.yml collects artifacts from
+# client/src-tauri/target/<target>/release/, so a committed redirect
+# silently empties the release.
+hitl-mcp-server/.cargo/config.toml
