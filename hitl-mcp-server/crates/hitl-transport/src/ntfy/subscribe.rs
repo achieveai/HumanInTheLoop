@@ -18,7 +18,16 @@ use crate::types::{AttachmentRef, HitlConfig};
 const SEEN_ID_CAPACITY: usize = 512;
 
 /// One decoded ntfy event line.
+#[derive(Debug, Clone, Default)]
 pub struct NtfyEvent {
+    /// ntfy's own id for this event. Empty when the event omitted it.
+    ///
+    /// This is the total-order key: `(time, id)` is what every subscriber sorts
+    /// by to agree on a winner without an arbiter, and it is the uniqueness key
+    /// the event log dedups on. Nothing in the client needed it, so it used to
+    /// be dropped on the floor here — but the id lives only on the ntfy
+    /// envelope and can never be recovered from our own payload.
+    pub id: String,
     pub message: String,
     pub attachment: Option<AttachmentRef>,
     /// Unix seconds, as assigned by ntfy. 0 when the event omitted it.
@@ -45,7 +54,14 @@ pub fn parse_ntfy_event(line: &str) -> Option<NtfyEvent> {
 
     let time = event.get("time").and_then(|t| t.as_u64()).unwrap_or(0);
 
+    let id = event
+        .get("id")
+        .and_then(|i| i.as_str())
+        .unwrap_or_default()
+        .to_string();
+
     Some(NtfyEvent {
+        id,
         message,
         attachment,
         time,

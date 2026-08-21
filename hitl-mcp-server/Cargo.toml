@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["client/src-tauri", "crates/hitl-transport"]
+members = ["client/src-tauri", "crates/hitl-transport", "crates/hitl-store"]
 
 # Shared versions for every crate that talks to ntfy or the wire types, so a
 # bump lands in one place instead of drifting between the client and the
@@ -18,3 +18,7 @@ base64 = "0.22"
 sha2 = "0.10"
 flate2 = "1"
 log = "0.4"
+# "bundled" compiles SQLite from source, so no host library has to be present
+# on a build machine or a user's box. The store is a local projection file, not
+# a service, and shipping the engine with it is what keeps it that way.
+rusqlite = { version = "0.32", features = ["bundled"] }
