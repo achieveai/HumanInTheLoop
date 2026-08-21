@@ -36,6 +36,8 @@ export interface MessageRow {
   respondedAt: number | null;
   contextSnippet: string | null;
   badges: Badges;
+  /** Set only on a spilled body; what pane 3 fetches with. Never rendered here. */
+  contentHash: string | null;
   sessionKey: string | null;
   sessionLabel: string | null;
   projectKey: string;
@@ -159,6 +161,7 @@ export function message(over: Partial<MessageRow> & { messageId: string }): Mess
     responder: null,
     respondedAt: null,
     contextSnippet: null,
+    contentHash: null,
     sessionKey: 'Hitl_MCP · master · a3f2',
     sessionLabel: 'master · a3f2',
     projectKey: 'Hitl_MCP',

@@ -138,6 +138,22 @@ fn badges_of(request: &Event) -> Badges {
     }
 }
 
+/// The hash of a spilled body, if there is one.
+///
+/// Read only off an `attachment` body: an inline body has no hash worth asking
+/// the archivist for, and handing one out would invite a fetch for bytes that
+/// are already in hand.
+fn content_hash_of(request: &Event) -> Option<String> {
+    let body = request.json().get("body")?.clone();
+    if body.get("kind").and_then(|v| v.as_str()) != Some("attachment") {
+        return None;
+    }
+    body.get("contentHash")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// One row of pane 2 — a header, and nothing else. No body, no controls: those
 /// are pane 3's job (spec §7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -162,6 +178,12 @@ pub struct MessageRow {
     pub responded_at: Option<u64>,
     pub context_snippet: Option<String>,
     pub badges: Badges,
+    /// The attachment's content hash, when the body spilled out of the
+    /// envelope. Carried on the row because it is the only handle the archivist
+    /// answers to (`GET /bodies/{hash}`), and a historical body is reachable by
+    /// nothing else once ntfy has expired the attachment. Pane 2 never renders
+    /// it — it is here so pane 3 can fetch without re-parsing the log.
+    pub content_hash: Option<String>,
     pub session_key: Option<String>,
     pub session_label: Option<String>,
     pub project_key: String,
@@ -199,6 +221,7 @@ fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
             responded_at: state.responded_at,
             context_snippet: context_snippet(request),
             badges: badges_of(request),
+            content_hash: content_hash_of(request),
             session_key: identity.as_ref().map(|i| i.session_key.clone()),
             session_label: identity.as_ref().map(|i| i.session_label.clone()),
             project_key: identity
@@ -951,6 +974,56 @@ mod tests {
     }
 
     #[test]
+    fn a_spilled_body_carries_the_hash_the_archivist_answers_to() {
+        // Without this the row knows a body exists and has no way to ask for
+        // it, which is the same as not knowing.
+        let events = [ev(
+            "ntfy-p1",
+            NOW,
+            r#"{"type":"plan_review","messageId":"p-1","displayPath":"a.md",
+                "body":{"kind":"attachment","contentHash":"sha256:ab","contentLength":9}}"#,
+        )];
+
+        let row = &build_list(&events, None, Some("all"), NOW).messages[0];
+        assert!(row.badges.attachment);
+        assert_eq!(row.content_hash.as_deref(), Some("sha256:ab"));
+    }
+
+    #[test]
+    fn an_inline_body_offers_no_hash_because_the_bytes_are_already_here() {
+        let events = [ev(
+            "ntfy-p1",
+            NOW,
+            r##"{"type":"plan_review","messageId":"p-1","displayPath":"a.md",
+                "body":{"kind":"inline","text":"# plan"}}"##,
+        )];
+
+        let row = &build_list(&events, None, Some("all"), NOW).messages[0];
+        assert!(!row.badges.attachment);
+        assert_eq!(row.content_hash, None);
+    }
+
+    #[test]
+    fn an_attachment_with_no_hash_is_none_rather_than_an_empty_string() {
+        // An empty hash would be requested from the archivist and 404 forever.
+        let events = [ev(
+            "ntfy-p1",
+            NOW,
+            r#"{"type":"plan_review","messageId":"p-1","displayPath":"a.md",
+                "body":{"kind":"attachment","contentHash":""}}"#,
+        )];
+
+        assert_eq!(build_list(&events, None, Some("all"), NOW).messages[0].content_hash, None);
+    }
+
+    #[test]
+    fn a_message_with_no_body_at_all_has_no_hash() {
+        let events = [question("q-1", NOW, "Hitl_MCP")];
+
+        assert_eq!(build_list(&events, None, Some("all"), NOW).messages[0].content_hash, None);
+    }
+
+    #[test]
     fn a_notification_is_titled_by_its_title_and_a_plan_review_by_its_display_path() {
         let events = [
             notification("n-1", NOW - MINUTE, "Build Complete"),
@@ -1389,6 +1462,7 @@ mod tests {
             [
                 "ageSeconds",
                 "badges",
+                "contentHash",
                 "contextSnippet",
                 "createdAt",
                 "glyph",
