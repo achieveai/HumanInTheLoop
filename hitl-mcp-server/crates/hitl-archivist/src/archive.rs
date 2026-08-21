@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use hitl_store::{Event, Store};
+use hitl_store::{BodyFailure, Event, FailureReason, Store};
 use hitl_transport::crypto;
 use hitl_transport::ntfy::subscribe::NtfyEvent;
 use hitl_transport::payload::sha256_hex;
@@ -138,6 +138,17 @@ impl Archive {
         self.store.lock().ok().and_then(|s| s.get_body(content_hash).ok().flatten())
     }
 
+    /// Test-only for the same reason as [`Archive::get_body`]: the consumer of
+    /// this distinction is the Inbox, which reads it off its own `Store`.
+    #[cfg(test)]
+    pub fn body_status(&self, content_hash: &str) -> hitl_store::BodyStatus {
+        self.store
+            .lock()
+            .ok()
+            .and_then(|s| s.body_status(content_hash).ok())
+            .unwrap_or(hitl_store::BodyStatus::Unattempted)
+    }
+
     /// Verify `cipher` against `expected_hash` and persist it.
     ///
     /// What gets stored is the **payload plaintext** — the `base64(gzip(json))`
@@ -162,8 +173,11 @@ impl Archive {
         expected_hash: &str,
         cipher: &str,
         key: Option<&str>,
+        ntfy_id: Option<&str>,
     ) -> BodyOutcome {
         if expected_hash.is_empty() {
+            // Nothing to key a failure row by, and nothing a reader could ever
+            // look up — the hash *is* the identity here.
             return self.fail(BodyOutcome::Failed(
                 "payload reference carries no contentHash to verify against".to_string(),
             ));
@@ -174,7 +188,16 @@ impl Archive {
 
         let plaintext = match plaintext_of(cipher, key) {
             Ok(p) => p,
-            Err(e) => return self.fail(BodyOutcome::Undecryptable(e)),
+            Err(e) => {
+                self.note(&BodyFailure {
+                    content_hash: expected_hash,
+                    reason: FailureReason::Undecryptable,
+                    actual_hash: None,
+                    detail: Some(e.as_str()),
+                    ntfy_id,
+                });
+                return self.fail(BodyOutcome::Undecryptable(e));
+            }
         };
 
         let actual = sha256_hex(&plaintext);
@@ -185,6 +208,17 @@ impl Archive {
                  under the claimed one."
             );
             let _ = self.put(&actual, plaintext.as_bytes());
+            let detail = format!(
+                "claimed {expected_hash}, {} bytes hash to {actual}",
+                plaintext.len()
+            );
+            self.note(&BodyFailure {
+                content_hash: expected_hash,
+                reason: FailureReason::Corrupt,
+                actual_hash: Some(actual.as_str()),
+                detail: Some(detail.as_str()),
+                ntfy_id,
+            });
             return self.fail(BodyOutcome::HashMismatch {
                 expected: expected_hash.to_string(),
                 actual,
@@ -194,9 +228,65 @@ impl Archive {
         match self.put(expected_hash, plaintext.as_bytes()) {
             Ok(()) => {
                 Stats::bump(&self.stats.bodies_stored);
+                // A body that turned up after a failure was recorded — a proxy
+                // that 404d during a restart, say. The bytes are here and
+                // verified, so the old explanation is now false.
+                self.clear_failure(expected_hash);
                 BodyOutcome::Stored
             }
+            // Deliberately not recorded as a body failure: the fetch worked and
+            // the bytes were right. The database is what is broken, and saying
+            // "this body is unrecoverable" would be both wrong and unwritable.
             Err(e) => self.fail(BodyOutcome::Failed(e)),
+        }
+    }
+
+    /// Record a body as gone before any fetch was spent on it.
+    ///
+    /// The two cases the sink can settle without touching the network: ntfy's
+    /// own `expires` has passed, or it sent no URL at all. Both are permanent,
+    /// and without a row here both would read as [`BodyStatus::Unattempted`] —
+    /// a body still on its way, which it very much is not.
+    ///
+    /// [`BodyStatus::Unattempted`]: hitl_store::BodyStatus::Unattempted
+    pub fn note_gone(&self, content_hash: &str, ntfy_id: &str, detail: &str) {
+        self.note(&BodyFailure {
+            content_hash,
+            reason: FailureReason::Gone,
+            actual_hash: None,
+            detail: Some(detail),
+            ntfy_id: Some(ntfy_id),
+        });
+    }
+
+    /// Whether reaching for this body again could only fail the same way.
+    ///
+    /// Durable, and that is the point: the startup poll replays ntfy's whole
+    /// cache on every boot, so an in-process set would re-fetch a body known to
+    /// be corrupt once per restart for as long as its event stays cached.
+    pub fn body_failed(&self, content_hash: &str) -> bool {
+        self.store
+            .lock()
+            .ok()
+            .and_then(|s| s.body_failed(content_hash).ok())
+            .unwrap_or(false)
+    }
+
+    fn note(&self, failure: &BodyFailure<'_>) {
+        let Ok(store) = self.store.lock() else {
+            log::error!("archive lock poisoned; cannot record why a body is missing");
+            return;
+        };
+        if let Err(e) = store.record_body_failure(failure) {
+            // Not fatal. The body is lost either way; this only costs a reader
+            // the explanation, and stopping ingest over it would cost far more.
+            log::error!("could not record body failure for {}: {e}", failure.content_hash);
+        }
+    }
+
+    fn clear_failure(&self, content_hash: &str) {
+        if let Ok(store) = self.store.lock() {
+            let _ = store.clear_body_failure(content_hash);
         }
     }
 
@@ -258,7 +348,7 @@ mod tests {
         let hash = &encoded.payload_ref.content_hash;
 
         assert_eq!(
-            archive.capture_body(hash, &encoded.cipher, Some(KEY)),
+            archive.capture_body(hash, &encoded.cipher, Some(KEY), Some("ntfy-t")),
             BodyOutcome::Stored
         );
         assert!(archive.has_body(hash));
@@ -274,7 +364,7 @@ mod tests {
         let encoded = encode_payload(&body(), Some(KEY)).unwrap();
         let hash = &encoded.payload_ref.content_hash;
 
-        archive.capture_body(hash, &encoded.cipher, Some(KEY));
+        archive.capture_body(hash, &encoded.cipher, Some(KEY), Some("ntfy-t"));
         let stored = archive.get_body(hash).expect("body must be held");
 
         assert_eq!(sha256_hex(&String::from_utf8(stored).unwrap()), *hash);
@@ -286,7 +376,7 @@ mod tests {
         let encoded = encode_payload(&body(), None).unwrap();
 
         assert_eq!(
-            archive.capture_body(&encoded.payload_ref.content_hash, &encoded.cipher, None),
+            archive.capture_body(&encoded.payload_ref.content_hash, &encoded.cipher, None, Some("ntfy-t")),
             BodyOutcome::Stored
         );
     }
@@ -300,7 +390,7 @@ mod tests {
         let encoded = encode_payload(&body(), None).unwrap();
 
         assert_eq!(
-            archive.capture_body(&encoded.payload_ref.content_hash, &encoded.cipher, Some(KEY)),
+            archive.capture_body(&encoded.payload_ref.content_hash, &encoded.cipher, Some(KEY), Some("ntfy-t")),
             BodyOutcome::Stored
         );
     }
@@ -314,7 +404,7 @@ mod tests {
         let encoded = encode_payload(&body(), None).unwrap();
         let claimed = "0".repeat(64);
 
-        let outcome = archive.capture_body(&claimed, &encoded.cipher, None);
+        let outcome = archive.capture_body(&claimed, &encoded.cipher, None, Some("ntfy-t"));
 
         assert!(matches!(outcome, BodyOutcome::HashMismatch { .. }), "{outcome:?}");
         assert!(!archive.has_body(&claimed), "the claimed hash must miss");
@@ -328,7 +418,7 @@ mod tests {
         let encoded = encode_payload(&body(), None).unwrap();
         let actual_hash = sha256_hex(&encoded.cipher);
 
-        let outcome = archive.capture_body(&"0".repeat(64), &encoded.cipher, None);
+        let outcome = archive.capture_body(&"0".repeat(64), &encoded.cipher, None, Some("ntfy-t"));
 
         assert_eq!(
             outcome,
@@ -347,7 +437,7 @@ mod tests {
         let encoded = encode_payload(&body(), Some(KEY)).unwrap();
 
         let outcome =
-            archive.capture_body(&encoded.payload_ref.content_hash, &encoded.cipher, None);
+            archive.capture_body(&encoded.payload_ref.content_hash, &encoded.cipher, None, Some("ntfy-t"));
 
         assert!(matches!(outcome, BodyOutcome::Undecryptable(_)), "{outcome:?}");
         assert!(!archive.has_body(&encoded.payload_ref.content_hash));
@@ -358,7 +448,7 @@ mod tests {
     fn a_reference_with_no_hash_is_refused_rather_than_stored_unverified() {
         let archive = Archive::in_memory().unwrap();
 
-        let outcome = archive.capture_body("", "whatever", None);
+        let outcome = archive.capture_body("", "whatever", None, Some("ntfy-t"));
 
         assert!(matches!(outcome, BodyOutcome::Failed(_)), "{outcome:?}");
         assert_eq!(archive.stats.snapshot().2, 1);
@@ -370,9 +460,9 @@ mod tests {
         let encoded = encode_payload(&body(), None).unwrap();
         let hash = &encoded.payload_ref.content_hash;
 
-        archive.capture_body(hash, &encoded.cipher, None);
+        archive.capture_body(hash, &encoded.cipher, None, Some("ntfy-t"));
         assert_eq!(
-            archive.capture_body(hash, &encoded.cipher, None),
+            archive.capture_body(hash, &encoded.cipher, None, Some("ntfy-t")),
             BodyOutcome::AlreadyHeld
         );
         assert_eq!(archive.stats.snapshot().1, 1, "stored once, not twice");

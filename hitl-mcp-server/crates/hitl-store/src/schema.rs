@@ -14,10 +14,18 @@
 
 use rusqlite::{Connection, Result};
 
-/// Bumped whenever the DDL below changes. `PRAGMA user_version` is read on
-/// every open, so a database written by an older build is migrated exactly
-/// once rather than re-created or silently mis-read.
-pub const SCHEMA_VERSION: i64 = 1;
+/// The migration steps, oldest first. Index *n* takes a database at version
+/// *n* to version *n + 1*, so a fresh database runs all of them and one written
+/// by an older build runs only the tail it has not seen.
+///
+/// **Append only. Never edit a step that has shipped** — an existing database
+/// has already run it and will never run it again, so a change here reaches
+/// only new installs and silently forks the schema in two.
+const MIGRATIONS: &[&str] = &[DDL_V1, DDL_V2];
+
+/// Derived from [`MIGRATIONS`] rather than maintained by hand, because the one
+/// way this scheme breaks is a step added without the version bumped to match.
+pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
 const DDL_V1: &str = r#"
 -- Layer 1: the log. Append-only. Never updated.
@@ -74,14 +82,50 @@ CREATE TABLE IF NOT EXISTS summaries (
 );
 "#;
 
+/// v2: why a referenced body is *not* in `bodies`.
+///
+/// Without this table all four fates collapse into `get_body() -> None`:
+/// verified-and-held, fetched-but-corrupt, gone from the server, and never
+/// attempted. Only the first is distinguishable, and the remaining three are
+/// the ones an operator actually needs to tell apart — "the plan is corrupt"
+/// and "the plan is still coming" call for opposite reactions.
+///
+/// Durable rather than a projection, for the same reason `bodies` is: the log
+/// cannot regenerate it. Replaying `events` re-derives what was *referenced*,
+/// never what happened when we reached for it.
+///
+/// Keyed by the hash the message **claimed**, which is the name every consumer
+/// looks a body up by. On a mismatch that is deliberately not the hash the
+/// bytes have — `actual_hash` points at where the quarantined bytes actually
+/// landed.
+const DDL_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS body_failures (
+  content_hash TEXT PRIMARY KEY,  -- the hash the message claimed
+  reason       TEXT NOT NULL,     -- 'corrupt' | 'gone' | 'undecryptable'
+  actual_hash  TEXT,              -- 'corrupt' only: where the bytes were quarantined
+  detail       TEXT,              -- for a human reading a log, not for branching on
+  ntfy_id      TEXT,              -- the event that referenced it, for tracing
+  at           INTEGER NOT NULL   -- wall clock, DIAGNOSTIC ONLY: see failures.rs
+);
+"#;
+
 /// Bring `conn` up to [`SCHEMA_VERSION`], doing nothing when it is already there.
+///
+/// Each step is idempotent on its own (`IF NOT EXISTS` throughout), which is
+/// what makes an interrupted migration safe: `user_version` is bumped only
+/// after every step has run, so a process killed midway simply re-runs the
+/// steps on the next open and finishes the job.
 pub fn migrate(conn: &Connection) -> Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if current >= SCHEMA_VERSION {
+        // Also the guard for a database written by a *newer* build: leave it
+        // alone rather than run steps against a shape we do not know.
         return Ok(());
     }
 
-    conn.execute_batch(DDL_V1)?;
+    for step in &MIGRATIONS[current.max(0) as usize..] {
+        conn.execute_batch(step)?;
+    }
     // No parameter binding on a PRAGMA, hence the format. SCHEMA_VERSION is a
     // compile-time constant, so there is nothing here for a caller to inject.
     conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
@@ -107,7 +151,9 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
 
-        for table in ["events", "messages", "sessions", "projects", "bodies", "summaries"] {
+        for table in
+            ["events", "messages", "sessions", "projects", "bodies", "summaries", "body_failures"]
+        {
             let found: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -126,6 +172,96 @@ mod tests {
             )
             .unwrap();
         assert_eq!(index, 1, "idx_events_subject must exist");
+    }
+
+    /// A database exactly as a v1 build left it: v1's DDL, v1's `user_version`,
+    /// and no knowledge of anything since. Built from [`DDL_V1`] itself so it
+    /// cannot drift away from what actually shipped.
+    fn a_v1_database() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(DDL_V1).unwrap();
+        conn.execute_batch("PRAGMA user_version = 1").unwrap();
+        conn
+    }
+
+    #[test]
+    fn a_v1_database_gains_the_new_table_without_losing_what_it_held() {
+        // The upgrade path, which a fresh-create test cannot exercise: every
+        // database in the field arrives here, not at `CREATE`. Data loss on
+        // this path is silent and permanent — `events` is the only copy.
+        let conn = a_v1_database();
+        conn.execute(
+            "INSERT INTO events (ntfy_id, ntfy_time, message_id, type, subject_id, payload)
+             VALUES ('n-1', 1, 'm-1', 'question', 'm-1', '{\"kept\":true}')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO bodies VALUES ('sha-1', x'01020304')", []).unwrap();
+
+        migrate(&conn).unwrap();
+
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION, "the step must be recorded, or it repeats forever");
+
+        conn.execute_batch("INSERT INTO body_failures (content_hash, reason, at) VALUES ('h','gone',1)")
+            .expect("v2's table must exist after the upgrade");
+
+        let payload: String =
+            conn.query_row("SELECT payload FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(payload, "{\"kept\":true}", "the log must survive the migration");
+        let body: Vec<u8> =
+            conn.query_row("SELECT bytes FROM bodies", [], |r| r.get(0)).unwrap();
+        assert_eq!(body, vec![1, 2, 3, 4], "and so must the unrecoverable bytes");
+    }
+
+    #[test]
+    fn upgrading_lands_on_the_same_shape_as_creating_from_scratch() {
+        // The property that keeps migrated and fresh databases from diverging:
+        // two builds of the same version must agree on the schema regardless of
+        // which path a database took to get there.
+        let upgraded = a_v1_database();
+        migrate(&upgraded).unwrap();
+
+        let fresh = Connection::open_in_memory().unwrap();
+        migrate(&fresh).unwrap();
+
+        assert_eq!(schema_of(&upgraded), schema_of(&fresh));
+    }
+
+    fn schema_of(conn: &Connection) -> Vec<(String, String)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, COALESCE(sql, '') FROM sqlite_master
+                 WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        rows
+    }
+
+    #[test]
+    fn a_database_from_a_newer_build_is_left_alone() {
+        // Downgrade: an older binary must not run its steps against a shape it
+        // does not know, and must not stamp the version back down.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 5)).unwrap();
+
+        migrate(&conn).unwrap();
+
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION + 5);
+    }
+
+    #[test]
+    fn the_version_counts_the_steps() {
+        // The bump this scheme is most likely to be forgotten on: adding a step
+        // without moving the version leaves existing databases un-migrated.
+        assert_eq!(SCHEMA_VERSION, MIGRATIONS.len() as i64);
+        assert_eq!(SCHEMA_VERSION, 2, "v2 adds body_failures");
     }
 
     #[test]

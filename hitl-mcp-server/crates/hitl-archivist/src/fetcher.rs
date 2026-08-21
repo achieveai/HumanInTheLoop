@@ -30,17 +30,22 @@
 //! Because the poll replays the whole cache on every boot, a body that can
 //! never be fetched would be re-attempted on every boot for as long as its
 //! event stays cached — and that window is exactly what the user is lengthening.
-//! Two bounds stop it, and neither needs a schema change:
+//! Two bounds stop it, at two different distances:
 //!
 //! 1. [`crate::sink`] refuses to queue an attachment whose `expires` has
-//!    passed, so a dead URL is never fetched even once.
-//! 2. [`GivenUp`] below drops a hash for the rest of the run once a fetch fails
-//!    in a way a retry cannot fix.
+//!    passed, so a URL ntfy has already dropped is never fetched even once.
+//!    Cheap, and it needs no history — the verdict comes from ntfy itself.
+//! 2. `body_failures` stops a hash that has already failed in a way a retry
+//!    cannot fix. This one has to be *durable*, because the case it catches is
+//!    exactly the one the first bound cannot see: an attachment still well
+//!    inside its expiry whose bytes are corrupt. Its URL stays live, so the
+//!    expiry gate waves it through on every boot, and an in-process set forgets
+//!    it the moment the daemon is closed at logout — which is routinely.
 //!
-//! A *transient* failure is deliberately not given up on: it stays queueable,
+//! A *transient* failure is deliberately recorded nowhere: it stays queueable,
 //! so the next reconnect or restart tries it again while the attachment lives.
+//! Only a verdict a retry cannot overturn is written down.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -51,24 +56,6 @@ use hitl_transport::payload::PayloadError;
 
 use crate::archive::{Archive, BodyOutcome};
 use crate::sink::BodyJob;
-
-/// Hashes this run has stopped trying, and why it is safe to.
-///
-/// In-process only, and that is the right scope: the cross-boot bound is the
-/// expiry check in the sink, which is authoritative because it comes from ntfy.
-/// Persisting give-up state would need a table `hitl-store` does not have.
-#[derive(Default)]
-pub struct GivenUp(HashSet<String>);
-
-impl GivenUp {
-    pub fn should_attempt(&self, content_hash: &str) -> bool {
-        !self.0.contains(content_hash)
-    }
-
-    pub fn give_up(&mut self, content_hash: &str) {
-        self.0.insert(content_hash.to_string());
-    }
-}
 
 /// Whether re-running this fetch could ever produce a different answer.
 ///
@@ -86,25 +73,21 @@ pub async fn run(
     mut jobs: UnboundedReceiver<BodyJob>,
     encryption_key: Option<String>,
 ) {
-    let mut given_up = GivenUp::default();
-
     while let Some(job) = jobs.recv().await {
-        fetch_one(&archive, &job, encryption_key.as_deref(), &mut given_up).await;
+        fetch_one(&archive, &job, encryption_key.as_deref()).await;
     }
     log::info!("body fetcher stopped: no sink is sending any more");
 }
 
-async fn fetch_one(
-    archive: &Archive,
-    job: &BodyJob,
-    key: Option<&str>,
-    given_up: &mut GivenUp,
-) {
+async fn fetch_one(archive: &Archive, job: &BodyJob, key: Option<&str>) {
     if archive.has_body(&job.content_hash) {
         return;
     }
-    if !given_up.should_attempt(&job.content_hash) {
-        log::debug!("not retrying {} this run", job.content_hash);
+    // Survives the restart that an in-process set would not, which matters
+    // because every restart replays the cache that queued this in the first
+    // place. `capture_body` clears the row if the bytes ever do turn up.
+    if archive.body_failed(&job.content_hash) {
+        log::debug!("{} already failed in a way a retry cannot fix", job.content_hash);
         return;
     }
 
@@ -112,16 +95,17 @@ async fn fetch_one(
         Ok(bytes) => bytes,
         Err(e) => {
             if is_permanent(&e) {
-                given_up.give_up(&job.content_hash);
                 log::warn!(
                     "attachment for {} is gone from the server ({e}); it will not be retried — \
                      that body is unrecoverable",
                     job.content_hash
                 );
+                archive.note_gone(&job.content_hash, &job.ntfy_id, &format!("{e}"));
             } else {
-                // Left queueable on purpose: the next reconnect or restart
+                // Recorded nowhere on purpose: the next reconnect or restart
                 // replays the cache and tries again, and the attachment may
-                // still be there.
+                // still be there. Writing a row here would abandon a body that
+                // is merely late.
                 log::warn!(
                     "could not fetch attachment for {} ({e}); will retry on the next replay",
                     job.content_hash
@@ -131,18 +115,11 @@ async fn fetch_one(
         }
     };
 
-    match archive.capture_body(&job.content_hash, &cipher, key) {
+    // `capture_body` writes the failure row itself for a mismatch or a missing
+    // key — it is the only place that knows which, and what the bytes hashed to.
+    match archive.capture_body(&job.content_hash, &cipher, key, Some(&job.ntfy_id)) {
         BodyOutcome::Stored => log::info!("captured attachment body {}", job.content_hash),
         BodyOutcome::AlreadyHeld => {}
-        // Re-fetching cannot change either of these: the bytes on the server
-        // are what they are, and a key absent now is absent for the run.
-        other @ (BodyOutcome::HashMismatch { .. } | BodyOutcome::Undecryptable(_)) => {
-            given_up.give_up(&job.content_hash);
-            log::error!(
-                "attachment body {} not captured: {other:?} — not retrying this run",
-                job.content_hash
-            );
-        }
         other => log::error!("attachment body {} not captured: {other:?}", job.content_hash),
     }
 }
@@ -153,13 +130,36 @@ mod tests {
 
     #[test]
     fn a_hash_is_attempted_until_it_is_given_up_on() {
-        let mut given_up = GivenUp::default();
-        assert!(given_up.should_attempt("sha-1"));
+        let archive = Archive::in_memory().unwrap();
+        assert!(!archive.body_failed("sha-1"), "nothing is given up on to begin with");
 
-        given_up.give_up("sha-1");
+        archive.note_gone("sha-1", "ntfy-1", "404 from the server");
 
-        assert!(!given_up.should_attempt("sha-1"), "a dead fetch must not repeat");
-        assert!(given_up.should_attempt("sha-2"), "and must not block anything else");
+        assert!(archive.body_failed("sha-1"), "a dead fetch must not repeat");
+        assert!(!archive.body_failed("sha-2"), "and must not block anything else");
+    }
+
+    #[test]
+    fn a_body_that_arrives_after_a_failure_becomes_fetchable_again() {
+        // The row is a bound on retrying, not a tombstone. A transient error
+        // that looked permanent once must not lock the body out forever.
+        let archive = Archive::in_memory().unwrap();
+        let encoded =
+            hitl_transport::payload::encode_payload(&plan_body(), None).unwrap();
+        let hash = &encoded.payload_ref.content_hash;
+        archive.note_gone(hash, "ntfy-1", "404 during a proxy restart");
+        assert!(archive.body_failed(hash));
+
+        archive.capture_body(hash, &encoded.cipher, None, Some("ntfy-1"));
+
+        assert!(!archive.body_failed(hash), "the bytes are here; the explanation is stale");
+    }
+
+    fn plan_body() -> hitl_transport::types::PlanReviewBody {
+        hitl_transport::types::PlanReviewBody {
+            content: "# Plan\n".to_string(),
+            diff: String::new(),
+        }
     }
 
     #[test]

@@ -25,6 +25,10 @@ use crate::archive::Archive;
 pub struct BodyJob {
     pub url: String,
     pub content_hash: String,
+    /// Carried so that a failure recorded by the fetcher can name the event
+    /// that referenced the body. The fetch happens on another task, long after
+    /// the envelope that produced it is out of scope.
+    pub ntfy_id: String,
 }
 
 /// Slack on the expiry comparison.
@@ -106,8 +110,12 @@ impl ArchivistSink {
         match body.get("kind").and_then(|v| v.as_str()) {
             Some("inline") => {
                 if let Some(data) = body.get("data").and_then(|v| v.as_str()) {
-                    self.archive
-                        .capture_body(content_hash, data, self.encryption_key.as_deref());
+                    self.archive.capture_body(
+                        content_hash,
+                        data,
+                        self.encryption_key.as_deref(),
+                        Some(&event.id),
+                    );
                 }
             }
             Some("attachment") => {
@@ -124,6 +132,11 @@ impl ArchivistSink {
                          attachment URL; that body is unrecoverable",
                         event.id
                     );
+                    self.archive.note_gone(
+                        content_hash,
+                        &event.id,
+                        "the message declared an attachment body but ntfy sent no URL",
+                    );
                     return;
                 };
 
@@ -138,6 +151,14 @@ impl ArchivistSink {
                         "attachment for {content_hash} expired at {:?}; not fetching",
                         attachment.expires
                     );
+                    // The most common permanent loss there is, and the one most
+                    // easily mistaken for a body still on its way. Recorded so
+                    // a reader is told "gone" rather than left waiting.
+                    self.archive.note_gone(
+                        content_hash,
+                        &event.id,
+                        &format!("ntfy dropped the attachment at {:?}", attachment.expires),
+                    );
                     return;
                 }
 
@@ -147,6 +168,7 @@ impl ArchivistSink {
                     .send(BodyJob {
                         url,
                         content_hash: content_hash.to_string(),
+                        ntfy_id: event.id.clone(),
                     })
                     .is_err()
                 {
@@ -218,6 +240,7 @@ impl NtfySink for ArchivistSink {
 mod tests {
     use super::*;
 
+    use hitl_store::BodyStatus;
     use hitl_transport::payload::encode_payload;
     use hitl_transport::types::PlanReviewBody;
     use tokio::sync::mpsc;
@@ -438,6 +461,7 @@ mod tests {
             Some(BodyJob {
                 url: "https://n/file/p.bin".to_string(),
                 content_hash: body_ref.content_hash.clone(),
+                ntfy_id: "ntfy-1".to_string(),
             }),
             "the fetch must be raised by the act of ingesting, not by a later read"
         );
@@ -455,7 +479,7 @@ mod tests {
 
         assert_eq!(
             h.archive
-                .capture_body(&body_ref.content_hash, &encoded.cipher, None),
+                .capture_body(&body_ref.content_hash, &encoded.cipher, None, Some("ntfy-t")),
             BodyOutcome::Stored
         );
         h.sink.on_event(
@@ -524,6 +548,7 @@ mod tests {
             Some(BodyJob {
                 url: "https://n/file/p.bin".to_string(),
                 content_hash: body_ref.content_hash.clone(),
+                ntfy_id: "ntfy-1".to_string(),
             }),
             "a body that never landed must be retried on the next start"
         );
@@ -539,7 +564,7 @@ mod tests {
         body_ref.kind = "attachment".to_string();
         body_ref.data = None;
         h.archive
-            .capture_body(&body_ref.content_hash, &encoded.cipher, None);
+            .capture_body(&body_ref.content_hash, &encoded.cipher, None, Some("ntfy-t"));
 
         h.sink.on_event(
             &attached("ntfy-1", 1, "https://n/file/p.bin", Some(far_ahead())),
@@ -616,5 +641,122 @@ mod tests {
 
         assert_eq!(h.jobs.try_recv().ok(), None);
         assert_eq!(h.archive.count_events().unwrap(), 1, "the event is still recorded");
+    }
+
+    // --- Saying *why* a body is missing (spec 8.3) ---
+
+    #[test]
+    fn an_expired_attachment_is_recorded_as_gone_not_left_looking_unattempted() {
+        // The most common permanent loss there is. Without a row, a reader sees
+        // exactly what it sees for a body still in flight, and waits forever
+        // for something ntfy deleted hours ago.
+        let h = harness(None);
+        let mut body_ref = encode_payload(&plan_body(), None).unwrap().payload_ref;
+        body_ref.kind = "attachment".to_string();
+        body_ref.data = None;
+
+        h.sink.on_event(
+            &attached("ntfy-1", 1, "https://n/file/p.bin", Some(long_ago())),
+            &plan_review_message(&body_ref),
+        );
+
+        assert!(
+            matches!(h.archive.body_status(&body_ref.content_hash), BodyStatus::Gone { .. }),
+            "an expired attachment must read as gone"
+        );
+    }
+
+    #[test]
+    fn an_attachment_with_no_url_is_recorded_as_gone() {
+        // Unrecoverable and never becoming recoverable, so it is a verdict, not
+        // a pending fetch.
+        let h = harness(None);
+        let mut body_ref = encode_payload(&plan_body(), None).unwrap().payload_ref;
+        body_ref.kind = "attachment".to_string();
+        body_ref.data = None;
+
+        h.sink
+            .on_event(&event("ntfy-1", 1), &plan_review_message(&body_ref));
+
+        assert!(matches!(
+            h.archive.body_status(&body_ref.content_hash),
+            BodyStatus::Gone { .. }
+        ));
+    }
+
+    #[test]
+    fn a_body_still_in_flight_is_not_recorded_as_failed() {
+        // The counterpart, and the one that would do real damage if it broke:
+        // a queued fetch must leave no verdict behind, or a body that is merely
+        // late is written off before it has been tried once.
+        let h = harness(None);
+        let mut body_ref = encode_payload(&plan_body(), None).unwrap().payload_ref;
+        body_ref.kind = "attachment".to_string();
+        body_ref.data = None;
+
+        h.sink.on_event(
+            &attached("ntfy-1", 1, "https://n/file/p.bin", Some(far_ahead())),
+            &plan_review_message(&body_ref),
+        );
+
+        assert_eq!(
+            h.archive.body_status(&body_ref.content_hash),
+            BodyStatus::Unattempted,
+            "queued is not failed"
+        );
+        assert!(!h.archive.body_failed(&body_ref.content_hash), "and must stay fetchable");
+    }
+
+    #[test]
+    fn a_corrupt_inline_body_reads_as_corrupt_and_names_where_the_bytes_went() {
+        // Corruption and expiry are opposite problems — one means the bytes on
+        // the server are wrong, the other that there are none. Before the
+        // failure table both were `get_body() -> None`.
+        let h = harness(None);
+        let encoded = encode_payload(&plan_body(), None).unwrap();
+        let mut body_ref = encoded.payload_ref.clone();
+        let claimed = "0".repeat(64);
+        body_ref.content_hash = claimed.clone();
+
+        h.sink
+            .on_event(&event("ntfy-1", 1), &plan_review_message(&body_ref));
+
+        let BodyStatus::Corrupt { actual_hash, .. } = h.archive.body_status(&claimed) else {
+            panic!("a body whose bytes do not match its hash must read as corrupt");
+        };
+        let actual = actual_hash.expect("diagnosis needs to know where the bytes went");
+        assert!(h.archive.has_body(&actual), "and the quarantined bytes must be there");
+        assert!(!h.archive.has_body(&claimed), "while the claimed hash still misses");
+    }
+
+    #[test]
+    fn a_body_this_machine_has_no_key_for_is_distinguishable_from_a_lost_one() {
+        // Actionable in a way the others are not: the bytes are fine and the
+        // operator is one config line from reading them. Reporting it as
+        // "gone" would send them looking for a problem that is not there.
+        let h = harness(None);
+        let encoded = encode_payload(&plan_body(), Some(KEY)).unwrap();
+
+        h.sink
+            .on_event(&event("ntfy-1", 1), &plan_review_message(&encoded.payload_ref));
+
+        assert!(matches!(
+            h.archive.body_status(&encoded.payload_ref.content_hash),
+            BodyStatus::Undecryptable { .. }
+        ));
+    }
+
+    #[test]
+    fn a_captured_body_leaves_no_failure_behind() {
+        let h = harness(None);
+        let encoded = encode_payload(&plan_body(), None).unwrap();
+
+        h.sink
+            .on_event(&event("ntfy-1", 1), &plan_review_message(&encoded.payload_ref));
+
+        assert_eq!(
+            h.archive.body_status(&encoded.payload_ref.content_hash),
+            BodyStatus::Verified
+        );
     }
 }

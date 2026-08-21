@@ -17,6 +17,7 @@
 
 pub mod bodies;
 pub mod events;
+pub mod failures;
 pub mod fold;
 pub mod project;
 pub mod schema;
@@ -26,6 +27,7 @@ use std::path::Path;
 use rusqlite::Connection;
 
 pub use events::Event;
+pub use failures::{BodyFailure, BodyStatus, FailureReason};
 pub use fold::{fold, MessageState, Status, Verdict};
 
 pub type Result<T> = rusqlite::Result<T>;
