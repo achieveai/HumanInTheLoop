@@ -10,5 +10,10 @@
 pub mod chunking;
 pub mod config;
 pub mod crypto;
+pub mod ntfy;
 pub mod payload;
+pub mod status;
 pub mod types;
+
+pub use ntfy::NtfySink;
+pub use status::ConnectionStatus;

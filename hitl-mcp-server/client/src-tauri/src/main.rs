@@ -120,10 +120,10 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(payload_store::PayloadStore::default())
-        .manage(ntfy::AckWaiters::default())
-        .manage(ntfy::OutstandingReviews::default())
-        .manage(ntfy::SenderIdentityCacheState::default())
-        .manage(tray::AppState::default())
+        .manage(hitl_transport::ntfy::review::AckWaiters::default())
+        .manage(hitl_transport::ntfy::review::OutstandingReviews::default())
+        .manage(hitl_transport::ntfy::identity::SenderIdentityCacheState::default())
+        .manage(hitl_transport::ConnectionStatus::default())
         .invoke_handler(tauri::generate_handler![
             submit_answer,
             submit_plan_review,
