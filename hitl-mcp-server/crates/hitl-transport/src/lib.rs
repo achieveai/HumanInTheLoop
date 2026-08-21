@@ -15,6 +15,7 @@ pub mod ntfy;
 pub mod payload;
 pub mod status;
 pub mod types;
+pub mod url;
 
 pub use ntfy::NtfySink;
 pub use status::ConnectionStatus;
