@@ -222,4 +222,158 @@ mod tests {
 
         assert_eq!(s.get_body("sha256:aaaa").unwrap().as_deref(), Some(&b"original"[..]));
     }
+
+    // --- What `capture_body` writes down when there is nothing to store ---
+    //
+    // Two binaries call this now, each through a wrapper of its own, and each
+    // wrapper's tests assert what *it* returns. The row underneath is what a
+    // reader actually renders from, and until these it was only ever checked
+    // second-hand — through `body_status`, which decodes it, or through a
+    // caller, which could stop looking without anything failing.
+    //
+    // `gone` is deliberately absent below: it is not a `capture_body` outcome.
+    // Nothing this function can observe means "ntfy dropped the bytes" — that
+    // verdict is reached before a fetch is spent (an expiry that has passed, or
+    // no URL at all) or by a 404 afterwards, and both callers record it by
+    // calling `record_body_failure` directly. `failures.rs` covers that path.
+
+    use crate::BodyStatus;
+    use hitl_transport::payload::encode_payload;
+    use hitl_transport::types::PlanReviewBody;
+
+    const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    fn plan() -> PlanReviewBody {
+        PlanReviewBody {
+            content: "# Plan\n\nship it\n".to_string(),
+            diff: "@@ -0,0 +1 @@\n+ship it\n".to_string(),
+        }
+    }
+
+    /// `(reason, actual_hash, detail, ntfy_id)` — the four columns a reader
+    /// renders from, in the order they are asserted below.
+    type FailureRow = (String, Option<String>, Option<String>, Option<String>);
+
+    /// The `body_failures` row as written, not as `body_status` decodes it.
+    fn row(s: &Store, content_hash: &str) -> Option<FailureRow> {
+        s.conn
+            .query_row(
+                "SELECT reason, actual_hash, detail, ntfy_id FROM body_failures WHERE content_hash = ?1",
+                params![content_hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    fn rows(s: &Store) -> i64 {
+        s.conn
+            .query_row("SELECT count(*) FROM body_failures", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_hash_mismatch_writes_the_row_a_reader_needs_to_diagnose_it() {
+        // `actual_hash` is the whole value of this row: it is where the bytes
+        // were quarantined, and without it "corrupt" is an accusation with no
+        // evidence attached and nowhere to go looking.
+        let s = Store::open_in_memory().unwrap();
+        let encoded = encode_payload(&plan(), None).unwrap();
+        let claimed = "0".repeat(64);
+        let actual = sha256_hex(&encoded.cipher);
+
+        let outcome = s.capture_body(&claimed, &encoded.cipher, None, Some("ntfy-7"));
+
+        assert_eq!(
+            outcome,
+            CaptureOutcome::HashMismatch {
+                expected: claimed.clone(),
+                actual: actual.clone(),
+            }
+        );
+        let (reason, actual_hash, detail, ntfy_id) = row(&s, &claimed).expect("a row must be written");
+        assert_eq!(reason, "corrupt", "the string `decode_status` matches on");
+        assert_eq!(actual_hash.as_deref(), Some(actual.as_str()), "where the bytes went");
+        assert_eq!(
+            detail.as_deref(),
+            Some(
+                format!(
+                    "claimed {claimed}, {} bytes hash to {actual}",
+                    encoded.cipher.len()
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(ntfy_id.as_deref(), Some("ntfy-7"), "so an operator can find the event");
+        // And the two halves of the quarantine, which the row is only half of.
+        assert!(!s.has_body(&claimed).unwrap(), "nothing under the claimed hash");
+        assert!(s.has_body(&actual).unwrap(), "the bytes survive for diagnosis");
+    }
+
+    #[test]
+    fn a_body_this_machine_cannot_decrypt_writes_a_row_that_names_the_key() {
+        // Not `corrupt`, and emphatically not `gone`: the bytes on the server
+        // are fine and the operator is one config line from reading them.
+        // `actual_hash` is `None` because nothing was ever hashed — there is no
+        // plaintext to hash, which is precisely the complaint.
+        let s = Store::open_in_memory().unwrap();
+        let encoded = encode_payload(&plan(), Some(KEY)).unwrap();
+        let hash = &encoded.payload_ref.content_hash;
+
+        let outcome = s.capture_body(hash, &encoded.cipher, None, Some("ntfy-8"));
+
+        assert!(matches!(outcome, CaptureOutcome::Undecryptable(_)), "{outcome:?}");
+        let (reason, actual_hash, detail, ntfy_id) = row(&s, hash).expect("a row must be written");
+        assert_eq!(reason, "undecryptable");
+        assert_eq!(actual_hash, None, "nothing was hashed, so nothing was quarantined");
+        assert_eq!(
+            detail.as_deref(),
+            Some("payload is encrypted but no encryptionKey is configured")
+        );
+        assert_eq!(ntfy_id.as_deref(), Some("ntfy-8"));
+        assert!(!s.has_body(hash).unwrap(), "and nothing unverified is stored");
+    }
+
+    #[test]
+    fn a_reference_with_no_hash_writes_no_row_at_all() {
+        // The one refusal that must stay silent. An empty hash is not a body
+        // that failed; it is a row keyed by nothing, which no reader could ever
+        // look up and which would sit in the table forever bounding a retry of
+        // something that was never identified in the first place.
+        let s = Store::open_in_memory().unwrap();
+
+        let outcome = s.capture_body("", "whatever bytes", None, Some("ntfy-9"));
+
+        assert!(matches!(outcome, CaptureOutcome::Failed(_)), "{outcome:?}");
+        assert_eq!(rows(&s), 0, "an unidentifiable body must not be written down");
+        assert!(!s.body_failed("").unwrap());
+    }
+
+    #[test]
+    fn a_body_that_verifies_retracts_the_explanation_left_by_an_earlier_attempt() {
+        // A transient failure can look permanent once — a proxy that 404s
+        // during a restart, say. The retry that succeeds must clear the row, or
+        // the message reads "gone" forever with the good bytes sitting beside
+        // it, and `body_failed` keeps blocking a fetch that has already worked.
+        let s = Store::open_in_memory().unwrap();
+        let encoded = encode_payload(&plan(), None).unwrap();
+        let hash = &encoded.payload_ref.content_hash;
+        s.record_body_failure(&BodyFailure {
+            content_hash: hash,
+            reason: FailureReason::Gone,
+            actual_hash: None,
+            detail: Some("404 during a proxy restart"),
+            ntfy_id: Some("ntfy-1"),
+        })
+        .unwrap();
+
+        assert_eq!(
+            s.capture_body(hash, &encoded.cipher, None, Some("ntfy-1")),
+            CaptureOutcome::Stored
+        );
+
+        assert_eq!(row(&s, hash), None, "the old explanation is now false");
+        assert_eq!(s.body_status(hash).unwrap(), BodyStatus::Verified);
+        assert!(!s.body_failed(hash).unwrap(), "and it is fetchable again");
+    }
 }
