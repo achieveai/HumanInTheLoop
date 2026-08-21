@@ -1523,6 +1523,7 @@ dependencies = [
  "dirs 5.0.1",
  "flate2",
  "futures-util",
+ "hitl-transport",
  "hostname",
  "log",
  "reqwest 0.12.28",
@@ -1538,6 +1539,25 @@ dependencies = [
  "uuid",
  "windows 0.61.3",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "hitl-transport"
+version = "2.11.3"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "dirs 5.0.1",
+ "flate2",
+ "futures-util",
+ "hostname",
+ "log",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

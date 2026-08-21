@@ -1,22 +1,19 @@
 #![windows_subsystem = "windows"]
 
-mod chunking;
-mod config;
-mod crypto;
 mod drafts;
 mod logging;
 mod ntfy;
 mod opener;
-mod payload;
 mod payload_store;
 mod sound;
 mod tray;
-mod types;
 mod window_utils;
 
-use config::load_config;
+use hitl_transport::config::load_config;
+use hitl_transport::types::{
+    AnswerMessage, DismissNotificationMessage, InlineComment, PlanReviewResponseBody, SubAnswer,
+};
 use tauri::Manager;
-use types::{AnswerMessage, DismissNotificationMessage, InlineComment, PlanReviewResponseBody, SubAnswer};
 
 /// Tauri command: submit an answer from the frontend.
 #[tauri::command]

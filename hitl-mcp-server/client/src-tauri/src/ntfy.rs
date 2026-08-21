@@ -3,13 +3,13 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::chunking::ChunkAssembler;
-use crate::config::load_config;
-use crate::crypto;
-use crate::payload::{self, PayloadError};
+use hitl_transport::chunking::ChunkAssembler;
+use hitl_transport::config::load_config;
+use hitl_transport::crypto;
+use hitl_transport::payload::{self, PayloadError};
 use crate::payload_store;
 use crate::tray;
-use crate::types::{
+use hitl_transport::types::{
     AnswerMessage, AttachmentRef, CancelReviewMessage, ChunkMessage, DismissNotificationMessage,
     HitlConfig, MessageEnvelope, NotificationMessage, PlanPayloadRef, PlanReviewAckMessage,
     PlanReviewBody, PlanReviewMessage, PlanReviewResponseBody, PlanReviewResponseMessage,

@@ -165,14 +165,14 @@ fn cancel_pending_reviews(app: &AppHandle) {
     tauri::async_runtime::spawn(async move {
         for (review_id, snapshot_hash) in outstanding {
             log::info!("Tray cancel: releasing the agent blocked on review {}", review_id);
-            let body = crate::types::PlanReviewResponseBody {
+            let body = hitl_transport::types::PlanReviewResponseBody {
                 overall_feedback: "Review cancelled from the HITL tray.".to_string(),
                 inline_comments: Vec::new(),
             };
 
             // Encryption follows the config: a client with a key configured is
             // talking to a server that expects one.
-            let encrypted = crate::config::load_config()
+            let encrypted = hitl_transport::config::load_config()
                 .map(|c| c.encryption_key.is_some())
                 .unwrap_or(false);
 

@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::types::InlineComment;
+use hitl_transport::types::InlineComment;
 
 /// The reviewer's in-progress work, exactly as `review.js` builds it.
 ///
