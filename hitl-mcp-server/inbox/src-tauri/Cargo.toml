@@ -1,0 +1,31 @@
+[package]
+name = "hitl-inbox"
+# Lockstep with hitl-client, hitl-transport, hitl-store and hitl-archivist:
+# every crate in this repo releases together, so a version that drifts here is
+# a version that lies.
+version = "2.11.3"
+description = "The LLM Inbox — every agent's messages in one place"
+authors = ["HITL"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# No tray-icon feature: the Inbox is a window you open, not a background agent.
+# hitl-client is the process the MCP server auto-launches and the one that owns
+# the tray; a second tray icon for the same topic would be noise.
+tauri = { version = "2", features = [] }
+hitl-transport = { path = "../../crates/hitl-transport" }
+hitl-store = { path = "../../crates/hitl-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+dirs = { workspace = true }
+log = { workspace = true, features = ["std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

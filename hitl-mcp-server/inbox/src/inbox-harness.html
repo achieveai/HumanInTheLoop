@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Inbox — Test Harness</title>
+    <link rel="stylesheet" href="inbox.css">
+    <!-- Mocks window.__TAURI__ so the real inbox.js / pane-agents.js /
+         pane-list.js modules run outside a Tauri backend, mirroring
+         review-harness.html and notifications-harness.html in client/.
+
+         The fixture is delivered on `window.__INBOX_FIXTURE` rather than a
+         query string: a whole message list does not survive query-string
+         encoding, which is the same reason app.js stopped putting questions on
+         the URL. Playwright sets it with page.addInitScript().
+
+         The fixture is a *recording of what the Rust commands return*, never a
+         reimplementation of them. Filtering, ordering, session state and the
+         Unattributed grouping are all decided in Rust and tested there; what
+         these tests check is that the panes draw what they are handed and ask
+         for the right thing when clicked.
+
+           window.__INBOX_FIXTURE = {
+             sessions: <SessionTree>,
+             messages: <MessageList> | { "<scopeKey>|<filter>": <MessageList> },
+           }
+
+         Every invoke() is recorded on window.__INVOCATIONS so a test can
+         assert what the UI asked for, not just what it drew. -->
+    <script>
+        window.__INVOCATIONS = [];
+        window.__listeners = {};
+
+        window.__TAURI__ = {
+            core: {
+                invoke: (cmd, args) => {
+                    window.__INVOCATIONS.push({ cmd, args: args ?? null });
+                    const fixture = window.__INBOX_FIXTURE ?? {};
+
+                    if (cmd === 'list_sessions') {
+                        return Promise.resolve(fixture.sessions ?? emptyTree());
+                    }
+                    if (cmd === 'list_messages') {
+                        return Promise.resolve(resolveList(fixture.messages, args));
+                    }
+                    return Promise.reject(new Error(`unmocked command: ${cmd}`));
+                },
+            },
+            event: {
+                listen: (name, callback) => {
+                    window.__listeners[name] = callback;
+                    return Promise.resolve(() => {});
+                },
+            },
+        };
+
+        function emptyTree() {
+            return { projects: [], totalPending: 0, totalMessages: 0, scopeKey: 'all', now: 0 };
+        }
+
+        function emptyList(args) {
+            return {
+                messages: [],
+                counts: { all: 0, needsYou: 0, answered: 0, notifications: 0 },
+                filter: args?.filter ?? 'all',
+                defaultFilter: 'all',
+                scopeKey: args?.sessionKey ?? 'all',
+                now: 0,
+            };
+        }
+
+        // A bare MessageList answers every call; a keyed object lets a test
+        // hand back a different one per (scope, filter) pair, which is how the
+        // filter and selection tests assert that the UI re-asked.
+        function resolveList(messages, args) {
+            if (!messages) return emptyList(args);
+            if (Array.isArray(messages.messages)) return messages;
+
+            const scope = args?.sessionKey ?? 'all';
+            const filter = args?.filter ?? null;
+            return messages[`${scope}|${filter}`]
+                ?? messages[`${scope}|*`]
+                ?? messages[`*|${filter}`]
+                ?? messages.default
+                ?? emptyList(args);
+        }
+
+        // Lets a test push a live event through the real listener registered by
+        // inbox.js, rather than reimplementing its refresh here.
+        window.__simulateChange = () => window.__listeners['inbox-changed']?.({ payload: null });
+    </script>
+</head>
+<body>
+    <div class="inbox">
+        <aside class="pane pane-agents" id="pane-agents" aria-label="Agents"></aside>
+        <section class="pane pane-list" aria-label="Messages">
+            <div class="filter-bar" id="filter-bar" role="tablist"></div>
+            <div class="message-list" id="message-list"></div>
+        </section>
+        <section class="pane pane-detail" id="pane-detail" aria-label="Detail">
+            <p class="detail-empty">Select a message.</p>
+        </section>
+    </div>
+
+    <script type="module" src="inbox.js"></script>
+</body>
+</html>

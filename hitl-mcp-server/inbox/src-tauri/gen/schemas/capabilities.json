@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capabilities for the HITL Inbox","local":true,"windows":["*"],"permissions":["core:default","core:event:default","core:event:allow-listen","core:window:default"]}}

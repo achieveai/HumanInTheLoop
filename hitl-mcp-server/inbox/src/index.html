@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Inbox</title>
+    <link rel="stylesheet" href="inbox.css">
+</head>
+<body>
+    <div class="inbox">
+        <!-- Pane 1: the agent tree (spec §6) -->
+        <aside class="pane pane-agents" id="pane-agents" aria-label="Agents"></aside>
+
+        <!-- Pane 2: the message list (spec §7). A list only — no body, no
+             controls; those belong to pane 3. -->
+        <section class="pane pane-list" aria-label="Messages">
+            <div class="filter-bar" id="filter-bar" role="tablist"></div>
+            <div class="message-list" id="message-list"></div>
+        </section>
+
+        <!-- Pane 3: the three renderers. Deliberately a placeholder here —
+             it is its own task, and this pane is the surface it attaches to. -->
+        <section class="pane pane-detail" id="pane-detail" aria-label="Detail">
+            <p class="detail-empty">Select a message.</p>
+        </section>
+    </div>
+
+    <script type="module" src="inbox.js"></script>
+</body>
+</html>

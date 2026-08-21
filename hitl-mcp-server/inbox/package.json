@@ -1,0 +1,13 @@
+{
+  "name": "@hitl/inbox",
+  "version": "2.11.3",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri",
+    "test": "npx playwright test",
+    "test:ui": "npx playwright test --ui"
+  }
+}
