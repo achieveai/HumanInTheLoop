@@ -199,8 +199,60 @@ export function list(over: Partial<MessageList> = {}): MessageList {
   };
 }
 
+// ── pane 3 ───────────────────────────────────────────────────────────────────
+//
+// `get_message` returns the row pane 2 already has, plus the request payload
+// *verbatim* and the settling event if there is one. Verbatim matters: it is
+// what lets render-review.js hand the payload to the client's own review.js
+// without a translation layer in between, and a translation layer is exactly
+// where the two apps would start disagreeing.
+
+export interface SenderBadge {
+  label: string;
+  source: string | null;
+}
+
+export interface MessageDetail {
+  row: MessageRow;
+  /** The `ask_human` / `notify_human` / `review_plan` payload, as published. */
+  request: Record<string, unknown>;
+  /** The `answer` / `dismiss_notification` / … that closed it, if any. */
+  settlement: Record<string, unknown> | null;
+  sender: SenderBadge | null;
+}
+
+export function detail(
+  row: MessageRow,
+  over: Partial<Omit<MessageDetail, 'row'>> = {},
+): MessageDetail {
+  return {
+    row,
+    request: {},
+    settlement: null,
+    sender: { label: 'Kay9 laptop', source: 'session' },
+    ...over,
+  };
+}
+
+/**
+ * A `BodyOutcome`, as `get_body` serialises it — externally tagged on
+ * `outcome`, matching `#[serde(tag = "outcome")]` in `body.rs`.
+ *
+ * Deliberately loose: these tests exist to check that each arm produces a
+ * distinguishable, *correct* rendering, and pinning the arms in TypeScript here
+ * would only restate what the Rust already enforces.
+ */
+export type BodyOutcome = Record<string, unknown> & { outcome: string };
+
+export function bodyOk(content: string, diff = ''): BodyOutcome {
+  return { outcome: 'ok', content, diff };
+}
+
 /** What the harness reads off `window.__INBOX_FIXTURE`. */
 export interface Fixture {
   sessions?: SessionTree;
   messages?: MessageList | Record<string, MessageList>;
+  /** Keyed by messageId. `{ __error }` and `{ __delayMs, value }` are honoured. */
+  details?: Record<string, unknown>;
+  bodies?: Record<string, unknown>;
 }

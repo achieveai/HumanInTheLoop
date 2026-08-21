@@ -4,7 +4,9 @@
   "version": "2.11.3",
   "identifier": "com.hitl.inbox",
   "build": {
-    "frontendDist": "../src"
+    "frontendDist": "../src",
+    "beforeDevCommand": "npm run sync",
+    "beforeBuildCommand": "npm run sync"
   },
   "app": {
     "withGlobalTauri": true,

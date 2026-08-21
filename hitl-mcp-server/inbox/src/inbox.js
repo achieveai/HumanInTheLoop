@@ -7,13 +7,16 @@
 // events say, because nothing here remembers anything.
 
 import { renderAgentTree } from './pane-agents.js';
+import { createDetailPane } from './pane-detail.js';
 import { renderFilterBar, renderMessageList } from './pane-list.js';
 
 /** Emitted by the Rust side when a genuinely new event lands. */
 const CHANGED_EVENT = 'inbox-changed';
 
-export function createInbox({ invoke, elements, onError = console.error }) {
+export function createInbox({ invoke, elements, onError = console.error, actions = {} }) {
     const { agents, filterBar, messageList, detail } = elements;
+
+    const detailPane = createDetailPane({ container: detail, invoke, onError, actions });
 
     const state = {
         /** A `scopeKey` handed out by `list_sessions()`. Never composed here. */
@@ -27,6 +30,8 @@ export function createInbox({ invoke, elements, onError = console.error }) {
          */
         filter: null,
         selectedId: null,
+        /** The folded status pane 3 was last drawn with. See `refresh()`. */
+        selectedStatus: null,
     };
 
     async function refresh() {
@@ -47,6 +52,17 @@ export function createInbox({ invoke, elements, onError = console.error }) {
             selectedId: state.selectedId,
             onSelect: selectMessage,
         });
+
+        // Pane 3 is redrawn only when the *selected* message's folded status
+        // actually moved — someone answered it on another device, the agent
+        // exited. Redrawing on every event instead would throw away scroll
+        // position and half-typed review comments each time an unrelated
+        // message arrived, which is a worse failure than a stale pane.
+        const selected = list.messages.find(m => m.messageId === state.selectedId);
+        if (selected && selected.status !== state.selectedStatus) {
+            state.selectedStatus = selected.status;
+            run(detailPane.show(selected));
+        }
     }
 
     function run(promise) {
@@ -68,38 +84,14 @@ export function createInbox({ invoke, elements, onError = console.error }) {
 
     function selectMessage(message) {
         state.selectedId = message.messageId;
+        state.selectedStatus = message.status;
         for (const row of messageList.querySelectorAll('.message-row')) {
             row.classList.toggle('is-selected', row.dataset.messageId === message.messageId);
         }
-        showDetailPlaceholder(message);
+        return run(detailPane.show(message));
     }
 
-    /**
-     * Pane 3 is its own task — three renderers, one per message type. Until
-     * they land this pane says which message is selected and admits it cannot
-     * yet show it, rather than rendering a half-message that looks complete.
-     */
-    function showDetailPlaceholder(message) {
-        detail.textContent = '';
-        const wrap = document.createElement('div');
-        wrap.className = 'detail-placeholder';
-        wrap.dataset.messageId = message.messageId;
-        wrap.dataset.type = message.msgType;
-
-        const title = document.createElement('h2');
-        title.className = 'detail-title';
-        title.textContent = message.title;
-        wrap.appendChild(title);
-
-        const note = document.createElement('p');
-        note.className = 'detail-note';
-        note.textContent = 'The renderer for this message type is not built yet.';
-        wrap.appendChild(note);
-
-        detail.appendChild(wrap);
-    }
-
-    return { refresh, selectScope, selectFilter, selectMessage, state };
+    return { refresh, selectScope, selectFilter, selectMessage, detailPane, state };
 }
 
 async function main() {

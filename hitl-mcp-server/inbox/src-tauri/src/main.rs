@@ -4,6 +4,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod backfill;
+mod body;
+mod detail;
 mod identity;
 mod session;
 mod sink;
@@ -16,6 +18,8 @@ use hitl_transport::ntfy::subscribe::subscribe_loop;
 use hitl_transport::status::ConnectionStatus;
 use tauri::{Emitter, Manager};
 
+use crate::body::BodyOutcome;
+use crate::detail::MessageDetail;
 use crate::sink::{InboxSink, SharedStore};
 use crate::view::{MessageList, SessionTree};
 
@@ -112,6 +116,58 @@ fn list_messages(
     })
 }
 
+/// Pane 3 — one message, whole (spec §8).
+///
+/// Separate from [`list_messages`] on purpose. Pane 2 draws a hundred rows and
+/// needs a header for each; pane 3 draws one message and needs everything about
+/// it. Folding the payload into every row would put a plan body behind every
+/// list repaint.
+#[tauri::command]
+fn get_message(
+    store: tauri::State<'_, SharedStore>,
+    message_id: String,
+) -> Result<Option<MessageDetail>, String> {
+    with_events(&store, |events, now| {
+        detail::build_detail(events, &message_id, now)
+    })
+}
+
+/// The plan body behind a `plan_review`, fetched from wherever it lives.
+///
+/// **Only ever called for a selected message.** `list_messages` is a pure
+/// function of `(events, now)` and stays one; a body fetch on the paint path
+/// would make pane 2 render differently depending on whether the archivist
+/// happened to be running (spec §11).
+#[tauri::command]
+async fn get_body(
+    store: tauri::State<'_, SharedStore>,
+    message_id: String,
+) -> Result<BodyOutcome, String> {
+    // The request event is copied out and the lock released before anything is
+    // awaited: holding the store's mutex across a network round trip would stop
+    // every ingest for as long as the archivist takes to answer.
+    let request = {
+        let guard = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let events = all_events(&guard)?;
+        events
+            .into_iter()
+            .find(|e| e.msg_type == "plan_review" && e.message_id == message_id)
+    };
+
+    let Some(request) = request else {
+        return Ok(BodyOutcome::Absent);
+    };
+
+    // Read per call rather than cached at startup, so adding the encryption key
+    // to `~/.hitl/config.json` takes effect on the next selection instead of on
+    // the next restart.
+    let key = hitl_transport::config::load_config()
+        .unwrap_or_default()
+        .encryption_key;
+
+    Ok(body::load(&request, key.as_deref(), &backfill::archivist_base()).await)
+}
+
 fn init_logging() {
     // `HITL_LOG` matches the client's and the archivist's convention, so one
     // habit covers all three.
@@ -165,7 +221,12 @@ fn main() {
 
     tauri::Builder::default()
         .manage(store)
-        .invoke_handler(tauri::generate_handler![list_sessions, list_messages])
+        .invoke_handler(tauri::generate_handler![
+            list_sessions,
+            list_messages,
+            get_message,
+            get_body
+        ])
         .setup(|app| {
             let store = app.state::<SharedStore>().inner().clone();
 

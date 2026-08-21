@@ -49,18 +49,31 @@ pub struct Identity {
 /// an error — it is what puts a message in `Unattributed` until the sibling
 /// lands.
 pub fn sender_label(events: &[Event]) -> Option<String> {
-    events
-        .iter()
-        .find_map(|e| match e.msg_type.as_str() {
-            "plan_review" | "sender_identity" => e
-                .json()
-                .get("sender")
-                .and_then(|s| s.get("label"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            _ => None,
-        })
+    sender_info(events).map(|(label, _)| label)
+}
+
+/// The sender label and the tier it was resolved at (`session` / `worktree` /
+/// `path`), from the same two places [`sender_label`] looks.
+///
+/// Pane 3 shows the tier alongside the label so a `path`-tier badge — the
+/// weakest one, and the one that groups two worktrees of the same repo
+/// together — is visibly weaker than a `session`-tier one rather than looking
+/// equally authoritative.
+pub fn sender_info(events: &[Event]) -> Option<(String, Option<String>)> {
+    events.iter().find_map(|e| match e.msg_type.as_str() {
+        "plan_review" | "sender_identity" => {
+            let sender = e.json().get("sender")?.clone();
+            let text = |key: &str| {
+                sender
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            Some((text("label")?, text("source")))
+        }
+        _ => None,
+    })
 }
 
 /// The repo name a request event advertises, if any.

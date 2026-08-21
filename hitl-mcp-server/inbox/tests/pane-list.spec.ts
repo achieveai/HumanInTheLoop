@@ -235,21 +235,30 @@ test.describe('Pane 2 — ordering and selection', () => {
     await expect(page.locator('.message-row.is-selected')).toHaveCount(1);
   });
 
-  test('selection hands pane 3 the message, and pane 3 admits it cannot draw it yet', async ({ page }) => {
-    // The renderers are their own task. Until they land this pane says which
-    // message is selected rather than showing a half-message that looks whole.
-    await open(page, only(message({
-      messageId: 'p-1',
-      msgType: 'plan_review',
-      title: 'docs/plans/inbox.md',
-    })));
+  test('selection hands pane 3 the message', async ({ page }) => {
+    // What pane 3 then *does* with it is pane-detail.spec.ts. All this checks
+    // is the handoff: the click reaches the right renderer with the right id.
+    await open(page, {
+      ...only(message({
+        messageId: 'p-1',
+        msgType: 'notification',
+        title: 'Deploy finished',
+      })),
+      details: {
+        'p-1': {
+          row: message({ messageId: 'p-1', msgType: 'notification', title: 'Deploy finished' }),
+          request: { body: 'All green.' },
+          settlement: null,
+          sender: null,
+        },
+      },
+    });
 
     await page.locator('.message-row').click();
 
-    const detail = page.locator('.detail-placeholder');
+    const detail = page.locator('.detail-root');
     await expect(detail).toHaveAttribute('data-message-id', 'p-1');
-    await expect(detail).toHaveAttribute('data-type', 'plan_review');
-    await expect(detail.locator('.detail-title')).toHaveText('docs/plans/inbox.md');
+    await expect(detail.locator('.detail-title')).toHaveText('Deploy finished');
   });
 
   test('an empty list says so rather than showing a blank pane', async ({ page }) => {

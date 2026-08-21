@@ -77,8 +77,13 @@ export function renderFilterBar(container, list, { onFilter } = {}) {
     }
 }
 
-/** The status pill, with the verdict as a sub-label on answered plan reviews. */
-function statusPill(message) {
+/**
+ * The status pill, with the verdict as a sub-label on answered plan reviews.
+ *
+ * Exported so pane 3's header draws the identical pill from the identical row.
+ * Two implementations of one vocabulary is two places for it to drift.
+ */
+export function statusPill(message) {
     const pill = el('span', `status-pill status-pill--${message.status}`);
     pill.appendChild(el('span', 'status-pill-label', humanise(message.status)));
     if (message.verdict) {

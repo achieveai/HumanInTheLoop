@@ -11,6 +11,9 @@ import { defineConfig } from '@playwright/test';
 // the root `workspaces` array to exactly `['server', 'client']`.
 export default defineConfig({
   testDir: './tests',
+  // Refreshes the webview assets shared with client/src before anything runs.
+  // See tests/global-setup.ts.
+  globalSetup: './tests/global-setup.ts',
   timeout: 15_000,
   use: {
     baseURL: 'http://127.0.0.1:3849',

@@ -4,7 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Inbox — Test Harness</title>
+    <!-- Same order as index.html, and for the same reason. See the comment there. -->
+    <link rel="stylesheet" href="review.css">
     <link rel="stylesheet" href="inbox.css">
+    <script src="vendor/markdown-it.min.js"></script>
     <!-- Mocks window.__TAURI__ so the real inbox.js / pane-agents.js /
          pane-list.js modules run outside a Tauri backend, mirroring
          review-harness.html and notifications-harness.html in client/.
@@ -42,6 +45,12 @@
                     }
                     if (cmd === 'list_messages') {
                         return Promise.resolve(resolveList(fixture.messages, args));
+                    }
+                    if (cmd === 'get_message') {
+                        return resolveKeyed(fixture.details, args?.messageId, null);
+                    }
+                    if (cmd === 'get_body') {
+                        return resolveKeyed(fixture.bodies, args?.messageId, { outcome: 'absent' });
                     }
                     return Promise.reject(new Error(`unmocked command: ${cmd}`));
                 },
@@ -85,6 +94,23 @@
                 ?? emptyList(args);
         }
 
+        // Per-message fixtures for pane 3, keyed by messageId.
+        //
+        // Three things a test needs to express and all three are shapes the
+        // real commands produce:
+        //   { ... }                     the value the command returns
+        //   { __error: 'boom' }         the command itself failed
+        //   { __delayMs: 50, value: X } a slow response, for the out-of-order test
+        function resolveKeyed(table, key, fallback) {
+            const entry = table?.[key];
+            if (entry === undefined) return Promise.resolve(fallback);
+            if (entry && entry.__error) return Promise.reject(new Error(entry.__error));
+            if (entry && entry.__delayMs !== undefined) {
+                return new Promise(resolve => setTimeout(() => resolve(entry.value), entry.__delayMs));
+            }
+            return Promise.resolve(entry);
+        }
+
         // Lets a test push a live event through the real listener registered by
         // inbox.js, rather than reimplementing its refresh here.
         window.__simulateChange = () => window.__listeners['inbox-changed']?.({ payload: null });
@@ -97,9 +123,7 @@
             <div class="filter-bar" id="filter-bar" role="tablist"></div>
             <div class="message-list" id="message-list"></div>
         </section>
-        <section class="pane pane-detail" id="pane-detail" aria-label="Detail">
-            <p class="detail-empty">Select a message.</p>
-        </section>
+        <section class="pane pane-detail" id="pane-detail" aria-label="Detail"></section>
     </div>
 
     <script type="module" src="inbox.js"></script>

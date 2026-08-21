@@ -4,7 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Inbox</title>
+    <!-- review.css first, inbox.css second, deliberately: review.css carries
+         the plan reviewer's own global rules (`html, body`, `.badge`,
+         `.button`) from when it owned a whole window. Loading it first lets
+         inbox.css win every collision at equal specificity, so the reviewer
+         keeps its layout inside pane 3 without repainting the shell around it.
+         Both files are copies of client/src, refreshed by scripts/sync-shared-ui.mjs. -->
+    <link rel="stylesheet" href="review.css">
     <link rel="stylesheet" href="inbox.css">
+    <script src="vendor/markdown-it.min.js"></script>
 </head>
 <body>
     <div class="inbox">
@@ -18,11 +26,9 @@
             <div class="message-list" id="message-list"></div>
         </section>
 
-        <!-- Pane 3: the three renderers. Deliberately a placeholder here —
-             it is its own task, and this pane is the surface it attaches to. -->
-        <section class="pane pane-detail" id="pane-detail" aria-label="Detail">
-            <p class="detail-empty">Select a message.</p>
-        </section>
+        <!-- Pane 3: the three renderers (spec §8). Filled by pane-detail.js,
+             which picks one per message type. -->
+        <section class="pane pane-detail" id="pane-detail" aria-label="Detail"></section>
     </div>
 
     <script type="module" src="inbox.js"></script>
