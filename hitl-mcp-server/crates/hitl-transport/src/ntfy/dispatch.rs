@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::chunking::ChunkAssembler;
 use crate::crypto;
-use crate::ntfy::subscribe::{parse_ntfy_event, SeenIds};
+use crate::ntfy::subscribe::{parse_ntfy_event, NtfyEvent, SeenIds};
 use crate::ntfy::NtfySink;
 use crate::payload::PayloadError;
 use crate::types::{
@@ -98,10 +98,18 @@ pub fn extract_answered_ids(body: &str, config: &HitlConfig) -> HashSet<String> 
 }
 
 /// Decrypt every cached line and reassemble any chunked messages, in order.
+///
+/// The ntfy envelope travels alongside the decrypted body rather than being
+/// reduced to its attachment: `id` and `time` exist only on the envelope and
+/// cannot be recovered from our own payload, and they are the total-order key
+/// (spec §4.3). A recorder that lost them here would have to invent an ordering
+/// of its own for exactly the messages a restart replays. A chunked group is
+/// reported under the envelope of its **final** chunk — the one whose arrival
+/// completed the message — so the same group always resolves to the same id.
 pub fn decrypt_and_reassemble_cache(
     body: &str,
     config: &HitlConfig,
-) -> Vec<(String, bool, Option<AttachmentRef>)> {
+) -> Vec<(NtfyEvent, String, bool)> {
     let mut assembler = ChunkAssembler::new();
     let mut messages = Vec::new();
 
@@ -114,7 +122,7 @@ pub fn decrypt_and_reassemble_cache(
                 if let Some((resolved, resolved_encrypted)) =
                     resolve_chunked_message(&decrypted, was_encrypted, config, &mut assembler)
                 {
-                    messages.push((resolved, resolved_encrypted, event.attachment));
+                    messages.push((event, resolved, resolved_encrypted));
                 }
             }
         }
@@ -498,6 +506,42 @@ mod tests {
             r#"{{"id":"e","time":1,"event":"message","topic":"t","message":{}}}"#,
             serde_json::to_string(message).unwrap()
         )
+    }
+
+    #[test]
+    fn the_cache_path_hands_back_ntfys_envelope_with_each_message() {
+        // ntfy's id and time exist only on the envelope. A recorder replaying
+        // the cache on every start has to dedup on that id — anything it
+        // derived from the payload would differ between the cache copy and the
+        // live copy of the same event, and the message would be stored twice.
+        let body = [
+            format!(
+                r#"{{"id":"ntfy-a","time":1786504000,"event":"message","topic":"t","message":{}}}"#,
+                serde_json::to_string(r#"{"type":"question","messageId":"q-1"}"#).unwrap()
+            ),
+            format!(
+                concat!(
+                    r#"{{"id":"ntfy-b","time":1786504100,"event":"message","topic":"t","#,
+                    r#""message":{},"#,
+                    r#""attachment":{{"name":"p.bin","url":"https://n/file/p.bin"}}}}"#
+                ),
+                serde_json::to_string(r#"{"type":"plan_review","messageId":"p-1"}"#).unwrap()
+            ),
+        ]
+        .join("\n");
+
+        let got = decrypt_and_reassemble_cache(&body, &HitlConfig::default());
+
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0.id, "ntfy-a");
+        assert_eq!(got[0].0.time, 1_786_504_000);
+        assert!(got[0].1.contains("q-1"));
+        assert_eq!(got[1].0.id, "ntfy-b");
+        assert_eq!(
+            got[1].0.attachment.as_ref().map(|a| a.url.as_str()),
+            Some("https://n/file/p.bin"),
+            "the attachment must still ride along with its own event"
+        );
     }
 
     #[test]

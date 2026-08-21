@@ -257,13 +257,18 @@ async fn show_pending_from_cache(
 ) {
     if body.is_empty() { return; }
 
-    for (decrypted, was_encrypted, attachment) in decrypt_and_reassemble_cache(body, config) {
+    for (event, decrypted, was_encrypted) in decrypt_and_reassemble_cache(body, config) {
+        // Before the filters, not after: `Origin::Cache` drops questions that
+        // were already answered, which is exactly the history a recorder is
+        // for. See `NtfySink::on_event`.
+        sink.on_event(&event, &decrypted);
+
         dispatch_message(
             sink,
             config,
             &decrypted,
             was_encrypted,
-            attachment,
+            event.attachment,
             Origin::Cache { answered_ids, seen },
         )
         .await;
@@ -325,6 +330,11 @@ async fn subscribe_live(
                         config,
                         &mut state.assembler,
                     ) {
+                        // Upstream of dispatch's replay suppression: a
+                        // recorder dedups on ntfy's id, which survives a
+                        // restart, rather than on `SeenIds`, which does not.
+                        sink.on_event(&event, &final_body);
+
                         dispatch_message(
                             sink,
                             config,

@@ -7,6 +7,7 @@ pub mod publish;
 pub mod review;
 pub mod subscribe;
 
+use crate::ntfy::subscribe::NtfyEvent;
 use crate::types::{
     AnswerMessage, AttachmentRef, CancelReviewMessage, DismissNotificationMessage,
     NotificationMessage, PlanReviewAckMessage, PlanReviewMessage, PlanReviewResponseMessage,
@@ -29,6 +30,21 @@ pub trait NtfySink: Send + Sync {
     fn on_connected(&self, connected: bool);
     /// One ntfy event arrived — whatever it turned out to be.
     fn on_message(&self);
+
+    /// Every decoded event, handed over verbatim *before* anything interprets
+    /// it. `decrypted` is the fully-reassembled message JSON; `event` is ntfy's
+    /// own envelope, which carries the one thing the message body can never
+    /// carry — ntfy's id and time, the total-order key (spec §4.3).
+    ///
+    /// Deliberately upstream of every filter below it. `dispatch_message`
+    /// suppresses replays, drops settled questions on the cache path and
+    /// ignores settlement types from a future protocol version — all correct
+    /// for a UI that must not re-raise a window, and all wrong for a recorder
+    /// whose entire job is to hold what actually arrived. A host that records
+    /// has to see the events the UI is right to skip.
+    ///
+    /// Default: does nothing, because a UI host has nothing to record.
+    fn on_event(&self, _event: &NtfyEvent, _decrypted: &str) {}
 
     fn on_question(&self, msg: &QuestionMessage, was_encrypted: bool);
     fn on_answer(&self, msg: &AnswerMessage);

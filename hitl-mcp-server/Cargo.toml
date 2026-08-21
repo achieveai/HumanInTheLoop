@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["client/src-tauri", "crates/hitl-transport", "crates/hitl-store"]
+members = [
+    "client/src-tauri",
+    "crates/hitl-transport",
+    "crates/hitl-store",
+    "crates/hitl-archivist",
+]
 
 # Shared versions for every crate that talks to ntfy or the wire types, so a
 # bump lands in one place instead of drifting between the client and the

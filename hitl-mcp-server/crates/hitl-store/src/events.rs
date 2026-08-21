@@ -151,6 +151,25 @@ impl Store {
         Ok(seq.unwrap_or(0))
     }
 
+    /// Every event ingested after `seq`, in local ingest order.
+    ///
+    /// The read half of the cursor [`Store::last_seq`] describes: a consumer
+    /// hands back the highest seq it holds and gets exactly what it has not
+    /// been given yet. Ordered by `seq` — deliberately *not* by ntfy time —
+    /// because the question here is "what is new to you", and an event
+    /// backfilled today can carry a timestamp from last week.
+    ///
+    /// `limit` bounds one response; a caller that wants everything pages by
+    /// passing the last seq it received back in.
+    pub fn events_since(&self, seq: i64, limit: usize) -> Result<Vec<Event>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, ntfy_id, ntfy_time, message_id, type, subject_id, payload
+             FROM events WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![seq, limit as i64], row_to_event)?;
+        rows.collect()
+    }
+
     pub fn count_events(&self) -> Result<i64> {
         self.conn.query_row("SELECT count(*) FROM events", [], |row| row.get(0))
     }
@@ -248,6 +267,52 @@ mod tests {
         // NULL read as i64 would be an error rather than "start from the top".
         let s = Store::open_in_memory().unwrap();
         assert_eq!(s.last_seq().unwrap(), 0);
+    }
+
+    #[test]
+    fn events_since_returns_exactly_what_the_caller_has_not_seen() {
+        // The archivist's `GET /events?since=` in miniature.
+        let s = Store::open_in_memory().unwrap();
+        let mut seqs = Vec::new();
+        for id in ["n-1", "n-2", "n-3"] {
+            let (e, raw) = sample_event(id, "m", "question");
+            seqs.push(s.append(&e, &raw).unwrap());
+        }
+
+        let after_first: Vec<_> = s
+            .events_since(seqs[0], 100)
+            .unwrap()
+            .iter()
+            .map(|e| e.ntfy_id.clone())
+            .collect();
+        assert_eq!(after_first, vec!["n-2", "n-3"]);
+
+        assert!(s.events_since(seqs[2], 100).unwrap().is_empty(), "nothing is newer");
+        assert_eq!(s.events_since(0, 100).unwrap().len(), 3, "seq 0 means everything");
+    }
+
+    #[test]
+    fn events_since_pages_in_ingest_order_not_ntfy_order() {
+        // "ntfy-3" carries the *later* ntfy time but is ingested first, so a
+        // backfill ordered by ntfy time would hand it back after "ntfy-1" and
+        // a caller resuming from the last seq it saw would skip an event.
+        let s = Store::open_in_memory().unwrap();
+        let (e3, raw3) = sample_event("ntfy-3", "m", "answer");
+        s.append(&e3, &raw3).unwrap();
+        let (e1, raw1) = sample_event("ntfy-1", "m", "question");
+        s.append(&e1, &raw1).unwrap();
+
+        let got: Vec<_> = s
+            .events_since(0, 100)
+            .unwrap()
+            .iter()
+            .map(|e| e.ntfy_id.clone())
+            .collect();
+        assert_eq!(got, vec!["ntfy-3", "ntfy-1"]);
+
+        let first_page = s.events_since(0, 1).unwrap();
+        assert_eq!(first_page.len(), 1, "limit bounds one response");
+        assert_eq!(first_page[0].ntfy_id, "ntfy-3");
     }
 
     #[test]
