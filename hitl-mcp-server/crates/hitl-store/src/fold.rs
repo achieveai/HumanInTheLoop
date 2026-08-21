@@ -114,6 +114,10 @@ pub fn fold(events: &[Event]) -> MessageState {
 
     let mut state = MessageState::default();
     let mut settled = false;
+    // Set only when an actual *response* settled the message, never when a
+    // `cancel_review` did. The ack below is about a response, so a cancelled
+    // review has nothing for it to name.
+    let mut winning_response: Option<String> = None;
 
     for event in &ordered {
         // Spec §9.2: the winning response is the *first* settling event in
@@ -133,6 +137,9 @@ pub fn fold(events: &[Event]) -> MessageState {
                 state.verdict = settlement.verdict;
                 state.responder = settlement.responder;
                 state.responded_at = Some(event.ntfy_time);
+                if settlement.is_response {
+                    winning_response = Some(event.message_id.clone());
+                }
                 settled = true;
             }
             None => continue,
@@ -141,15 +148,21 @@ pub fn fold(events: &[Event]) -> MessageState {
 
     // The server publishes this after reading the log, so it outranks anything
     // derived locally: it is the one participant that knows which response the
-    // agent actually consumed. Applied as a set membership test rather than as
-    // a step in the walk, so its effect cannot depend on where it lands.
+    // agent actually consumed. Applied as a membership test over the whole
+    // slice rather than as a step in the walk, so its effect cannot depend on
+    // where it lands.
     //
-    // The ack names a `responseId`, and a stricter reading would flip to `lost`
-    // only when that id is the response this fold picked as the winner. It is
-    // not used that way here: a `lost` ack for a subject means some response to
-    // it was discarded, and the pane needs to say so.
-    if ordered.iter().any(is_lost_ack) {
-        state.status = Status::Lost;
+    // The ack is **per response**, not per message: it names the `responseId`
+    // it is about. So it only means "this message is lost" when it names the
+    // response the fold picked as winner. An ack for any other response is a
+    // note to the device that lost — matching on it would mark the message
+    // `lost` on every device, including the one that actually answered it, and
+    // would mislabel every contested message in the Inbox (spec §9.2, §9.3).
+    // The device that lost learns so from the ack it received directly.
+    if let Some(winner) = &winning_response {
+        if ordered.iter().any(|e| is_lost_ack_for(e, winner)) {
+            state.status = Status::Lost;
+        }
     }
 
     state
@@ -160,6 +173,9 @@ struct Settlement {
     status: Status,
     verdict: Option<Verdict>,
     responder: Option<String>,
+    /// Whether a human replied, as opposed to the server calling the exchange
+    /// off. Only a reply can be named by a `plan_review_ack`.
+    is_response: bool,
 }
 
 fn settle(event: &Event) -> Option<Settlement> {
@@ -174,22 +190,32 @@ fn settle(event: &Event) -> Option<Settlement> {
                 status: if skipped { Status::Skipped } else { Status::Answered },
                 verdict: None,
                 responder: event.field("respondedFrom"),
+                is_response: true,
             })
         }
 
         "plan_review_response" => {
             let verdict = event.field("verdict").as_deref().and_then(Verdict::parse);
             Some(Settlement {
-                // An unrecognized verdict from a newer peer still answered the
-                // review — it just cannot be labelled. Reading it as anything
-                // but `answered` would claim a human never replied.
+                // Only `skipped` gets its own status here (§7.2: plan_review
+                // `skipped` is `verdict == 'skipped'`). Everything else is
+                // `answered` carrying its verdict as a sub-label — including
+                // `cancelled`, which is a human choosing to call the review
+                // off and is emphatically not the `cancelled` cell of §7.2.
+                // That cell is `cancel_review{cancelled}`: the agent died or
+                // was superseded and nobody replied at all. Conflating them
+                // would report "nobody acted" when somebody did.
+                //
+                // An unrecognized verdict from a newer peer also reads as
+                // `answered` — it just cannot be labelled. Reading it as
+                // anything else would claim a human never replied.
                 status: match verdict {
                     Some(Verdict::Skipped) => Status::Skipped,
-                    Some(Verdict::Cancelled) => Status::Cancelled,
                     _ => Status::Answered,
                 },
                 verdict,
                 responder: event.field("respondedFrom"),
+                is_response: true,
             })
         }
 
@@ -197,6 +223,7 @@ fn settle(event: &Event) -> Option<Settlement> {
             status: Status::Dismissed,
             verdict: None,
             responder: event.field("dismissedFrom"),
+            is_response: true,
         }),
 
         "cancel_review" => Some(Settlement {
@@ -211,6 +238,8 @@ fn settle(event: &Event) -> Option<Settlement> {
             },
             verdict: None,
             responder: None,
+            // The server calling the exchange off, not a human replying.
+            is_response: false,
         }),
 
         // Requests, acks and decoration settle nothing. A request with no
@@ -221,8 +250,11 @@ fn settle(event: &Event) -> Option<Settlement> {
     }
 }
 
-fn is_lost_ack(event: &&Event) -> bool {
-    event.msg_type == "plan_review_ack" && event.field("status").as_deref() == Some("lost")
+/// A `plan_review_ack{status:"lost"}` naming `response_id` specifically.
+fn is_lost_ack_for(event: &Event, response_id: &str) -> bool {
+    event.msg_type == "plan_review_ack"
+        && event.field("status").as_deref() == Some("lost")
+        && event.field("responseId").as_deref() == Some(response_id)
 }
 
 #[cfg(test)]
@@ -308,16 +340,34 @@ mod tests {
         )
     }
 
-    fn review_response(subject: &str, verdict: &str) -> Event {
-        event(
-            10,
-            subject,
-            "plan_review_response",
-            format!(
-                r#"{{"type":"plan_review_response","reviewId":"{subject}","verdict":"{verdict}",
-                    "respondedFrom":"laptop"}}"#
-            ),
-        )
+    fn review_response(subject: &str, verdict: &str, response_id: &str) -> Event {
+        review_response_at(subject, verdict, response_id, "laptop", 10)
+    }
+
+    /// `response_id` is the response's own `messageId` — the thing a
+    /// `plan_review_ack` names in its `responseId`. Explicit rather than
+    /// derived, so a test that pairs a response with an ack reads as the pair
+    /// it is.
+    fn review_response_at(
+        subject: &str,
+        verdict: &str,
+        response_id: &str,
+        responder: &str,
+        at: u64,
+    ) -> Event {
+        Event {
+            ntfy_id: format!("plan_review_response-{subject}-{response_id}-{at}"),
+            message_id: response_id.to_string(),
+            ..event(
+                at,
+                subject,
+                "plan_review_response",
+                format!(
+                    r#"{{"type":"plan_review_response","reviewId":"{subject}","verdict":"{verdict}",
+                        "respondedFrom":"{responder}"}}"#
+                ),
+            )
+        }
     }
 
     fn cancel(subject: &str, reason: &str) -> Event {
@@ -329,15 +379,22 @@ mod tests {
         )
     }
 
-    fn ack(subject: &str, status: &str) -> Event {
-        event(
-            20,
-            subject,
-            "plan_review_ack",
-            format!(
-                r#"{{"type":"plan_review_ack","reviewId":"{subject}","status":"{status}"}}"#
-            ),
-        )
+    /// The ack is per *response*, not per message, so it has to name one —
+    /// `response_id` is the `message_id` of the `plan_review_response` it is
+    /// about (`PlanReviewAckMessage::response_id`, types.rs).
+    fn ack(subject: &str, response_id: &str, status: &str) -> Event {
+        Event {
+            ntfy_id: format!("plan_review_ack-{subject}-{response_id}"),
+            ..event(
+                20,
+                subject,
+                "plan_review_ack",
+                format!(
+                    r#"{{"type":"plan_review_ack","reviewId":"{subject}",
+                        "responseId":"{response_id}","status":"{status}"}}"#
+                ),
+            )
+        }
     }
 
     #[test]
@@ -391,7 +448,7 @@ mod tests {
 
     #[test]
     fn a_plan_review_carries_its_verdict() {
-        let st = fold(&[plan_review("p-1"), review_response("p-1", "approved")]);
+        let st = fold(&[plan_review("p-1"), review_response("p-1", "approved", "resp-A")]);
         assert_eq!(st.status, Status::Answered);
         assert_eq!(st.verdict, Some(Verdict::Approved));
     }
@@ -416,10 +473,91 @@ mod tests {
     fn a_lost_ack_marks_this_devices_response_lost() {
         let st = fold(&[
             plan_review("p-1"),
-            review_response("p-1", "approved"),
-            ack("p-1", "lost"),
+            review_response("p-1", "approved", "resp-A"),
+            ack("p-1", "resp-A", "lost"),
         ]);
         assert_eq!(st.status, Status::Lost);
+    }
+
+    #[test]
+    fn a_lost_ack_for_the_losing_response_does_not_mark_the_message_lost() {
+        // The ack is per response. The phone answered first and won; the
+        // laptop's response lost, and the server acks *that response* as lost
+        // to tell the laptop. Matching on the ack without checking which
+        // response it names would mark this message `lost` on every device —
+        // including the phone that actually answered it — and would mislabel
+        // every contested message in the Inbox (spec §9.2, §9.3).
+        let st = fold(&[
+            plan_review("p-1"),
+            review_response_at("p-1", "approved", "resp-A", "phone", 100),
+            review_response_at("p-1", "rejected", "resp-B", "laptop", 200),
+            ack("p-1", "resp-B", "lost"),
+        ]);
+
+        assert_eq!(st.status, Status::Answered, "the phone's answer stands");
+        assert_eq!(st.responder.as_deref(), Some("phone"));
+        assert_eq!(st.verdict, Some(Verdict::Approved), "the winner's verdict, not the loser's");
+    }
+
+    #[test]
+    fn a_lost_ack_naming_the_winning_response_marks_it_lost() {
+        // The other half: when the ack does name the response this fold
+        // selected, the server is telling us the agent never consumed it.
+        let st = fold(&[
+            plan_review("p-1"),
+            review_response_at("p-1", "approved", "resp-A", "phone", 100),
+            review_response_at("p-1", "rejected", "resp-B", "laptop", 200),
+            ack("p-1", "resp-A", "lost"),
+        ]);
+
+        assert_eq!(st.status, Status::Lost);
+    }
+
+    #[test]
+    fn an_orphaned_review_whose_only_response_was_lost_reads_lost() {
+        // Spec §16.5's shape with the ack that the incident lacked: one
+        // response, and the server says it never landed. A single response is
+        // trivially the winner, so the ack names it and the review reads lost
+        // rather than answered.
+        let st = fold(&[
+            plan_review("p-1"),
+            review_response("p-1", "approved", "resp-A"),
+            ack("p-1", "resp-A", "lost"),
+        ]);
+
+        assert_eq!(st.status, Status::Lost);
+    }
+
+    #[test]
+    fn a_human_verdict_of_cancelled_is_answered_not_cancelled() {
+        // §7.2's `cancelled` cell is `cancel_review{cancelled}` — the agent
+        // died or was superseded and nobody replied. A human picking
+        // "cancelled" on the review did reply. Opposite facts; the pill must
+        // not conflate them.
+        let st = fold(&[plan_review("p-1"), review_response("p-1", "cancelled", "resp-A")]);
+
+        assert_eq!(st.status, Status::Answered);
+        assert_eq!(st.verdict, Some(Verdict::Cancelled));
+        assert_eq!(
+            fold(&[plan_review("p-2"), cancel("p-2", "cancelled")]).status,
+            Status::Cancelled,
+            "the real cancelled cell still reads cancelled"
+        );
+    }
+
+    #[test]
+    fn a_lost_ack_cannot_resurrect_a_cancelled_review() {
+        // A cancel settled it, so no response was selected as winner and
+        // there is nothing for an ack to name. "Cancelled" is the more
+        // informative fact anyway: nobody replied at all.
+        let st = fold(&[
+            plan_review("p-1"),
+            cancel("p-1", "agent_exited"),
+            review_response_at("p-1", "approved", "resp-A", "laptop", 200),
+            ack("p-1", "resp-A", "lost"),
+        ]);
+
+        assert_eq!(st.status, Status::AgentGone);
     }
 
     #[test]
@@ -445,16 +583,15 @@ mod tests {
         // plausibly depend on where in the walk it lands.
         let evs = vec![
             plan_review("p-1"),
-            review_response("p-1", "approved"),
-            Event {
-                ntfy_id: "second-responder".to_string(),
-                ntfy_time: 15,
-                ..review_response("p-1", "rejected")
-            },
-            cancel("p-1", "agent_exited"),
-            ack("p-1", "lost"),
+            review_response_at("p-1", "approved", "resp-A", "phone", 10),
+            review_response_at("p-1", "rejected", "resp-B", "laptop", 15),
+            // Late enough that the response wins, so the ack path below is
+            // genuinely exercised rather than short-circuited by the cancel.
+            Event { ntfy_time: 30, ..cancel("p-1", "agent_exited") },
+            ack("p-1", "resp-A", "lost"),
         ];
         let expected = fold(&evs);
+        assert_eq!(expected.status, Status::Lost, "the set must exercise the ack path");
 
         for permutation in permutations(&evs) {
             assert_eq!(fold(&permutation), expected, "{:?}", ids(&permutation));
