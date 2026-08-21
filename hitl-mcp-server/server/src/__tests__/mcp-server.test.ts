@@ -369,8 +369,12 @@ describe('handleReviewPlan sender identity', () => {
     const published = (await capturePublishedReview(CONFIG)) as { sender?: { label: string; source: string } };
 
     expect(published.sender).toBeDefined();
-    expect(published.sender?.label).toContain(CONFIG.deviceName);
-    expect(['session', 'worktree', 'path']).toContain(published.sender?.source);
+    // defaultSessionNameResolver now always mints an id (Task 4), so this
+    // resolves at the session tier and the label is composed per spec §5.4
+    // (repo · branch · id-prefix) rather than carrying CONFIG.deviceName —
+    // deviceName only appears in the worktree/path tiers' labels.
+    expect(published.sender?.source).toBe('session');
+    expect(published.sender?.label).toMatch(/ · [0-9a-f-]{4}$/);
   });
 
   it('omits sender entirely from the published JSON when identityEnabled is false', async () => {
