@@ -25,7 +25,21 @@ use crate::sink::ArchivistSink;
 
 /// Where the archive lives. Beside `config.json`, whose security posture it
 /// inherits: both hold decrypted material in the home directory (spec §11).
+///
+/// `HITL_ARCHIVIST_DB` overrides it. That exists so a live run can be pointed
+/// somewhere disposable: `dirs::home_dir()` on Windows resolves through
+/// `SHGetKnownFolderPath` and ignores `HOME`/`USERPROFILE`, so there is
+/// otherwise no way to try this binary without writing to the real home.
 fn archive_path() -> Result<std::path::PathBuf, String> {
+    if let Some(path) = std::env::var_os("HITL_ARCHIVIST_DB") {
+        let path = std::path::PathBuf::from(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+        }
+        return Ok(path);
+    }
+
     let home = dirs::home_dir().ok_or("could not determine the home directory")?;
     let dir = home.join(".hitl");
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;

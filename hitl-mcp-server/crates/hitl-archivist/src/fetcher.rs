@@ -1,4 +1,4 @@
-//! The task that races ntfy's three-hour attachment expiry.
+//! The task that races ntfy's attachment expiry.
 //!
 //! ntfy keeps messages for `cache-duration` but attachments only for
 //! `attachment-expiry-duration` — 3 h by default (spec §8.3). A plan body over
@@ -6,17 +6,79 @@
 //! gone for good: no backfill recovers it, because the bytes no longer exist
 //! anywhere. That single fact is why the archivist exists at all.
 //!
-//! Jobs arrive from [`crate::sink::ArchivistSink`] the moment an event is
-//! recorded, and this task is the only thing between them and the network.
+//! # Recovering a fetch that died with the process
+//!
+//! The archivist is a daemon on a laptop. It is killed at logout, sleep, reboot
+//! and update, routinely — and any fetch in flight at that moment dies with it.
+//! That, not a crash, is the common way a body goes missing.
+//!
+//! Recovery is the startup cache poll, which `subscribe_loop` already performs
+//! before the live subscription: every cached event is replayed through
+//! [`crate::sink::ArchivistSink::on_event`], and any attachment body not
+//! already in `bodies` is queued again. The URL has to come from ntfy's
+//! envelope, because that is the only place it ever exists — it is assigned by
+//! the PUT and never appears inside our own message, so it is not in the
+//! `events` table and a sweep over local rows could not produce it.
+//!
+//! That costs nothing in reach. ntfy's cache window is far longer than its
+//! attachment expiry (12 h against 3 h by default, and the user is raising the
+//! former), so every attachment that is still *fetchable* is still in the
+//! cache. Anything the poll cannot see was unrecoverable before we looked.
+//!
+//! # Not retrying forever
+//!
+//! Because the poll replays the whole cache on every boot, a body that can
+//! never be fetched would be re-attempted on every boot for as long as its
+//! event stays cached — and that window is exactly what the user is lengthening.
+//! Two bounds stop it, and neither needs a schema change:
+//!
+//! 1. [`crate::sink`] refuses to queue an attachment whose `expires` has
+//!    passed, so a dead URL is never fetched even once.
+//! 2. [`GivenUp`] below drops a hash for the rest of the run once a fetch fails
+//!    in a way a retry cannot fix.
+//!
+//! A *transient* failure is deliberately not given up on: it stays queueable,
+//! so the next reconnect or restart tries it again while the attachment lives.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use hitl_transport::ntfy::dispatch::ReviewBodyError;
 use hitl_transport::ntfy::http::download_attachment;
+use hitl_transport::payload::PayloadError;
 
 use crate::archive::{Archive, BodyOutcome};
 use crate::sink::BodyJob;
+
+/// Hashes this run has stopped trying, and why it is safe to.
+///
+/// In-process only, and that is the right scope: the cross-boot bound is the
+/// expiry check in the sink, which is authoritative because it comes from ntfy.
+/// Persisting give-up state would need a table `hitl-store` does not have.
+#[derive(Default)]
+pub struct GivenUp(HashSet<String>);
+
+impl GivenUp {
+    pub fn should_attempt(&self, content_hash: &str) -> bool {
+        !self.0.contains(content_hash)
+    }
+
+    pub fn give_up(&mut self, content_hash: &str) {
+        self.0.insert(content_hash.to_string());
+    }
+}
+
+/// Whether re-running this fetch could ever produce a different answer.
+///
+/// The distinction the retry policy turns on. A 404 means the bytes are gone
+/// from the server; a hash mismatch means the bytes that exist are not the ones
+/// the message describes, and fetching them again yields the same bytes; a
+/// missing key will not appear mid-run. A network error is none of those.
+fn is_permanent(error: &ReviewBodyError) -> bool {
+    matches!(error, ReviewBodyError::Payload(PayloadError::Expired))
+}
 
 /// Drain fetch jobs until the sink is dropped.
 pub async fn run(
@@ -24,37 +86,100 @@ pub async fn run(
     mut jobs: UnboundedReceiver<BodyJob>,
     encryption_key: Option<String>,
 ) {
+    let mut given_up = GivenUp::default();
+
     while let Some(job) = jobs.recv().await {
-        fetch_one(&archive, &job, encryption_key.as_deref()).await;
+        fetch_one(&archive, &job, encryption_key.as_deref(), &mut given_up).await;
     }
     log::info!("body fetcher stopped: no sink is sending any more");
 }
 
-async fn fetch_one(archive: &Archive, job: &BodyJob, key: Option<&str>) {
+async fn fetch_one(
+    archive: &Archive,
+    job: &BodyJob,
+    key: Option<&str>,
+    given_up: &mut GivenUp,
+) {
     if archive.has_body(&job.content_hash) {
+        return;
+    }
+    if !given_up.should_attempt(&job.content_hash) {
+        log::debug!("not retrying {} this run", job.content_hash);
         return;
     }
 
     let cipher = match download_attachment(&job.url).await {
         Ok(bytes) => bytes,
         Err(e) => {
-            // Expected past the expiry window on a `since=all` replay, and the
-            // reason this is a warning rather than an error: a body that was
-            // captured on a previous run is caught by the check above, so what
-            // reaches here is a body genuinely lost before we ever saw it.
-            log::warn!(
-                "could not fetch attachment for {}: {e} — that body is now unrecoverable",
-                job.content_hash
-            );
+            if is_permanent(&e) {
+                given_up.give_up(&job.content_hash);
+                log::warn!(
+                    "attachment for {} is gone from the server ({e}); it will not be retried — \
+                     that body is unrecoverable",
+                    job.content_hash
+                );
+            } else {
+                // Left queueable on purpose: the next reconnect or restart
+                // replays the cache and tries again, and the attachment may
+                // still be there.
+                log::warn!(
+                    "could not fetch attachment for {} ({e}); will retry on the next replay",
+                    job.content_hash
+                );
+            }
             return;
         }
     };
 
     match archive.capture_body(&job.content_hash, &cipher, key) {
-        BodyOutcome::Stored => {
-            log::info!("captured attachment body {}", job.content_hash)
-        }
+        BodyOutcome::Stored => log::info!("captured attachment body {}", job.content_hash),
         BodyOutcome::AlreadyHeld => {}
+        // Re-fetching cannot change either of these: the bytes on the server
+        // are what they are, and a key absent now is absent for the run.
+        other @ (BodyOutcome::HashMismatch { .. } | BodyOutcome::Undecryptable(_)) => {
+            given_up.give_up(&job.content_hash);
+            log::error!(
+                "attachment body {} not captured: {other:?} — not retrying this run",
+                job.content_hash
+            );
+        }
         other => log::error!("attachment body {} not captured: {other:?}", job.content_hash),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hash_is_attempted_until_it_is_given_up_on() {
+        let mut given_up = GivenUp::default();
+        assert!(given_up.should_attempt("sha-1"));
+
+        given_up.give_up("sha-1");
+
+        assert!(!given_up.should_attempt("sha-1"), "a dead fetch must not repeat");
+        assert!(given_up.should_attempt("sha-2"), "and must not block anything else");
+    }
+
+    #[test]
+    fn only_a_definitively_gone_attachment_is_given_up_on() {
+        // The retry policy in one assertion. A 404/410 means the bytes left the
+        // server; everything else may be this minute's problem only, and giving
+        // up on it would discard a body that was still there.
+        assert!(is_permanent(&ReviewBodyError::Payload(PayloadError::Expired)));
+
+        assert!(!is_permanent(&ReviewBodyError::Network("timed out".into())));
+        assert!(!is_permanent(&ReviewBodyError::Network("502".into())));
+        assert!(!is_permanent(&ReviewBodyError::NoAttachment));
+    }
+
+    #[test]
+    fn a_404_maps_to_the_permanent_case_by_the_kind_the_transport_reports() {
+        // `download_attachment` turns 404 and 410 into exactly this error, so
+        // the mapping above is the one that actually fires in production.
+        let expired = ReviewBodyError::Payload(PayloadError::Expired);
+        assert_eq!(expired.kind(), "expired");
+        assert!(is_permanent(&expired));
     }
 }

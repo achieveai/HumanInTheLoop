@@ -27,6 +27,37 @@ pub struct BodyJob {
     pub content_hash: String,
 }
 
+/// Slack on the expiry comparison.
+///
+/// `expires` is ntfy's clock and `now` is ours, and the two are compared here —
+/// the one place in this crate that mixes them. It is safe only because the
+/// question is "is it worth spending a fetch", never "what order did this
+/// happen in": being wrong near the boundary costs one wasted request or one
+/// skipped retry, not a mis-ordered log. The margin buys errs-toward-trying.
+const EXPIRY_SKEW_MARGIN_SECS: u64 = 5 * 60;
+
+/// Whether ntfy has certainly already dropped this attachment.
+///
+/// `expires` comes from ntfy itself, so this needs no knowledge of how the
+/// server is configured — which matters, because `attachment-expiry-duration`
+/// is tunable and the 3 h in the spec is only the default.
+///
+/// An absent `expires` means ntfy told us nothing, so we try: a wasted request
+/// is far cheaper than a body abandoned while it was still there.
+fn attachment_is_gone(expires: Option<u64>, now: u64) -> bool {
+    match expires {
+        Some(expires) => now > expires.saturating_add(EXPIRY_SKEW_MARGIN_SECS),
+        None => false,
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 pub struct ArchivistSink {
     archive: Arc<Archive>,
     /// Handed to the fetcher task. Unbounded on purpose: this send happens
@@ -80,11 +111,10 @@ impl ArchivistSink {
                 }
             }
             Some("attachment") => {
-                let Some(url) = event
+                let Some(attachment) = event
                     .attachment
                     .as_ref()
-                    .map(|a| a.url.clone())
-                    .filter(|u| !u.is_empty())
+                    .filter(|a| !a.url.is_empty())
                 else {
                     // The message says its body is an attachment and ntfy sent
                     // no attachment metadata. Nothing to fetch, and it will
@@ -97,6 +127,21 @@ impl ArchivistSink {
                     return;
                 };
 
+                // The gate that keeps the startup replay from growing without
+                // bound. Every restart re-polls ntfy's whole cache, and past
+                // the attachment expiry those URLs are permanently dead — so
+                // without this, every boot would re-fetch every body ever
+                // missed, forever, and the storm would grow with the cache
+                // duration the user is raising.
+                if attachment_is_gone(attachment.expires, now_secs()) {
+                    log::debug!(
+                        "attachment for {content_hash} expired at {:?}; not fetching",
+                        attachment.expires
+                    );
+                    return;
+                }
+
+                let url = attachment.url.clone();
                 if self
                     .bodies
                     .send(BodyJob {
@@ -206,6 +251,10 @@ mod tests {
     }
 
     fn event_with_attachment(id: &str, time: u64, url: &str) -> NtfyEvent {
+        attached(id, time, url, None)
+    }
+
+    fn attached(id: &str, time: u64, url: &str, expires: Option<u64>) -> NtfyEvent {
         NtfyEvent {
             id: id.to_string(),
             time,
@@ -214,10 +263,19 @@ mod tests {
                 url: url.to_string(),
                 content_type: None,
                 size: None,
-                expires: None,
+                expires,
             }),
             ..Default::default()
         }
+    }
+
+    /// Comfortably outside any clock skew, in both directions, so these tests
+    /// do not depend on the wall clock they run under.
+    fn long_ago() -> u64 {
+        now_secs() - 30 * 24 * 3600
+    }
+    fn far_ahead() -> u64 {
+        now_secs() + 30 * 24 * 3600
     }
 
     /// A recorded stream: what ntfy actually hands a subscriber over a session.
@@ -434,6 +492,114 @@ mod tests {
 
         assert_eq!(h.jobs.try_recv().ok(), None);
         assert_eq!(h.archive.stats.snapshot().1, 0);
+    }
+
+    // --- Surviving a shutdown that killed a fetch in flight ---
+
+    #[test]
+    fn a_body_missing_after_a_restart_is_queued_again_by_the_cache_replay() {
+        // The case that matters most in practice. The daemon is killed at
+        // logout, sleep or reboot with a fetch in flight; on the next start
+        // `subscribe_loop` polls ntfy's whole cache before subscribing, and
+        // every cached event comes back through `on_event`. A body that never
+        // landed must be queued again — otherwise a routine reboot loses a plan
+        // permanently, which is the exact failure this binary exists to stop.
+        let mut first_run = harness(None);
+        let mut body_ref = encode_payload(&plan_body(), None).unwrap().payload_ref;
+        body_ref.kind = "attachment".to_string();
+        body_ref.data = None;
+        let event = attached("ntfy-1", 1, "https://n/file/p.bin", Some(far_ahead()));
+
+        first_run.sink.on_event(&event, &plan_review_message(&body_ref));
+        assert!(first_run.jobs.try_recv().is_ok(), "queued on the first sighting");
+        // ...and then the process dies before the fetcher gets to it.
+
+        // Restart: same event, replayed off the cache, into a fresh sink whose
+        // archive still has no body for it.
+        let mut restarted = harness(None);
+        restarted.sink.on_event(&event, &plan_review_message(&body_ref));
+
+        assert_eq!(
+            restarted.jobs.try_recv().ok(),
+            Some(BodyJob {
+                url: "https://n/file/p.bin".to_string(),
+                content_hash: body_ref.content_hash.clone(),
+            }),
+            "a body that never landed must be retried on the next start"
+        );
+    }
+
+    #[test]
+    fn a_body_captured_before_the_restart_is_not_fetched_again() {
+        // The other half: the replay must not re-fetch what is already held, or
+        // every boot would spend a request per cached attachment.
+        let mut h = harness(None);
+        let encoded = encode_payload(&plan_body(), None).unwrap();
+        let mut body_ref = encoded.payload_ref.clone();
+        body_ref.kind = "attachment".to_string();
+        body_ref.data = None;
+        h.archive
+            .capture_body(&body_ref.content_hash, &encoded.cipher, None);
+
+        h.sink.on_event(
+            &attached("ntfy-1", 1, "https://n/file/p.bin", Some(far_ahead())),
+            &plan_review_message(&body_ref),
+        );
+
+        assert_eq!(h.jobs.try_recv().ok(), None);
+    }
+
+    #[test]
+    fn an_attachment_past_its_expiry_is_never_queued() {
+        // Without this, every boot re-polls the whole cache and re-queues every
+        // body ever missed — and that storm grows with the cache duration,
+        // which the user is deliberately raising.
+        let mut h = harness(None);
+        let mut body_ref = encode_payload(&plan_body(), None).unwrap().payload_ref;
+        body_ref.kind = "attachment".to_string();
+        body_ref.data = None;
+
+        h.sink.on_event(
+            &attached("ntfy-1", 1, "https://n/file/p.bin", Some(long_ago())),
+            &plan_review_message(&body_ref),
+        );
+
+        assert_eq!(h.jobs.try_recv().ok(), None, "a dead URL must not be fetched even once");
+        assert_eq!(h.archive.count_events().unwrap(), 1, "the event is still recorded");
+    }
+
+    #[test]
+    fn expiry_is_judged_by_ntfys_own_deadline_and_errs_toward_trying() {
+        let now = 1_786_504_000;
+
+        assert!(!attachment_is_gone(Some(now + 3600), now), "still live");
+        assert!(attachment_is_gone(Some(now - 3600), now), "an hour dead");
+
+        // ntfy said nothing: try anyway. A wasted request is far cheaper than a
+        // body abandoned while it was still there.
+        assert!(!attachment_is_gone(None, now));
+
+        // Inside the skew margin, both ways, we still try — `expires` is ntfy's
+        // clock and `now` is ours.
+        assert!(!attachment_is_gone(Some(now - 1), now));
+        assert!(!attachment_is_gone(Some(now - EXPIRY_SKEW_MARGIN_SECS), now));
+        assert!(attachment_is_gone(Some(now - EXPIRY_SKEW_MARGIN_SECS - 1), now));
+    }
+
+    #[test]
+    fn an_expired_attachment_does_not_stop_an_inline_body_being_captured() {
+        // The gate is on the fetch, not on capture: an inline body has nothing
+        // to expire and must still be stored.
+        let h = harness(None);
+        let encoded = encode_payload(&plan_body(), None).unwrap();
+        assert_eq!(encoded.payload_ref.kind, "inline");
+
+        h.sink.on_event(
+            &attached("ntfy-1", 1, "https://n/file/p.bin", Some(long_ago())),
+            &plan_review_message(&encoded.payload_ref),
+        );
+
+        assert!(h.archive.has_body(&encoded.payload_ref.content_hash));
     }
 
     #[test]
