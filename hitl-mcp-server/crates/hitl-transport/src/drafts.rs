@@ -42,7 +42,7 @@ pub struct ReviewDraft {
 }
 
 fn drafts_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".hitl").join("drafts"))
+    crate::paths::hitl_dir().ok().map(|dir| dir.join("drafts"))
 }
 
 /// Which key a draft is filed under: `planId`, falling back to the review id.

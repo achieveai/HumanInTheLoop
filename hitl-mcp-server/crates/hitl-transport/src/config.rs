@@ -3,17 +3,18 @@ use std::path::PathBuf;
 
 use crate::types::HitlConfig;
 
-/// Get the path to the config file (~/.hitl/config.json).
-pub fn config_path() -> PathBuf {
-    dirs::home_dir()
-        .expect("Could not determine home directory")
-        .join(".hitl")
-        .join("config.json")
+/// Get the path to the config file, wherever this platform keeps it.
+///
+/// This was an infallible `PathBuf` that `.expect()`ed a home directory.
+/// Android has none, so the old signature could not express its own failure
+/// and panicked instead of reporting it. See [`crate::paths`].
+pub fn config_path() -> Result<PathBuf, String> {
+    Ok(crate::paths::hitl_dir()?.join("config.json"))
 }
 
-/// Load config from ~/.hitl/config.json.
+/// Load config from this platform's `config.json`.
 pub fn load_config() -> Result<HitlConfig, String> {
-    let path = config_path();
+    let path = config_path()?;
     if !path.exists() {
         return Err(format!(
             "Config not found at {}. Run 'hitl init' to create one.",

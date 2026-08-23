@@ -40,10 +40,7 @@ fn archive_path() -> Result<std::path::PathBuf, String> {
         return Ok(path);
     }
 
-    let home = dirs::home_dir().ok_or("could not determine the home directory")?;
-    let dir = home.join(".hitl");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    Ok(dir.join("archive.db"))
+    hitl_transport::paths::in_hitl_dir("archive.db")
 }
 
 fn init_logging() {

@@ -12,6 +12,7 @@ pub mod config;
 pub mod crypto;
 pub mod drafts;
 pub mod ntfy;
+pub mod paths;
 pub mod payload;
 pub mod status;
 pub mod types;

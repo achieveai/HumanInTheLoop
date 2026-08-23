@@ -20,9 +20,9 @@ use log::{LevelFilter, Metadata, Record};
 /// Past this size the log is rotated to `client.log.1` (one generation kept).
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 
-/// Path of the current log file, or `None` if there is no home directory.
+/// Path of the current log file, or `None` if there is nowhere to keep state.
 pub fn log_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".hitl").join("client.log"))
+    hitl_transport::paths::hitl_dir().ok().map(|dir| dir.join("client.log"))
 }
 
 fn rotated_path(path: &std::path::Path) -> PathBuf {
