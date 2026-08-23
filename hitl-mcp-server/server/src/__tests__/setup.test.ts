@@ -1,4 +1,5 @@
 import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import path from 'path';
 import type { SetupResult } from '../setup.js';
 
 // --- Module-level mocks ---
@@ -140,6 +141,27 @@ describe('setup', () => {
       expect(result).toContain('bin');
       expect(result).not.toContain('target');
       expect(result).not.toContain('.hitl');
+    });
+
+    it('looks for a dev build in the cargo workspace target dir', () => {
+      // The cases above match on the substrings "debug"/"release"/"target",
+      // which every plausible target path contains — so they stayed green
+      // while the prefix was wrong for months. `client/src-tauri` is a member
+      // of the hitl-mcp-server workspace, not a workspace root, so cargo writes
+      // to <workspace>/target/, one level up from server/dist. Assert the whole
+      // resolved path; a substring cannot tell the two apart.
+      const binaryName = process.platform === 'win32' ? 'hitl-client.exe' : 'hitl-client';
+      const searched: string[] = [];
+      mockExistsSync.mockImplementation((p: string) => {
+        searched.push(p);
+        return false;
+      });
+
+      findClientBinary(path.join('/mock/workspace', 'server', 'dist'));
+
+      expect(searched).toContain(path.resolve('/mock/workspace', 'target', 'debug', binaryName));
+      expect(searched).toContain(path.resolve('/mock/workspace', 'target', 'release', binaryName));
+      expect(searched.some((p) => p.includes('src-tauri'))).toBe(false);
     });
   });
 
