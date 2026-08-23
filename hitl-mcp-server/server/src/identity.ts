@@ -61,8 +61,25 @@ function lastTwoSegments(cwd: string): string {
  * and falls back to the path tier's own last-two-segments heuristic when
  * that directory isn't a git repo at all.
  */
+/**
+ * The discriminating part of a session id.
+ *
+ * Claude Code's bridge ids are all shaped `session_<opaque>`, so taking the
+ * first four characters of one yields the literal `sess` for every session on
+ * every machine — a disambiguator that disambiguates nothing, which is the
+ * whole job this suffix exists to do. Minted UUIDs have no such prefix and are
+ * unaffected.
+ *
+ * Stripping a known prefix rather than, say, slicing from the end keeps the
+ * suffix recognisable as the head of an id a user can match against a real
+ * session, and leaves the UUID case byte-for-byte as it was.
+ */
+function shortSessionId(sessionId: string): string {
+  return sessionId.replace(/^session_/, '').slice(0, 4);
+}
+
 function composeSessionLabel(cwd: string, sessionId: string): string {
-  const shortId = sessionId.slice(0, 4);
+  const shortId = shortSessionId(sessionId);
   const repo = detectRepoContext(process.env.CLAUDE_PROJECT_DIR ?? cwd);
   if (repo) return `${repo.name} · ${repo.branch} · ${shortId}`;
   return `${lastTwoSegments(cwd)} · ${shortId}`;

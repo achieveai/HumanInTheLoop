@@ -374,7 +374,12 @@ describe('handleReviewPlan sender identity', () => {
     // (repo · branch · id-prefix) rather than carrying CONFIG.deviceName —
     // deviceName only appears in the worktree/path tiers' labels.
     expect(published.sender?.source).toBe('session');
-    expect(published.sender?.label).toMatch(/ · [0-9a-f-]{4}$/);
+    // Four id characters, whatever alphabet they come from. The old
+    // `[0-9a-f-]{4}` assumed a minted UUID and went red inside any Claude Code
+    // Remote Control session, where the resolver prefers the bridge id instead
+    // — an ambient-environment dependency, not a real regression. The suffix's
+    // *content* is pinned in identity.test.ts against controlled inputs.
+    expect(published.sender?.label).toMatch(/ · [0-9A-Za-z-]{4}$/);
   });
 
   it('omits sender entirely from the published JSON when identityEnabled is false', async () => {

@@ -196,6 +196,26 @@ describe('session identity', () => {
     const identity = resolveSenderIdentity('/repo/path', 'Kay9', () => null);
     expect(identity.source).not.toBe('session');
   });
+
+  it('gives two different bridge sessions two different label suffixes', () => {
+    // Every real bridge id is shaped `session_<opaque>`, so slicing the first
+    // four characters off the raw id produced the literal `sess` for every
+    // session on every machine — the suffix existed to tell concurrent sessions
+    // apart and told you nothing. Two ids differing only after the prefix must
+    // land on different labels.
+    const a = resolveSenderIdentity('/repo/path', 'Kay9', () => 'session_01MDRkE3taa2');
+    const b = resolveSenderIdentity('/repo/path', 'Kay9', () => 'session_ZZ9QfG7xyw41');
+
+    expect(a.label).toBe('repo/path · 01MD');
+    expect(b.label).toBe('repo/path · ZZ9Q');
+    expect(a.label).not.toBe(b.label);
+  });
+
+  it('leaves a minted uuid’s suffix exactly as it was', () => {
+    // The prefix strip must be a no-op for ids that never carried one.
+    const identity = resolveSenderIdentity('/repo/path', 'Kay9', () => 'abcdef123456');
+    expect(identity.label).toBe('repo/path · abcd');
+  });
 });
 
 describe('resolveProjectKey', () => {

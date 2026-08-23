@@ -50,3 +50,26 @@ jobs:
       - run: npm install
       - run: npx playwright install --with-deps chromium
       - run: npx playwright test
+
+  # The Inbox frontend is deliberately not an npm workspace (version-sync.test.ts
+  # pins the root `workspaces` array), so root `npm test --workspaces` never
+  # reaches it and the `ui` job above is pinned to the client. Without this job
+  # all 114 inbox tests -- including layout.spec.ts, the only verification of the
+  # responsive layout -- run nowhere.
+  #
+  # `npm install` runs at hitl-mcp-server, not inbox: @playwright/test is hoisted
+  # there from the client's devDependencies and npx walks up to find it. That is
+  # the documented layout (see inbox/playwright.config.ts), not an accident.
+  inbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+        working-directory: hitl-mcp-server
+      - run: npx playwright install --with-deps chromium
+        working-directory: hitl-mcp-server/inbox
+      - run: npx playwright test
+        working-directory: hitl-mcp-server/inbox
