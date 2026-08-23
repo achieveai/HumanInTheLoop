@@ -748,15 +748,16 @@ pub(crate) mod tests {
     // true, however it stopped. A leak here does not fail loudly — it quietly
     // tells someone to wait for a download that ended minutes ago.
 
-    /// A one-shot HTTP server on loopback, for the paths that need a real
-    /// response rather than a synthesised one.
+    /// A one-shot HTTP server on loopback, answering whatever path is asked of
+    /// it. Returns its base URL. For the paths that need a real response rather
+    /// than a synthesised one.
     ///
     /// `std::net` rather than `tokio::net`: this crate does not enable tokio's
     /// `net` feature, and turning it on so a test could bind a socket would add
     /// a dependency the Inbox itself has no use for.
-    fn serve_once(status: &str, body: &str) -> String {
+    pub(crate) fn serve_once(status: &str, body: &str) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
-        let url = format!("http://{}/file/p.bin", listener.local_addr().expect("addr"));
+        let url = format!("http://{}", listener.local_addr().expect("addr"));
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
@@ -848,12 +849,12 @@ pub(crate) mod tests {
         let (cipher, body_ref) = spilled(None);
 
         let stored = BodyJob {
-            url: serve_once("200 OK", &cipher),
+            url: format!("{}/file/p.bin", serve_once("200 OK", &cipher)),
             content_hash: body_ref.content_hash.clone(),
             ntfy_id: "ntfy-1".to_string(),
         };
         let expired = BodyJob {
-            url: serve_once("404 Not Found", ""),
+            url: format!("{}/file/p.bin", serve_once("404 Not Found", "")),
             content_hash: "sha-expired".to_string(),
             ntfy_id: "ntfy-2".to_string(),
         };

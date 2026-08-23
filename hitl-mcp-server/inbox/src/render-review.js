@@ -170,10 +170,18 @@ function missingState(body) {
     }
 
     if (status === 'unattempted') {
+        // Names no component. Two different things land here — the archivist
+        // has not got to it, or the Inbox's own fetch failed transiently and
+        // left no verdict — and both processes may or may not be running. The
+        // old copy blamed the archivist for a fetch the Inbox may well have
+        // been making, which is the same mistake as the `unreachable` panel on
+        // a body in flight, one layer down.
         return {
             kind: 'unavailable',
             reason: 'unattempted',
-            message: 'The archivist has not fetched this plan’s body yet. Give it a moment and reopen this message.',
+            message: 'No copy of this plan’s body has been stored yet, and nothing is fetching one '
+                + 'right now. Another attempt is made whenever a client reconnects, so this may '
+                + 'clear on its own — reopen this message later to check.',
         };
     }
 

@@ -37,9 +37,16 @@
 //! hour lost: with no way to tell "not captured" from "not captured *yet*",
 //! resolution fell through to the archivist and printed *start it and reopen
 //! this message*. Somebody did, it did not help, and the actual state — bytes
-//! arriving in a few seconds — stayed hidden behind that advice. A body on its
-//! way must never blame a daemon, so [`crate::capture::Pending`] is consulted
-//! before the archivist is.
+//! arriving in a few seconds — stayed hidden behind that advice.
+//!
+//! [`crate::capture::Pending`] is therefore consulted — but *after* the
+//! archivist, not before. §11 casts the archivist as an optimization to use
+//! when it is there, and reading a body it already holds is using it, not
+//! depending on it; the dependency would be having no answer without it, which
+//! is what the local capture now prevents. So a running archivist still serves
+//! the plan immediately instead of making the reader wait out our download, and
+//! a stopped one refuses on loopback in microseconds, which costs nothing
+//! before the honest "still downloading".
 
 use hitl_store::{BodyStatus, Event};
 use serde::Serialize;
@@ -347,31 +354,39 @@ pub async fn load(
         };
     }
 
-    // Between "nothing captured" and "nothing captured *yet*" the store cannot
-    // tell the difference — both are the same absent row — so the in-flight set
-    // is asked, and it is asked here rather than after the archivist because
-    // the archivist has no answer that is more true than this one.
-    //
-    // Only when `local` found nothing at all. A recorded verdict outranks a
-    // download: a body already known to be gone or corrupt must keep saying so
-    // even while a doomed retry is in the air.
-    if matches!(captured, Local::Nothing) && pending.contains(&reference.content_hash) {
-        return BodyOutcome::Fetching;
-    }
-
     match fetch_captured(base, &reference.content_hash).await {
+        // Asked before the in-flight set is consulted, deliberately. An
+        // archivist that already holds these bytes can serve them now, and
+        // making the reader wait out a download we happen to be running would
+        // be slower for no gain.
         Ok(plaintext) => decode(&plaintext, None, &reference.content_hash),
-        // The archivist is allowed to be down (spec §11). When it is, anything
-        // we found out ourselves beats "not reachable" — telling someone to
-        // start a daemon that cannot help is worse than telling them the plan
-        // expired.
-        Err(BodyOutcome::Unreachable { detail }) => match captured {
-            Local::Failed(outcome) => outcome,
-            _ => BodyOutcome::Unreachable { detail },
-        },
-        // Anything else means the archivist answered, and it knows more about
-        // its own archive than our failure row does about ours.
-        Err(outcome) => outcome,
+
+        Err(answer) => {
+            // A verdict we recorded ourselves is the most specific thing we
+            // have about a body this Inbox reached for, and it outranks both a
+            // daemon that is not answering and a retry still in the air: a body
+            // already known to be gone must keep saying so.
+            if let Local::Failed(outcome) = captured {
+                return match answer {
+                    // The archivist is allowed to be down (§11), and telling
+                    // someone to start a daemon that cannot help is worse than
+                    // telling them the plan expired.
+                    BodyOutcome::Unreachable { .. } => outcome,
+                    // It answered, and it knows more about its own archive than
+                    // our failure row does about ours.
+                    other => other,
+                };
+            }
+
+            // Nothing recorded either way. If we are downloading the bytes
+            // right now, that is more true than anything the archivist just
+            // said about not having them — including its 404.
+            if pending.contains(&reference.content_hash) {
+                return BodyOutcome::Fetching;
+            }
+
+            answer
+        }
     }
 }
 
@@ -815,6 +830,54 @@ mod tests {
                 BodyOutcome::Unreachable { .. }
             ),
             "and with nothing in flight the archivist is still the place to look"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_archivist_that_has_the_body_serves_it_rather_than_making_the_reader_wait() {
+        // Why `fetching` is consulted after the archivist and not before. §11
+        // makes the archivist an optimization to use when it is there; reading
+        // a body it already holds is using it, not depending on it. Asking the
+        // set first would have cost this reader the whole download.
+        let store = store();
+        let (cipher, request) = spilled_review(None);
+        let archivist = crate::capture::tests::serve_once("200 OK", &cipher);
+
+        assert!(matches!(
+            load(
+                &store,
+                &fetching(&claimed_hash(&request)),
+                &request,
+                None,
+                &archivist
+            )
+            .await,
+            BodyOutcome::Ok { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_download_in_flight_outranks_the_archivist_saying_it_has_nothing() {
+        // The archivist not having a body is not news when we are fetching it
+        // ourselves. Its 404 would render as `missing`, which reads as a
+        // verdict; the truth is that the bytes are seconds away.
+        let store = store();
+        let (_, request) = spilled_review(None);
+        let archivist = crate::capture::tests::serve_once(
+            "404 Not Found",
+            r#"{"contentHash":"ab","status":"unattempted"}"#,
+        );
+
+        assert_eq!(
+            load(
+                &store,
+                &fetching(&claimed_hash(&request)),
+                &request,
+                None,
+                &archivist
+            )
+            .await,
+            BodyOutcome::Fetching,
         );
     }
 

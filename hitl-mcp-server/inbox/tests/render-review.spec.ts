@@ -206,13 +206,19 @@ test.describe('Pane 3 — a plan that cannot be vouched for (spec §8.3)', () =>
     await expect(page.locator('[data-verdict]')).toHaveCount(0);
   });
 
-  test('the archivist has not fetched it yet, which is not the same as gone', async ({ page }) => {
+  test('nothing has fetched it yet, which is neither gone nor in flight', async ({ page }) => {
+    // Two processes can fetch a body and neither may be running, so this panel
+    // names no component. It also has to stay distinct from `fetching`: there,
+    // a download is under way and will finish; here, nothing is happening.
     await mount(page, 'review', review(),
       { body: { outcome: 'missing', status: 'unattempted', detail: null, reason: null } });
 
     const shown = await panel(page);
     expect(shown.reason).toBe('unattempted');
-    expect(shown.detail).toContain('has not fetched this plan’s body yet');
+    expect(shown.detail).toContain('nothing is fetching one right now');
+    expect(shown.detail).toContain('may clear on its own');
+    expect(shown.detail).not.toContain('archivist');
+    expect(shown.detail).not.toContain('downloading');
   });
 
   test('a review that arrived with no body at all says exactly that', async ({ page }) => {
