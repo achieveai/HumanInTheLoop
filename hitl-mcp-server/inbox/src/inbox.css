@@ -796,3 +796,154 @@ body {
     background: none;
     padding: 0;
 }
+
+/* --- Responsive layout (mobile spec §4) -------------------------------------
+ *
+ * Driven entirely by `data-layout` / `data-pane` / `data-agents` on <html>,
+ * written by layout.js. No rule here reads a device; every one reads a
+ * pane-count decision, so resizing a desktop window walks through all three.
+ */
+
+.inbox-bar {
+    align-items: center;
+    background: #edf2f7;
+    border-bottom: 1px solid #cbd5e0;
+    display: none;          /* wide: no chrome at all */
+    flex: 0 0 auto;
+    gap: 8px;
+    padding: 8px 12px;
+}
+
+.inbox-bar button {
+    background: transparent;
+    border: 1px solid #cbd5e0;
+    border-radius: 6px;
+    color: #2d3748;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 6px 10px;
+}
+
+.inbox-bar button:hover {
+    background: #e2e8f0;
+}
+
+.inbox-bar-title {
+    color: #4a5568;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+/* The shell becomes a column so the bar can sit above the grid without
+   overlaying it. `.inbox` keeps being the grid; only its height changes. */
+[data-layout='tablet'] body,
+[data-layout='phone'] body {
+    display: flex;
+    flex-direction: column;
+}
+
+[data-layout='tablet'] .inbox-bar,
+[data-layout='phone'] .inbox-bar {
+    display: flex;
+}
+
+[data-layout='tablet'] .inbox,
+[data-layout='phone'] .inbox {
+    flex: 1;
+    height: auto;
+    min-height: 0;
+}
+
+/* --- Tablet: list + detail, agents on demand --- */
+
+[data-layout='tablet'] .inbox {
+    grid-template-columns: minmax(320px, 1fr) minmax(340px, 1.2fr);
+}
+
+/* --- Phone: exactly one pane --- */
+
+[data-layout='phone'] .inbox {
+    grid-template-columns: 1fr;
+}
+
+[data-layout='phone'][data-pane='list'] .pane-detail {
+    display: none;
+}
+
+[data-layout='phone'][data-pane='detail'] .pane-list {
+    display: none;
+}
+
+/* --- The agent tree as an overlay (tablet and phone) ---
+ *
+ * Taken out of the grid entirely rather than hidden in place: a `display:none`
+ * grid child still reserves nothing, but an overlay must not be able to widen
+ * the row it came from when it opens.
+ */
+
+[data-layout='tablet'] .pane-agents,
+[data-layout='phone'] .pane-agents {
+    border-right: 1px solid #cbd5e0;
+    bottom: 0;
+    box-shadow: 2px 0 12px rgba(0, 0, 0, 0.18);
+    display: none;
+    left: 0;
+    position: fixed;
+    top: 0;
+    width: 260px;
+    z-index: 20;
+}
+
+[data-layout='tablet'][data-agents='open'] .pane-agents,
+[data-layout='phone'][data-agents='open'] .pane-agents {
+    display: block;
+}
+
+.inbox-scrim {
+    display: none;
+}
+
+[data-layout='tablet'][data-agents='open'] .inbox-scrim,
+[data-layout='phone'][data-agents='open'] .inbox-scrim {
+    background: rgba(0, 0, 0, 0.3);
+    bottom: 0;
+    display: block;
+    left: 0;
+    position: fixed;
+    right: 0;
+    top: 0;
+    z-index: 10;
+}
+
+/* --- Pinned actions (spec §4.1) ---
+ *
+ * `.pane-detail` is already a flex column whose scroll region takes the slack,
+ * so `.detail-actions` is pinned by construction at every width. What narrow
+ * widths change is only that the buttons must not crowd: they stay on one row
+ * and stretch instead of wrapping under the fold.
+ */
+
+[data-layout='phone'] .detail-actions {
+    padding: 12px 16px;
+}
+
+[data-layout='phone'] .detail-actions .button {
+    flex: 1;
+    padding: 10px 12px;
+}
+
+/* Which control the bar shows. Back replaces the menu on the only screen where
+   there is somewhere to go back to — phone, showing detail. */
+
+.inbox-bar #pane-back {
+    display: none;
+}
+
+[data-layout='phone'][data-pane='detail'] .inbox-bar #pane-back {
+    display: inline-block;
+}
+
+[data-layout='phone'][data-pane='detail'] .inbox-bar #agents-toggle {
+    display: none;
+}

@@ -6,6 +6,7 @@
 // rule carried all the way to the DOM — nothing here can drift from what the
 // events say, because nothing here remembers anything.
 
+import { createLayoutObserver, createPaneState } from './layout.js';
 import { renderAgentTree } from './pane-agents.js';
 import { createDetailPane } from './pane-detail.js';
 import { renderFilterBar, renderMessageList } from './pane-list.js';
@@ -14,7 +15,13 @@ import { createReplyActions } from './reply.js';
 /** Emitted by the Rust side when a genuinely new event lands. */
 const CHANGED_EVENT = 'inbox-changed';
 
-export function createInbox({ invoke, elements, onError = console.error, actions = {} }) {
+/**
+ * `panes` is the pane-visibility state from layout.js. It is optional because
+ * the renderer tests build an Inbox without any shell around it; when it is
+ * absent every navigation call is a no-op and the three panes simply coexist,
+ * which is exactly the wide layout.
+ */
+export function createInbox({ invoke, elements, onError = console.error, actions = {}, panes = null }) {
     const { agents, filterBar, messageList, detail } = elements;
 
     const detailPane = createDetailPane({ container: detail, invoke, onError, actions });
@@ -78,6 +85,9 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         // A different agent is a different question about what needs you, so
         // its filter is re-defaulted rather than inherited.
         state.filter = null;
+        // Picking an agent is picking a list to read (spec §4.2). This also
+        // dismisses the overlay the pick was made from.
+        panes?.show('list');
         return run(refresh());
     }
 
@@ -89,6 +99,10 @@ export function createInbox({ invoke, elements, onError = console.error, actions
     function selectMessage(message) {
         state.selectedId = message.messageId;
         state.selectedStatus = message.status;
+        // Selection and layout are independent (spec §4.2): this records which
+        // pane is frontmost, and never touches which message is selected. That
+        // is why widening the window restores the pair intact.
+        panes?.show('detail');
         for (const row of messageList.querySelectorAll('.message-row')) {
             row.classList.toggle('is-selected', row.dataset.messageId === message.messageId);
         }
@@ -104,8 +118,26 @@ async function main() {
 
     const invoke = tauri.core.invoke;
 
+    // Layout first: it writes `data-layout` before the first paint, so the
+    // window opens in the right shape instead of flashing three panes and
+    // collapsing to one.
+    createLayoutObserver();
+    const panes = createPaneState();
+
+    // The back gesture has no DOM event to hang off: on Android the platform
+    // delivers it to the shell, which has to reach into the page to answer it
+    // (spec §4.1). A named global is that reach-in point. It returns false when
+    // there was nothing to go back to, which is the shell's signal that exiting
+    // is now the correct response.
+    window.__PANES = panes;
+
+    document.getElementById('agents-toggle')?.addEventListener('click', () => panes.toggleAgents());
+    document.getElementById('pane-back')?.addEventListener('click', () => panes.back());
+    document.getElementById('inbox-scrim')?.addEventListener('click', () => panes.toggleAgents(false));
+
     const inbox = createInbox({
         invoke,
+        panes,
         // Replies go out through `hitl-transport` on the shared topic, exactly
         // as any other device's do (spec §9.1). Nothing here records a status:
         // the reply is an event, and the next fold decides what it meant.

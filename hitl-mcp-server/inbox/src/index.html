@@ -15,6 +15,15 @@
     <script src="vendor/markdown-it.min.js"></script>
 </head>
 <body>
+    <!-- Layout chrome (mobile spec §4). Hidden entirely at wide widths.
+         Lives outside every pane because pane 3 clears its own container. -->
+    <div class="inbox-bar">
+        <button id="pane-back" aria-label="Back">←</button>
+        <button id="agents-toggle" aria-label="Agents">☰</button>
+        <span class="inbox-bar-title">Inbox</span>
+    </div>
+    <div class="inbox-scrim" id="inbox-scrim"></div>
+
     <div class="inbox">
         <!-- Pane 1: the agent tree (spec §6) -->
         <aside class="pane pane-agents" id="pane-agents" aria-label="Agents"></aside>
