@@ -485,9 +485,29 @@ A headless binary sharing `hitl-transport`.
 - Ships as an OS login item.
 
 **It is an optimization, not a dependency.** Every client works when the archivist is
-down; it simply cannot see further back than ntfy's 12 h window. On startup a client asks
+down; it simply cannot see further back than ntfy's own retention. On startup a client asks
 the archivist for anything it missed, and falls back to `?poll=1&since=all` if the
 archivist is unreachable.
+
+**That reach is two numbers, not one** (corrected 2026-08-22, after the Inbox shipped and
+the single-number version proved misleading). ntfy retains *messages* for 12 h but deletes
+*attachments* after 3 h, and a plan body larger than 2 KB spills to an attachment. So
+without the archivist:
+
+| Body | Reach without the archivist |
+|---|---|
+| Inline (≤ 2 KB) | 12 h — the message carries it |
+| Spilled to an attachment | **3 h** — after that the bytes are gone and it resolves `gone`, permanently |
+
+A client that was *running* when the message arrived is not bound by the 3 h figure: it
+captures the attachment at ingest and keeps it. The 3 h ceiling applies to what a client
+can still recover for a message it did not witness — which is exactly the case the
+archivist exists to cover, and is why "12 h" understated its value rather than overstating
+it.
+
+This matters most for mobile (see `2026-08-21-inbox-mobile-design.md` §5.2), because a
+phone can never reach the archivist on `127.0.0.1` and therefore lives permanently under
+the 3 h ceiling for spilled bodies.
 
 Because it runs on the user's own machine and already has `encryptionKey` from
 `~/.hitl/config.json`, it stores decrypted payloads. The database inherits the security
@@ -590,6 +610,14 @@ Open: which provider and model; where the key lives (a new field in `~/.hitl/con
 vs. the OS keychain); whether to support a local model for the privacy-sensitive case.
 
 ## 13. Mobile (later, not v1)
+
+> **Superseded by `2026-08-21-inbox-mobile-design.md`.** Kept for provenance. Two
+> claims below did not survive contact with research: iOS is not merely unscaffolded
+> but **impossible to build from Windows** (Tauri requires macOS-only Xcode), and the
+> "12 h window" figure is corrected in §11 above — a phone lives under a **3 h**
+> ceiling for any plan body that spilled to an attachment. The sketch below is also
+> silent on the decision that shapes the whole design: a Tauri Android app's Rust
+> backend is suspended when backgrounded, so it cannot hold a live subscription.
 
 Tauri v2 supports mobile; the client simply never scaffolded it. The path:
 
