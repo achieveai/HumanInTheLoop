@@ -191,10 +191,71 @@ fn now_secs() -> u64 {
 /// key to `~/.hitl/config.json` then takes effect on the next message that
 /// arrives instead of on the next restart. Only reached for an event that
 /// actually carries a body, which is rare enough that the read is free.
-fn encryption_key() -> Option<String> {
-    hitl_transport::config::load_config()
-        .unwrap_or_default()
-        .encryption_key
+/// The key to capture with, or `None` to leave this body alone for now.
+///
+/// The distinction that matters is *no key* versus *no answer*, and only the
+/// second one must stop a capture.
+///
+/// No config file is a settled fact: this install has no key, an encrypted body
+/// genuinely cannot be read, and `Undecryptable` is the honest verdict. But a
+/// config that exists and will not load — half-written by `saveConfig`'s
+/// truncate-then-write, unparseable, unreadable — tells us nothing about whether
+/// a key is configured. Collapsing that into "no key" is how a momentary problem
+/// became permanent loss: `capture_body` fails to decrypt, writes a *durable*
+/// `Undecryptable` row, `should_fetch` then refuses to re-queue the body for as
+/// long as the row stands, and the ciphertext is dropped rather than stored — so
+/// once ntfy expires the attachment a few hours later the body is gone for good.
+/// `FailureReason`'s own rule forbids exactly this: only outcomes a retry cannot
+/// fix belong in that table, and a config one line from being fixed is the
+/// definition of retryable.
+///
+/// Skipping costs a delay — an unencrypted body waits for the next replay too,
+/// though it never needed the key. That is the right trade: a delayed capture is
+/// recoverable, a discarded body is not.
+fn key_for_capture(content_hash: &str) -> Option<Option<String>> {
+    // `load_config` reports "missing" and "broken" through the same `Err`, so
+    // the file is asked about separately rather than reading the reason back out
+    // of a message. Only the I/O lives here; the rule itself is `decide_key`,
+    // which is where the tests are.
+    let exists = match hitl_transport::config::config_path() {
+        Ok(path) => Some(path.exists()),
+        Err(e) => {
+            log::warn!("cannot resolve where the config lives ({e})");
+            None
+        }
+    };
+    let loaded = || hitl_transport::config::load_config().map(|c| c.encryption_key);
+
+    let decided = decide_key(exists, loaded);
+    if decided.is_none() {
+        log::warn!(
+            "could not establish whether an encryption key is configured; leaving body \
+             {content_hash} un-noted so the next ntfy replay retries it, rather than \
+             recording it as undecryptable on the strength of a key never looked up"
+        );
+    }
+    decided
+}
+
+/// The rule behind [`key_for_capture`], separated from the filesystem so it can
+/// be tested without touching a real config or the process environment.
+///
+/// `exists` is `None` when even the config's *location* is unresolvable.
+fn decide_key(
+    exists: Option<bool>,
+    load: impl FnOnce() -> Result<Option<String>, String>,
+) -> Option<Option<String>> {
+    match exists {
+        // Settled fact: this install has no key. An encrypted body really is
+        // unreadable and `Undecryptable` is the honest, durable verdict.
+        Some(false) => Some(None),
+        // Nothing is known about the key, so nothing may be concluded about the
+        // body. Leave it for a later replay.
+        None => None,
+        // The file is there but will not load — half-written, unparseable,
+        // unreadable. That says nothing about whether a key is configured.
+        Some(true) => load().ok(),
+    }
 }
 
 fn with_store<T>(store: &SharedStore, f: impl FnOnce(&Store) -> T) -> T {
@@ -252,7 +313,7 @@ pub fn capture(store: &SharedStore, queue: &Queue, payload: &Value, event: &Ntfy
             // Already in our hands: verified and stored right here. No fetch,
             // no channel, nothing to expire.
             if let Some(data) = body.get("data").and_then(|v| v.as_str()) {
-                let key = encryption_key();
+                let Some(key) = key_for_capture(content_hash) else { return };
                 let outcome = with_store(store, |s| {
                     s.capture_body(content_hash, data, key.as_deref(), Some(&event.id))
                 });
@@ -371,7 +432,7 @@ fn settle(store: &SharedStore, job: &BodyJob, downloaded: Result<String, ReviewB
         }
     };
 
-    let key = encryption_key();
+    let Some(key) = key_for_capture(&job.content_hash) else { return };
     // `capture_body` writes the failure row itself for a mismatch or a missing
     // key — it is the only place that knows which, and what the bytes hashed to.
     let outcome = with_store(store, |s| {
@@ -495,6 +556,50 @@ pub(crate) mod tests {
             content_hash: hash.to_string(),
             ntfy_id: "ntfy-1".to_string(),
         }
+    }
+
+    // --- Whether a capture may proceed at all ---
+
+    // A config that will not load must never be mistaken for a config that says
+    // "no key". The first is a question we failed to ask; only the second is an
+    // answer. Recording `Undecryptable` on the strength of the first is what
+    // turned a half-written config file into permanently lost plan bodies: the
+    // failure row is durable, `should_fetch` honours it forever, and the
+    // ciphertext is dropped rather than stored.
+
+    #[test]
+    fn no_config_file_means_no_key_and_capture_proceeds() {
+        // Settled fact, not an unknown: an encrypted body genuinely cannot be
+        // read here, so `Undecryptable` is honest and capture must not stall.
+        let decided = decide_key(Some(false), || panic!("must not read a file that is not there"));
+        assert_eq!(decided, Some(None));
+    }
+
+    #[test]
+    fn a_configured_key_is_passed_through() {
+        let decided = decide_key(Some(true), || Ok(Some("k".to_string())));
+        assert_eq!(decided, Some(Some("k".to_string())));
+    }
+
+    #[test]
+    fn a_config_that_exists_but_will_not_load_stops_the_capture() {
+        // The half-written window of a truncate-then-write save lands here.
+        let decided = decide_key(Some(true), || Err("Failed to parse config".to_string()));
+        assert_eq!(decided, None, "an unreadable config must not be read as 'no key'");
+    }
+
+    #[test]
+    fn an_unresolvable_config_location_stops_the_capture() {
+        let decided = decide_key(None, || panic!("must not load when the path is unknown"));
+        assert_eq!(decided, None);
+    }
+
+    #[test]
+    fn a_present_config_with_no_key_still_captures() {
+        // Distinct from the unreadable case above and easy to conflate: the file
+        // loaded, it simply has no key. That is an answer.
+        let decided = decide_key(Some(true), || Ok(None));
+        assert_eq!(decided, Some(None));
     }
 
     // --- What ingest decides ---
