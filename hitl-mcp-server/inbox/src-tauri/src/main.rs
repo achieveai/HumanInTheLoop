@@ -22,6 +22,7 @@ use hitl_transport::status::ConnectionStatus;
 use tauri::{Emitter, Manager};
 
 use crate::body::BodyOutcome;
+use crate::capture::{Pending, Queue};
 use crate::detail::MessageDetail;
 use crate::sink::{InboxSink, SharedStore};
 use crate::view::{MessageList, SessionTree};
@@ -144,6 +145,7 @@ fn get_message(
 #[tauri::command]
 async fn get_body(
     store: tauri::State<'_, SharedStore>,
+    pending: tauri::State<'_, Arc<Pending>>,
     message_id: String,
 ) -> Result<BodyOutcome, String> {
     // The request event is copied out and the lock released before anything is
@@ -168,7 +170,14 @@ async fn get_body(
         .unwrap_or_default()
         .encryption_key;
 
-    Ok(body::load(&store, &request, key.as_deref(), &backfill::archivist_base()).await)
+    Ok(body::load(
+        &store,
+        &pending,
+        &request,
+        key.as_deref(),
+        &backfill::archivist_base(),
+    )
+    .await)
 }
 
 fn init_logging() {
@@ -230,11 +239,17 @@ fn main() {
     // Attachment bodies, from the sink that sees the envelope to the task that
     // fetches them. Created here so the sender can be handed to the sink and
     // the receiver to the fetcher, both inside `setup`.
-    let (body_jobs, pending_bodies) = tokio::sync::mpsc::unbounded_channel();
+    let (body_jobs, body_queue) = tokio::sync::mpsc::unbounded_channel();
+
+    // Which of those fetches are still outstanding. Managed so `get_body` can
+    // answer "downloading" instead of falling through to the archivist and
+    // blaming a daemon that has nothing to do with this fetch.
+    let pending = Arc::new(Pending::default());
 
     tauri::Builder::default()
         .manage(store)
         .manage(waiters.clone())
+        .manage(pending.clone())
         // Nothing in the Inbox cancels a review — that is the popup client's
         // tray, and a second thing offering to release the same agent would be
         // two. `submit_review_response` still needs one to settle into.
@@ -258,14 +273,18 @@ fn main() {
             tauri::async_runtime::spawn(catch_up(store.clone()));
             // Off the subscribe loop on purpose: an attachment gets 60 s, and
             // awaiting one inline would stall every event behind it.
-            tauri::async_runtime::spawn(capture::run(store.clone(), pending_bodies));
+            tauri::async_runtime::spawn(capture::run(
+                store.clone(),
+                body_queue,
+                pending.clone(),
+            ));
 
             tauri::async_runtime::spawn(async move {
                 let notify = handle.clone();
                 let sink = InboxSink::new(
                     store,
                     waiters,
-                    body_jobs,
+                    Queue::new(body_jobs, pending),
                     Box::new(move || {
                         if let Err(e) = notify.emit(CHANGED_EVENT, ()) {
                             log::warn!("could not notify the window of new events: {e}");

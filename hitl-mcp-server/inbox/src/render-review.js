@@ -60,6 +60,24 @@ export function panelStateFor(body) {
         return { kind: 'hash_mismatch', reason: 'hash_mismatch' };
     }
 
+    if (outcome === 'fetching') {
+        // Deliberately adjacent to `unreachable` below, because the two are one
+        // word apart and opposite in what they ask of the reader. The Inbox
+        // grabs an attachment the moment its message arrives; between that and
+        // the bytes landing there is a real interval, and this is what it looks
+        // like. Saying "start the archivist" here — which is what happened
+        // before this arm existed — sends someone to fix a component that has
+        // no part in this fetch, and hides the fact that the plan is seconds
+        // away.
+        return {
+            kind: 'unavailable',
+            reason: 'fetching',
+            message: 'This plan’s body is still downloading. The Inbox started fetching it the '
+                + 'moment the message arrived, so nothing is wrong and nothing needs starting — '
+                + 'it simply has not finished yet. Reopen this message in a moment.',
+        };
+    }
+
     if (outcome === 'unreachable') {
         // Spec §11: every client works when the archivist is down. This is a
         // connection failure, not a `BodyStatus` — the body is very probably

@@ -30,6 +30,9 @@
 //! Nothing here touches `list_messages` or `list_sessions`, which stay pure
 //! functions of `(events, now)`.
 
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
 use hitl_store::{BodyFailure, CaptureOutcome, FailureReason, Store};
 use hitl_transport::ntfy::dispatch::ReviewBodyError;
 use hitl_transport::ntfy::http::download_attachment;
@@ -49,6 +52,130 @@ pub struct BodyJob {
     /// referenced the body. The fetch happens on another task, long after the
     /// envelope that produced it is out of scope.
     pub ntfy_id: String,
+}
+
+/// The bodies this process currently has a fetch out for.
+///
+/// # Why this exists
+///
+/// Without it, "the download is still running" and "this Inbox never saw the
+/// message" are **the same absence of a row** in `body_failures`, and body
+/// resolution had to guess. It guessed the second, fell through to the
+/// archivist, and told the reader *"The archivist is not running — start it."*
+/// That advice cost a user an hour: they started the daemon, it could not help,
+/// and it hid the real state, which was simply that the bytes were on their way.
+///
+/// This set is the one fact that separates them.
+///
+/// # In memory, deliberately
+///
+/// A fetch cannot outlive the process that raised it. A durable set would come
+/// back from a restart naming downloads nobody is performing, leaving a body
+/// permanently "on its way" — the same failure this exists to prevent, inverted.
+#[derive(Default)]
+pub struct Pending {
+    hashes: Mutex<HashSet<String>>,
+}
+
+impl Pending {
+    fn with<T>(&self, f: impl FnOnce(&mut HashSet<String>) -> T) -> T {
+        let mut guard = self.hashes.lock().unwrap_or_else(|p| p.into_inner());
+        f(&mut guard)
+    }
+
+    /// Claim `hash` for a fetch about to be queued. `false` if one is already
+    /// out for it — a second GET would race the first for the same bytes.
+    fn claim(&self, hash: &str) -> bool {
+        self.with(|hashes| hashes.insert(hash.to_string()))
+    }
+
+    fn release(&self, hash: &str) {
+        self.with(|hashes| hashes.remove(hash));
+    }
+
+    /// Whether a fetch for this body is queued or running right now.
+    pub fn contains(&self, hash: &str) -> bool {
+        self.with(|hashes| hashes.contains(hash))
+    }
+
+    /// Drop a claim the way a finished fetch does.
+    ///
+    /// Tests only. In the running Inbox nothing but a [`Claim`] may release a
+    /// hash, because a release someone has to remember to write is a release
+    /// someone will forget on the one path that matters.
+    #[cfg(test)]
+    pub(crate) fn finish(&self, hash: &str) {
+        self.release(hash);
+    }
+
+    /// Stand in for a fetch this test is not going to run. Tests only, for the
+    /// same reason as [`Pending::finish`].
+    #[cfg(test)]
+    pub(crate) fn mark(&self, hash: &str) {
+        self.claim(hash);
+    }
+
+    /// Take responsibility for releasing a hash claimed at ingest.
+    fn adopt<'a>(&'a self, hash: &str) -> Claim<'a> {
+        Claim {
+            pending: self,
+            hash: hash.to_string(),
+        }
+    }
+}
+
+/// Releases its hash when it goes out of scope — on **every** path out of a
+/// fetch: stored, refused before it started, failed transiently, given up on,
+/// panicked, or dropped mid-await when the runtime shuts down.
+///
+/// A hash that leaked would leave its message reading "still downloading"
+/// forever, telling the reader to wait for something that will never arrive.
+/// That is the bug this whole change is fixing, pointed the other way, so the
+/// release is RAII rather than a line at the end of a function someone will
+/// later return early from.
+struct Claim<'a> {
+    pending: &'a Pending,
+    hash: String,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        self.pending.release(&self.hash);
+    }
+}
+
+/// Where ingest puts an attachment it wants fetched.
+///
+/// The channel and the [`Pending`] set are one type because they must move
+/// together. A job spends real time queued before [`run`] picks it up, and for
+/// that whole interval the body has to already read as "on its way" — claiming
+/// in the fetcher instead would leave a window in which the download exists and
+/// nothing knows it does, which is the window this change closes.
+pub struct Queue {
+    jobs: UnboundedSender<BodyJob>,
+    pending: Arc<Pending>,
+}
+
+impl Queue {
+    pub fn new(jobs: UnboundedSender<BodyJob>, pending: Arc<Pending>) -> Self {
+        Self { jobs, pending }
+    }
+
+    fn push(&self, job: BodyJob) {
+        let hash = job.content_hash.clone();
+        // ntfy replays its cache on every reconnect, so the same attachment is
+        // offered repeatedly while the first fetch is still running. One GET.
+        if !self.pending.claim(&hash) {
+            return;
+        }
+        if self.jobs.send(job).is_err() {
+            // Nobody will ever adopt this claim, so it must not outlive the
+            // failure: a hash left in the set reads as "still downloading"
+            // forever.
+            self.pending.release(&hash);
+            log::error!("the body fetcher is gone; attachment {hash} will expire uncaptured");
+        }
+    }
 }
 
 fn now_secs() -> u64 {
@@ -101,12 +228,7 @@ pub(crate) fn note_gone(store: &SharedStore, content_hash: &str, ntfy_id: &str, 
 /// Read off the payload's `body` rather than off one message type, so a
 /// `plan_review_response` — which carries a `PlanPayloadRef` of its own and
 /// spills on the same threshold — is covered by the same three lines.
-pub fn capture(
-    store: &SharedStore,
-    jobs: &UnboundedSender<BodyJob>,
-    payload: &Value,
-    event: &NtfyEvent,
-) {
+pub fn capture(store: &SharedStore, queue: &Queue, payload: &Value, event: &NtfyEvent) {
     let Some(body) = payload.get("body") else { return };
 
     let content_hash = body
@@ -172,18 +294,11 @@ pub fn capture(
                 return;
             }
 
-            if jobs
-                .send(BodyJob {
-                    url: attachment.url.clone(),
-                    content_hash: content_hash.to_string(),
-                    ntfy_id: event.id.clone(),
-                })
-                .is_err()
-            {
-                log::error!(
-                    "the body fetcher is gone; attachment {content_hash} will expire uncaptured"
-                );
-            }
+            queue.push(BodyJob {
+                url: attachment.url.clone(),
+                content_hash: content_hash.to_string(),
+                ntfy_id: event.id.clone(),
+            });
         }
         // Any spill kind a newer build invents. Nothing here knows how to fetch
         // it, and guessing would be worse than the archivist's copy.
@@ -192,14 +307,20 @@ pub fn capture(
 }
 
 /// Drain fetch jobs until the sink is dropped.
-pub async fn run(store: SharedStore, mut jobs: UnboundedReceiver<BodyJob>) {
+pub async fn run(store: SharedStore, mut jobs: UnboundedReceiver<BodyJob>, pending: Arc<Pending>) {
     while let Some(job) = jobs.recv().await {
-        fetch_one(&store, &job).await;
+        fetch_one(&store, &pending, &job).await;
     }
     log::info!("inbox body fetcher stopped: no sink is sending any more");
 }
 
-async fn fetch_one(store: &SharedStore, job: &BodyJob) {
+async fn fetch_one(store: &SharedStore, pending: &Pending, job: &BodyJob) {
+    // Taken first so that *every* way out of this function releases the hash —
+    // the refusal below, a transient failure, a verdict, a panic inside
+    // `settle`, or the whole future being dropped when the runtime shuts down
+    // mid-download.
+    let _claim = pending.adopt(&job.content_hash);
+
     if !should_fetch(store, &job.content_hash) {
         return;
     }
@@ -339,15 +460,18 @@ pub(crate) mod tests {
 
     struct Harness {
         store: SharedStore,
-        tx: UnboundedSender<BodyJob>,
+        queue: Queue,
+        pending: Arc<Pending>,
         jobs: mpsc::UnboundedReceiver<BodyJob>,
     }
 
     fn harness() -> Harness {
         let (tx, jobs) = mpsc::unbounded_channel();
+        let pending = Arc::new(Pending::default());
         Harness {
             store: Arc::new(Mutex::new(Store::open_in_memory().expect("opens"))),
-            tx,
+            queue: Queue::new(tx, pending.clone()),
+            pending,
             jobs,
         }
     }
@@ -355,7 +479,7 @@ pub(crate) mod tests {
     impl Harness {
         fn ingest(&self, event: &NtfyEvent, payload: &str) {
             let json: Value = serde_json::from_str(payload).expect("valid payload");
-            capture(&self.store, &self.tx, &json, event);
+            capture(&self.store, &self.queue, &json, event);
         }
         fn status(&self, hash: &str) -> BodyStatus {
             with_store(&self.store, |s| s.body_status(hash).expect("reads"))
@@ -614,5 +738,177 @@ pub(crate) mod tests {
 
         assert!(!should_fetch(&h.store, "sha-gone"));
         assert!(should_fetch(&h.store, "sha-untouched"), "and blocks nothing else");
+    }
+
+    // --- What the in-flight set promises ---
+    //
+    // Two promises, and the second is the dangerous one. A hash must be in the
+    // set for as long as a fetch is out for it, so a reader is told the bytes
+    // are coming; and it must be out of the set the instant that stops being
+    // true, however it stopped. A leak here does not fail loudly — it quietly
+    // tells someone to wait for a download that ended minutes ago.
+
+    /// A one-shot HTTP server on loopback, for the paths that need a real
+    /// response rather than a synthesised one.
+    ///
+    /// `std::net` rather than `tokio::net`: this crate does not enable tokio's
+    /// `net` feature, and turning it on so a test could bind a socket would add
+    /// a dependency the Inbox itself has no use for.
+    fn serve_once(status: &str, body: &str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let url = format!("http://{}/file/p.bin", listener.local_addr().expect("addr"));
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            if let Ok((mut socket, _)) = listener.accept() {
+                let _ = socket.read(&mut [0u8; 2048]);
+                let _ = socket.write_all(response.as_bytes());
+            }
+        });
+        url
+    }
+
+    /// Accepts the connection and then says nothing, so the fetch is still in
+    /// the download when the caller gives up on it.
+    fn serve_nothing() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+        let url = format!("http://{}/file/p.bin", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            if let Ok((socket, _)) = listener.accept() {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                drop(socket);
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn a_queued_attachment_reads_as_downloading_from_the_moment_it_is_queued() {
+        // The claim is taken here rather than in the fetcher because a job sits
+        // in the channel first. Claim it there and this interval is a window in
+        // which the download exists and the reader is told to start a daemon.
+        let h = harness();
+        let (_, body_ref) = spilled(None);
+
+        h.ingest(
+            &attached("ntfy-1", "https://n/file/p.bin", Some(far_ahead())),
+            &plan_review(&body_ref),
+        );
+
+        assert!(h.pending.contains(&body_ref.content_hash));
+    }
+
+    #[test]
+    fn a_replay_does_not_queue_a_second_download_for_the_same_body() {
+        // ntfy re-delivers its whole cache on every reconnect, so without this
+        // one attachment becomes one GET per delivery, all racing into the same
+        // row. `has_body` cannot gate it: the first fetch has not stored yet.
+        let mut h = harness();
+        let (_, body_ref) = spilled(None);
+        let event = attached("ntfy-1", "https://n/file/p.bin", Some(far_ahead()));
+        let payload = plan_review(&body_ref);
+
+        h.ingest(&event, &payload);
+        h.ingest(&event, &payload);
+
+        assert!(h.jobs.try_recv().is_ok());
+        assert!(h.jobs.try_recv().is_err(), "one fetch, not two");
+        assert!(
+            h.pending.contains(&body_ref.content_hash),
+            "and the one that is running still reads as running"
+        );
+    }
+
+    #[test]
+    fn a_job_that_cannot_be_queued_is_not_left_reading_as_downloading() {
+        // Nothing will ever adopt this claim, so if `push` kept it the body
+        // would say "still downloading" until the app is restarted — advice to
+        // wait for something that is provably never coming.
+        let mut h = harness();
+        let (_, body_ref) = spilled(None);
+        h.jobs.close();
+
+        h.ingest(
+            &attached("ntfy-1", "https://n/file/p.bin", Some(far_ahead())),
+            &plan_review(&body_ref),
+        );
+
+        assert!(!h.pending.contains(&body_ref.content_hash));
+    }
+
+    #[tokio::test]
+    async fn every_way_a_fetch_can_end_releases_the_body_it_claimed() {
+        // One test over all four endings on purpose: they share nothing but the
+        // guarantee, and a per-ending test would let a fifth ending be added
+        // with no home to fail in.
+        let h = harness();
+        let (cipher, body_ref) = spilled(None);
+
+        let stored = BodyJob {
+            url: serve_once("200 OK", &cipher),
+            content_hash: body_ref.content_hash.clone(),
+            ntfy_id: "ntfy-1".to_string(),
+        };
+        let expired = BodyJob {
+            url: serve_once("404 Not Found", ""),
+            content_hash: "sha-expired".to_string(),
+            ntfy_id: "ntfy-2".to_string(),
+        };
+        // Port 1 on loopback refuses immediately: a failure with no verdict,
+        // the one the next replay is expected to retry.
+        let flaky = BodyJob {
+            url: "http://127.0.0.1:1/file/p.bin".to_string(),
+            content_hash: "sha-flaky".to_string(),
+            ntfy_id: "ntfy-3".to_string(),
+        };
+        // Refused before the download starts, by the `should_fetch` gate.
+        note_gone(&h.store, "sha-written-off", "ntfy-4", "404");
+        let refused = BodyJob {
+            url: "http://127.0.0.1:1/file/p.bin".to_string(),
+            content_hash: "sha-written-off".to_string(),
+            ntfy_id: "ntfy-4".to_string(),
+        };
+
+        for job in [&stored, &expired, &flaky, &refused] {
+            h.pending.mark(&job.content_hash);
+            fetch_one(&h.store, &h.pending, job).await;
+            assert!(
+                !h.pending.contains(&job.content_hash),
+                "{} was left in the set",
+                job.content_hash
+            );
+        }
+
+        // And the endings themselves still differ, so the release did not come
+        // at the cost of the verdict.
+        assert!(h.held(&body_ref.content_hash), "the downloaded body is kept");
+        assert!(matches!(h.status("sha-expired"), BodyStatus::Gone { .. }));
+        assert_eq!(h.status("sha-flaky"), BodyStatus::Unattempted, "retryable");
+    }
+
+    #[tokio::test]
+    async fn a_fetch_abandoned_mid_download_releases_the_body_it_claimed() {
+        // The path no `return` can cover: the process is shutting down, or the
+        // runtime dropped the task, while the socket is still open. Only a
+        // guard that releases on `Drop` survives this.
+        let h = harness();
+        let job = BodyJob {
+            url: serve_nothing(),
+            content_hash: "sha-abandoned".to_string(),
+            ntfy_id: "ntfy-1".to_string(),
+        };
+        h.pending.mark(&job.content_hash);
+
+        let abandoned = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            fetch_one(&h.store, &h.pending, &job),
+        )
+        .await;
+
+        assert!(abandoned.is_err(), "the fetch must still have been running");
+        assert!(!h.pending.contains(&job.content_hash));
     }
 }

@@ -32,6 +32,14 @@
 //! archivist that is not running is a fourth thing again — it is allowed to be
 //! down, so that state is not an error at all, and the Inbox says so rather
 //! than implying the plan is lost.
+//!
+//! A body still downloading is the fifth, and the reason it exists is a real
+//! hour lost: with no way to tell "not captured" from "not captured *yet*",
+//! resolution fell through to the archivist and printed *start it and reopen
+//! this message*. Somebody did, it did not help, and the actual state — bytes
+//! arriving in a few seconds — stayed hidden behind that advice. A body on its
+//! way must never blame a daemon, so [`crate::capture::Pending`] is consulted
+//! before the archivist is.
 
 use hitl_store::{BodyStatus, Event};
 use serde::Serialize;
@@ -40,6 +48,7 @@ use serde_json::Value;
 use hitl_transport::payload::{decode_payload, PayloadError};
 use hitl_transport::types::{PlanPayloadRef, PlanReviewBody};
 
+use crate::capture::Pending;
 use crate::sink::SharedStore;
 
 /// How long to wait on the archivist. Loopback, so a slow answer means the
@@ -81,6 +90,17 @@ pub enum BodyOutcome {
     /// client to work with the archivist stopped.
     #[serde(rename_all = "camelCase")]
     Unreachable { detail: String },
+
+    /// This Inbox is downloading the bytes right now.
+    ///
+    /// Distinct from every neighbour above on purpose. It is not `Missing`,
+    /// because nothing has failed and nothing is lost; and it is emphatically
+    /// not `Unreachable`, because that panel tells the reader to go start the
+    /// archivist — advice that is useless here, since the daemon has no part in
+    /// this fetch and starting it changes nothing. Sending someone to fix a
+    /// working component is how a five-second wait turns into an hour of
+    /// hunting.
+    Fetching,
 
     /// The archivist answered, and could not read its own archive.
     #[serde(rename_all = "camelCase")]
@@ -280,6 +300,7 @@ fn missing(status: &str, detail: Option<String>, reason: Option<String>) -> Body
 /// Resolve one plan review's body, from wherever it actually lives.
 pub async fn load(
     store: &SharedStore,
+    pending: &Pending,
     request: &Event,
     key: Option<&str>,
     base: &str,
@@ -326,6 +347,18 @@ pub async fn load(
         };
     }
 
+    // Between "nothing captured" and "nothing captured *yet*" the store cannot
+    // tell the difference — both are the same absent row — so the in-flight set
+    // is asked, and it is asked here rather than after the archivist because
+    // the archivist has no answer that is more true than this one.
+    //
+    // Only when `local` found nothing at all. A recorded verdict outranks a
+    // download: a body already known to be gone or corrupt must keep saying so
+    // even while a doomed retry is in the air.
+    if matches!(captured, Local::Nothing) && pending.contains(&reference.content_hash) {
+        return BodyOutcome::Fetching;
+    }
+
     match fetch_captured(base, &reference.content_hash).await {
         Ok(plaintext) => decode(&plaintext, None, &reference.content_hash),
         // The archivist is allowed to be down (spec §11). When it is, anything
@@ -360,6 +393,19 @@ mod tests {
 
     fn store() -> SharedStore {
         Arc::new(Mutex::new(Store::open_in_memory().expect("opens")))
+    }
+
+    /// Nothing downloading. The default for every test that is not about the
+    /// in-flight set, so `Fetching` can never be the reason one of them passes.
+    fn idle() -> Pending {
+        Pending::default()
+    }
+
+    /// A body this Inbox has a fetch out for right now.
+    fn fetching(hash: &str) -> Pending {
+        let pending = Pending::default();
+        pending.mark(hash);
+        pending
     }
 
     fn event(payload: &str) -> Event {
@@ -486,6 +532,7 @@ mod tests {
     async fn a_message_with_no_body_resolves_to_absent_without_a_round_trip() {
         let outcome = load(
             &store(),
+            &idle(),
             &event(r#"{"type":"plan_review","messageId":"p-1"}"#),
             None,
             NO_ARCHIVIST,
@@ -507,7 +554,7 @@ mod tests {
         ));
 
         assert_eq!(
-            load(&store(), &request, Some(KEY), NO_ARCHIVIST).await,
+            load(&store(), &idle(), &request, Some(KEY), NO_ARCHIVIST).await,
             BodyOutcome::Ok {
                 content: plan().content,
                 diff: plan().diff
@@ -519,6 +566,7 @@ mod tests {
     async fn an_inline_reference_carrying_no_data_says_so_rather_than_fetching() {
         let outcome = load(
             &store(),
+            &idle(),
             &event(
                 r#"{"type":"plan_review","messageId":"p-1",
                     "body":{"kind":"inline","contentHash":"ab"}}"#,
@@ -542,6 +590,7 @@ mod tests {
         // An empty hash would be asked of the archivist and 404 forever.
         let outcome = load(
             &store(),
+            &idle(),
             &event(
                 r#"{"type":"plan_review","messageId":"p-1",
                     "body":{"kind":"attachment","contentHash":""}}"#,
@@ -564,6 +613,7 @@ mod tests {
         // one — port 1 on loopback refuses the connection immediately.
         let outcome = load(
             &store(),
+            &idle(),
             &event(
                 r#"{"type":"plan_review","messageId":"p-1",
                     "body":{"kind":"attachment","contentHash":"ab"}}"#,
@@ -618,7 +668,7 @@ mod tests {
         capture(&store, &claimed_hash(&request), &cipher, None);
 
         assert_eq!(
-            load(&store, &request, None, NO_ARCHIVIST).await,
+            load(&store, &idle(), &request, None, NO_ARCHIVIST).await,
             BodyOutcome::Ok {
                 content: plan().content,
                 diff: plan().diff,
@@ -637,7 +687,7 @@ mod tests {
         capture(&store, &claimed_hash(&request), &cipher, Some(KEY));
 
         assert_eq!(
-            load(&store, &request, None, NO_ARCHIVIST).await,
+            load(&store, &idle(), &request, None, NO_ARCHIVIST).await,
             BodyOutcome::Ok {
                 content: plan().content,
                 diff: plan().diff,
@@ -661,7 +711,7 @@ mod tests {
         ));
         capture(&store, &claimed, &cipher, None);
 
-        let outcome = load(&store, &request, None, NO_ARCHIVIST).await;
+        let outcome = load(&store, &idle(), &request, None, NO_ARCHIVIST).await;
 
         assert_eq!(
             outcome,
@@ -695,7 +745,7 @@ mod tests {
         );
 
         assert_eq!(
-            load(&store, &request, None, NO_ARCHIVIST).await,
+            load(&store, &idle(), &request, None, NO_ARCHIVIST).await,
             BodyOutcome::Missing {
                 status: "gone".to_string(),
                 detail: Some("ntfy dropped the attachment".to_string()),
@@ -713,7 +763,7 @@ mod tests {
         let store = store();
         let (_, request) = spilled_review(None);
 
-        match load(&store, &request, None, NO_ARCHIVIST).await {
+        match load(&store, &idle(), &request, None, NO_ARCHIVIST).await {
             BodyOutcome::Unreachable { detail } => assert!(!detail.is_empty()),
             other => panic!("expected unreachable, got {other:?}"),
         }
@@ -730,7 +780,75 @@ mod tests {
         capture(&store, &claimed_hash(&request), &cipher, None);
 
         assert!(matches!(
-            load(&store, &request, None, "http://127.0.0.1:1").await,
+            load(&store, &idle(), &request, None, "http://127.0.0.1:1").await,
+            BodyOutcome::Ok { .. }
+        ));
+    }
+
+    // --- a body that is merely late ---
+
+    #[tokio::test]
+    async fn a_body_still_downloading_says_so_instead_of_blaming_the_archivist() {
+        // The bug this exists for. The store cannot tell "never captured" from
+        // "not captured yet" — both are the same absent row — so before the
+        // in-flight set this fell through and printed "start the archivist".
+        // Somebody did. It could not help, and it hid the real state for an
+        // hour. The pair below is the whole point: identical stores, and the
+        // one difference is whether a fetch is out.
+        let store = store();
+        let (_, request) = spilled_review(None);
+
+        assert_eq!(
+            load(
+                &store,
+                &fetching(&claimed_hash(&request)),
+                &request,
+                None,
+                NO_ARCHIVIST
+            )
+            .await,
+            BodyOutcome::Fetching,
+        );
+        assert!(
+            matches!(
+                load(&store, &idle(), &request, None, NO_ARCHIVIST).await,
+                BodyOutcome::Unreachable { .. }
+            ),
+            "and with nothing in flight the archivist is still the place to look"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recorded_verdict_outranks_a_download_still_in_the_air() {
+        // A retry can be queued for a body already known to be lost. If
+        // "downloading" spoke first, `gone` would be replaced by an invitation
+        // to wait — and the waiting would never end.
+        let store = store();
+        let (_, request) = spilled_review(None);
+        let hash = claimed_hash(&request);
+        crate::capture::note_gone(&store, &hash, "ntfy-1", "ntfy dropped the attachment");
+
+        assert_eq!(
+            load(&store, &fetching(&hash), &request, None, NO_ARCHIVIST).await,
+            BodyOutcome::Missing {
+                status: "gone".to_string(),
+                detail: Some("ntfy dropped the attachment".to_string()),
+                reason: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_already_captured_is_shown_rather_than_reported_as_arriving() {
+        // The set is in memory and the store is not, so a stale claim can
+        // outlive the bytes it was made for. Content wins over any claim.
+        let store = store();
+        let (cipher, request) = spilled_review(None);
+        let hash = claimed_hash(&request);
+        capture(&store, &hash, &cipher, None);
+
+        assert!(matches!(
+            load(&store, &fetching(&hash), &request, None, NO_ARCHIVIST).await,
             BodyOutcome::Ok { .. }
         ));
     }

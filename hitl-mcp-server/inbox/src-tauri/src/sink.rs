@@ -19,9 +19,7 @@ use hitl_transport::types::{
     NotificationMessage, PlanReviewAckMessage, PlanReviewMessage, PlanReviewResponseMessage,
     QuestionMessage, SenderIdentityMessage,
 };
-use tokio::sync::mpsc::UnboundedSender;
-
-use crate::capture::{self, BodyJob};
+use crate::capture::{self, Queue};
 
 /// `rusqlite::Connection` is `Send` but not `Sync`, and the subscribe loop and
 /// the command handlers both reach for the store, so it is shared behind a
@@ -50,7 +48,7 @@ pub struct InboxSink {
     /// Unbounded on purpose: the send happens inline in the subscribe loop, and
     /// a bounded channel that filled would either block ingest or drop the one
     /// thing that cannot be recovered afterwards.
-    jobs: UnboundedSender<BodyJob>,
+    queue: Queue,
     /// The highest seq this sink has already announced.
     ///
     /// `Store::append` is idempotent and hands back the seq the row already
@@ -65,14 +63,14 @@ impl InboxSink {
     pub fn new(
         store: SharedStore,
         waiters: Arc<AckWaiters>,
-        jobs: UnboundedSender<BodyJob>,
+        queue: Queue,
         changed: OnChanged,
     ) -> Self {
         Self {
             store,
             changed,
             waiters,
-            jobs,
+            queue,
             announced: AtomicI64::new(0),
         }
     }
@@ -120,7 +118,7 @@ impl NtfySink for InboxSink {
         // failed): a plan body ntfy is about to delete must not be lost because
         // of a row that did not write.
         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(decrypted) {
-            capture::capture(&self.store, &self.jobs, &payload, event);
+            capture::capture(&self.store, &self.queue, &payload, event);
         }
     }
 
@@ -190,7 +188,8 @@ mod tests {
         store: SharedStore,
         redraws: Arc<AtomicI64>,
         waiters: Arc<AckWaiters>,
-        jobs: tokio::sync::mpsc::UnboundedReceiver<BodyJob>,
+        jobs: tokio::sync::mpsc::UnboundedReceiver<crate::capture::BodyJob>,
+        pending: Arc<crate::capture::Pending>,
     }
 
     fn harness() -> Harness {
@@ -198,12 +197,13 @@ mod tests {
         let redraws = Arc::new(AtomicI64::new(0));
         let waiters = Arc::new(AckWaiters::default());
         let (tx, jobs) = tokio::sync::mpsc::unbounded_channel();
+        let pending = Arc::new(crate::capture::Pending::default());
         let counter = redraws.clone();
         Harness {
             sink: InboxSink::new(
                 store.clone(),
                 waiters.clone(),
-                tx,
+                Queue::new(tx, pending.clone()),
                 Box::new(move || {
                     counter.fetch_add(1, Ordering::SeqCst);
                 }),
@@ -212,6 +212,7 @@ mod tests {
             redraws,
             waiters,
             jobs,
+            pending,
         }
     }
 
@@ -332,11 +333,17 @@ mod tests {
         let payload = crate::capture::tests::plan_review(&body_ref);
 
         h.sink.on_event(&event, &payload);
+        // The first attempt ends without storing anything — a timeout, say.
+        // That is the case the replay exists for.
+        h.pending.finish(&body_ref.content_hash);
         h.sink.on_event(&event, &payload);
 
         assert_eq!(h.redraws.load(Ordering::SeqCst), 1, "announced once");
         assert!(h.jobs.try_recv().is_ok());
-        assert!(h.jobs.try_recv().is_ok(), "but reached for on both deliveries");
+        assert!(
+            h.jobs.try_recv().is_ok(),
+            "but reached for on both deliveries"
+        );
     }
 
     #[test]

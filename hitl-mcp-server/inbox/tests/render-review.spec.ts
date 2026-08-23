@@ -190,6 +190,22 @@ test.describe('Pane 3 — a plan that cannot be vouched for (spec §8.3)', () =>
     await expect(page.locator('[data-verdict]')).toHaveCount(0);
   });
 
+  test('a body still downloading never tells the reader to start the archivist', async ({ page }) => {
+    // The panel this whole state exists for. Before it, a body mid-download
+    // looked exactly like a body nobody had ever fetched, so the reader got
+    // "start the archivist" — and starting it does nothing, because the Inbox
+    // is doing this fetch itself. That advice cost an hour of hunting.
+    await mount(page, 'review', review(), { body: { outcome: 'fetching' } });
+
+    const shown = await panel(page);
+    expect(shown.state).toBe('unavailable');
+    expect(shown.reason).toBe('fetching');
+    expect(shown.detail).toContain('still downloading');
+    expect(shown.detail).toContain('nothing needs starting');
+    expect(shown.detail).not.toContain('archivist');
+    await expect(page.locator('[data-verdict]')).toHaveCount(0);
+  });
+
   test('the archivist has not fetched it yet, which is not the same as gone', async ({ page }) => {
     await mount(page, 'review', review(),
       { body: { outcome: 'missing', status: 'unattempted', detail: null, reason: null } });
