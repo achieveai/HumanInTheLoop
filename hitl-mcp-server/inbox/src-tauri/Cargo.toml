@@ -3,7 +3,7 @@ name = "hitl-inbox"
 # Lockstep with hitl-client, hitl-transport, hitl-store and hitl-archivist:
 # every crate in this repo releases together, so a version that drifts here is
 # a version that lies.
-version = "2.11.3"
+version = "2.12.0"
 description = "The LLM Inbox — every agent's messages in one place"
 authors = ["HITL"]
 edition = "2021"

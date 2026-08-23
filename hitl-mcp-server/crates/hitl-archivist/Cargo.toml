@@ -2,7 +2,7 @@
 name = "hitl-archivist"
 # Lockstep with hitl-client, hitl-transport and hitl-store: every crate in this
 # repo releases together, so a version that drifts here is a version that lies.
-version = "2.11.3"
+version = "2.12.0"
 description = "Headless recorder that makes the HITL event log durable past ntfy's cache window"
 edition = "2021"
 

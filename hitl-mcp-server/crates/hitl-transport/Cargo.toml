@@ -2,7 +2,7 @@
 name = "hitl-transport"
 # Kept in lockstep with hitl-client: server/src/__tests__/version-sync.test.ts
 # fails the build the moment a version in this repo drifts from the rest.
-version = "2.11.3"
+version = "2.12.0"
 description = "Wire types, crypto, and the ntfy transport shared by every HITL host application"
 edition = "2021"
 
