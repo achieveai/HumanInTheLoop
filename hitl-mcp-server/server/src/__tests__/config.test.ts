@@ -9,11 +9,13 @@ const mockExistsSync = jest.fn<(p: string) => boolean>();
 const mockReadFileSync = jest.fn<(p: string, enc: string) => string>();
 const mockWriteFileSync = jest.fn<(...args: unknown[]) => void>();
 const mockMkdirSync = jest.fn<(...args: unknown[]) => void>();
+const mockCopyFileSync = jest.fn<(src: string, dest: string) => void>();
 jest.unstable_mockModule('fs', () => ({
   existsSync: mockExistsSync,
   readFileSync: mockReadFileSync,
   writeFileSync: mockWriteFileSync,
   mkdirSync: mockMkdirSync,
+  copyFileSync: mockCopyFileSync,
 }));
 jest.unstable_mockModule('os', () => ({
   homedir: jest.fn(() => '/mock/home'),
@@ -21,7 +23,7 @@ jest.unstable_mockModule('os', () => ({
 }));
 
 // Dynamically import the module under test AFTER mocks are registered.
-const { loadConfig, generateDefaultConfig } = await import('../config.js');
+const { loadConfig, generateDefaultConfig, saveConfig, getConfigPath } = await import('../config.js');
 
 /** Minimal valid config JSON — loadConfig throws without a topicId. */
 function configJson(extra: Record<string, unknown> = {}): string {
@@ -55,5 +57,41 @@ describe('config: identityEnabled', () => {
     it('defaults identityEnabled to true', () => {
       expect(generateDefaultConfig().identityEnabled).toBe(true);
     });
+  });
+});
+
+describe('config: saveConfig keeps the previous config', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('copies the existing config aside before overwriting it', () => {
+    mockExistsSync.mockReturnValue(true);
+
+    saveConfig(generateDefaultConfig());
+
+    expect(mockCopyFileSync).toHaveBeenCalledWith(
+      getConfigPath(),
+      `${getConfigPath()}.bak`
+    );
+  });
+
+  it('writes no backup on a first run, when there is nothing to lose yet', () => {
+    mockExistsSync.mockReturnValue(false);
+
+    saveConfig(generateDefaultConfig());
+
+    expect(mockCopyFileSync).not.toHaveBeenCalled();
+    expect(mockWriteFileSync).toHaveBeenCalled();
+  });
+
+  it('still saves the new config when the backup cannot be written', () => {
+    mockExistsSync.mockReturnValue(true);
+    mockCopyFileSync.mockImplementation(() => {
+      throw new Error('EACCES: read-only volume');
+    });
+
+    expect(() => saveConfig(generateDefaultConfig())).not.toThrow();
+    expect(mockWriteFileSync).toHaveBeenCalled();
   });
 });

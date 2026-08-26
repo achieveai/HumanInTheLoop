@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, copyFileSync } from 'fs';
 import { homedir, hostname } from 'os';
 import path from 'path';
 import crypto from 'crypto';
@@ -58,6 +58,16 @@ export function generateDefaultConfig(): HitlConfig {
  */
 export function saveConfig(config: HitlConfig): void {
   mkdirSync(CONFIG_DIR, { recursive: true });
+  // Keep the outgoing config. A regenerated default silently swaps in a
+  // public ntfyUrl, a fresh topic and a fresh encryption key; without this
+  // copy a self-hosted setup is unrecoverable once the original is gone.
+  if (existsSync(CONFIG_FILE)) {
+    try {
+      copyFileSync(CONFIG_FILE, `${CONFIG_FILE}.bak`);
+    } catch {
+      // A backup that cannot be written must not block saving the config.
+    }
+  }
   writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2) + '\n', 'utf-8');
 }
 
