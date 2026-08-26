@@ -57,27 +57,45 @@ export function isProcessRunning(processName: string): boolean {
 }
 
 /**
+ * Every place the HITL client binary might live, in priority order.
+ *
+ * Shared by `findClientBinary` and `buildNotFoundMessage` so that the list a
+ * user is told was searched is the list that was actually searched. These were
+ * two hand-kept copies, and both drifted the same way: the dev-build entries
+ * named `client/src-tauri/target/`, which stopped being where cargo writes the
+ * moment `client/src-tauri` became a member of this workspace instead of a
+ * workspace root of its own. The output moved up to `<workspace>/target/`, both
+ * candidates went dead, and the "not found" message then recited those same
+ * dead paths — followed by `cd client && npm run build`, which builds to a
+ * location this function does not look in. Build, fail, be told to build again.
+ *
+ * @param serverDir - Where the compiled server JS lives (server/dist/), so that
+ *   `../..` is the cargo workspace root that owns `target/`.
+ */
+function clientBinaryCandidates(serverDir: string): string[] {
+  const binaryName = process.platform === 'win32' ? 'hitl-client.exe' : 'hitl-client';
+  const workspaceRoot = path.resolve(serverDir, '..', '..');
+
+  return [
+    // Bundled with npm package (dist/bin/{platform}/hitl-client)
+    path.resolve(serverDir, 'bin', getBundledPlatformDir(), binaryName),
+    // Dev build, in the cargo workspace target dir
+    path.resolve(workspaceRoot, 'target', 'debug', binaryName),
+    // Release build, same place
+    path.resolve(workspaceRoot, 'target', 'release', binaryName),
+    // Installed location in user home
+    path.join(homedir(), '.hitl', binaryName),
+  ];
+}
+
+/**
  * Search known locations for the HITL client binary.
  * Priority: bundled with npm package > dev build > release build > ~/.hitl/
  *
  * @param serverDir - The directory where the compiled server JS lives (e.g. server/dist/)
  */
 export function findClientBinary(serverDir: string): string | null {
-  const binaryName = process.platform === 'win32' ? 'hitl-client.exe' : 'hitl-client';
-  const platformDir = getBundledPlatformDir();
-
-  const candidates = [
-    // Bundled with npm package (dist/bin/{platform}/hitl-client)
-    path.resolve(serverDir, 'bin', platformDir, binaryName),
-    // Dev build (relative to server dist → repo root → client)
-    path.resolve(serverDir, '..', '..', 'client', 'src-tauri', 'target', 'debug', binaryName),
-    // Release build
-    path.resolve(serverDir, '..', '..', 'client', 'src-tauri', 'target', 'release', binaryName),
-    // Installed location in user home
-    path.join(homedir(), '.hitl', binaryName),
-  ];
-
-  for (const candidate of candidates) {
+  for (const candidate of clientBinaryCandidates(serverDir)) {
     if (existsSync(candidate)) {
       // Ensure executable permission on Unix
       if (process.platform !== 'win32') {
@@ -155,16 +173,14 @@ export function ensureClientRunning(serverDir: string): ClientRunningResult {
 
 /**
  * Build a user-friendly "not found" message listing the paths that were searched.
+ *
+ * Prints the resolved candidates rather than a hand-written sketch of them, so
+ * the message cannot drift away from the search (see `clientBinaryCandidates`).
  */
 function buildNotFoundMessage(serverDir: string): string {
-  const binaryName = process.platform === 'win32' ? 'hitl-client.exe' : 'hitl-client';
-  const platformDir = getBundledPlatformDir();
   return [
     `HITL client binary not found. Searched locations:`,
-    `  - ${path.resolve(serverDir, 'bin', platformDir, binaryName)} (bundled)`,
-    `  - <repo>/client/src-tauri/target/debug/${binaryName}`,
-    `  - <repo>/client/src-tauri/target/release/${binaryName}`,
-    `  - ~/.hitl/${binaryName}`,
+    ...clientBinaryCandidates(serverDir).map((candidate) => `  - ${candidate}`),
     ``,
     `Install the client from GitHub Releases:`,
     `  https://github.com/achieveai/HumanInTheLoop/releases`,

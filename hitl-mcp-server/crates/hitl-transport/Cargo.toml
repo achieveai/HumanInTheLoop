@@ -1,0 +1,27 @@
+[package]
+name = "hitl-transport"
+# Kept in lockstep with hitl-client: server/src/__tests__/version-sync.test.ts
+# fails the build the moment a version in this repo drifts from the rest.
+version = "2.12.0"
+description = "Wire types, crypto, and the ntfy transport shared by every HITL host application"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+uuid = { workspace = true }
+dirs = { workspace = true }
+hostname = { workspace = true }
+futures-util = { workspace = true }
+aes-gcm = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+flate2 = { workspace = true }
+log = { workspace = true }
+# Narrow on purpose. "full" drags in fs, net, process and signal handling, none
+# of which a transport that must stay mobile-compilable has any use for.
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "sync", "time", "macros", "rt-multi-thread"] }

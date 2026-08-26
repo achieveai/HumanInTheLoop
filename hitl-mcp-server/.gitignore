@@ -8,10 +8,22 @@ dist/
 *.d.ts
 !jest.config.js
 
-# The Tauri client frontend is hand-written ES modules with no build step, so
-# it is source, not output. Without this negation the tree-wide *.js above
-# swallows it and `git add` on a new frontend file fails silently.
+# The Tauri frontends are hand-written ES modules with no build step, so they
+# are source, not output. Without these negations the tree-wide *.js above
+# swallows them and `git add` on a new frontend file fails silently — which is
+# how an app ships with none of its JavaScript and no error anywhere.
 !client/src/**/*.js
+!inbox/src/**/*.js
+
+# ...except the webview assets the Inbox shares with the client, which
+# scripts/sync-shared-ui.mjs copies out of client/src. Tracking the copies would
+# put the same 968-line module in the repo twice and invite the two to drift;
+# the originals under client/src are the only version under version control.
+# These rules come after the negations above on purpose — in .gitignore the last
+# matching rule wins.
+/inbox/src/review.js
+/inbox/src/review.css
+/inbox/src/vendor/
 
 # IDE
 .vscode/

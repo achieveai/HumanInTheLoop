@@ -369,8 +369,17 @@ describe('handleReviewPlan sender identity', () => {
     const published = (await capturePublishedReview(CONFIG)) as { sender?: { label: string; source: string } };
 
     expect(published.sender).toBeDefined();
-    expect(published.sender?.label).toContain(CONFIG.deviceName);
-    expect(['session', 'worktree', 'path']).toContain(published.sender?.source);
+    // defaultSessionNameResolver now always mints an id (Task 4), so this
+    // resolves at the session tier and the label is composed per spec §5.4
+    // (repo · branch · id-prefix) rather than carrying CONFIG.deviceName —
+    // deviceName only appears in the worktree/path tiers' labels.
+    expect(published.sender?.source).toBe('session');
+    // Four id characters, whatever alphabet they come from. The old
+    // `[0-9a-f-]{4}` assumed a minted UUID and went red inside any Claude Code
+    // Remote Control session, where the resolver prefers the bridge id instead
+    // — an ambient-environment dependency, not a real regression. The suffix's
+    // *content* is pinned in identity.test.ts against controlled inputs.
+    expect(published.sender?.label).toMatch(/ · [0-9A-Za-z-]{4}$/);
   });
 
   it('omits sender entirely from the published JSON when identityEnabled is false', async () => {

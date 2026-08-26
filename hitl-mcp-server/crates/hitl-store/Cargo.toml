@@ -1,0 +1,13 @@
+[package]
+name = "hitl-store"
+# Kept in lockstep with hitl-client and hitl-transport: every crate in this
+# repo releases together, so a version that drifts here is a version that lies.
+version = "2.12.0"
+description = "The local event log and the status fold every HITL client derives its view from"
+edition = "2021"
+
+[dependencies]
+hitl-transport = { path = "../hitl-transport" }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

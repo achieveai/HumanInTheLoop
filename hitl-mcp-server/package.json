@@ -1,6 +1,6 @@
 {
   "name": "hitl-mcp",
-  "version": "2.11.3",
+  "version": "2.12.0",
   "private": true,
   "workspaces": [
     "server",

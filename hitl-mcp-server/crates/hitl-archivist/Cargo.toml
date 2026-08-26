@@ -1,0 +1,27 @@
+[package]
+name = "hitl-archivist"
+# Lockstep with hitl-client, hitl-transport and hitl-store: every crate in this
+# repo releases together, so a version that drifts here is a version that lies.
+version = "2.12.0"
+description = "Headless recorder that makes the HITL event log durable past ntfy's cache window"
+edition = "2021"
+
+[dependencies]
+hitl-transport = { path = "../hitl-transport" }
+hitl-store = { path = "../hitl-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+log = { workspace = true, features = ["std"] }
+# Chosen over tiny_http because this binary is already async end to end: the
+# subscribe loop is a tokio task and blocking accept() would need a thread and
+# a second concurrency model. axum's whole stack — hyper, http, tower, bytes —
+# is already in the tree via reqwest, so what it actually adds is small.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
+# stderr only, and only for the level filter and timestamps. No file logging:
+# a login item's log rotation is a deployment concern, not this crate's.
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

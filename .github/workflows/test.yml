@@ -1,0 +1,83 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hitl-mcp-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm test --workspace server
+
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hitl-mcp-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hitl-mcp-server
+      - name: Install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libasound2-dev
+      - run: cargo test --workspace
+      # Separate invocation on purpose. `--workspace` unifies features across
+      # every selected package, so hitl-client's `tokio = { features = ["full"] }`
+      # is unified into the build hitl-transport compiles against -- and transport
+      # narrows tokio deliberately, to stay compilable for mobile. Under the
+      # workspace build a stray `tokio::fs` call would compile green here and fail
+      # only for whoever first built the crate on its own. This resolves its graph
+      # in isolation, which is the only thing that catches that.
+      - run: cargo check -p hitl-transport --locked
+
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hitl-mcp-server/client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test
+
+  # The Inbox frontend is deliberately not an npm workspace (version-sync.test.ts
+  # pins the root `workspaces` array), so root `npm test --workspaces` never
+  # reaches it and the `ui` job above is pinned to the client. Without this job
+  # all 114 inbox tests -- including layout.spec.ts, the only verification of the
+  # responsive layout -- run nowhere.
+  #
+  # `npm install` runs at hitl-mcp-server, not inbox: @playwright/test is hoisted
+  # there from the client's devDependencies and npx walks up to find it. That is
+  # the documented layout (see inbox/playwright.config.ts), not an accident.
+  inbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+        working-directory: hitl-mcp-server
+      - run: npx playwright install --with-deps chromium
+        working-directory: hitl-mcp-server/inbox
+      - run: npx playwright test
+        working-directory: hitl-mcp-server/inbox
