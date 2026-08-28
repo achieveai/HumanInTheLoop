@@ -1,22 +1,19 @@
 #![windows_subsystem = "windows"]
 
-mod chunking;
-mod config;
-mod crypto;
 mod drafts;
 mod logging;
 mod ntfy;
 mod opener;
-mod payload;
 mod payload_store;
 mod sound;
 mod tray;
-mod types;
 mod window_utils;
 
-use config::load_config;
+use hitl_transport::config::load_config;
+use hitl_transport::types::{
+    AnswerMessage, DismissNotificationMessage, InlineComment, PlanReviewResponseBody, SubAnswer,
+};
 use tauri::Manager;
-use types::{AnswerMessage, DismissNotificationMessage, InlineComment, PlanReviewResponseBody, SubAnswer};
 
 /// Tauri command: submit an answer from the frontend.
 #[tauri::command]
@@ -123,10 +120,10 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(payload_store::PayloadStore::default())
-        .manage(ntfy::AckWaiters::default())
-        .manage(ntfy::OutstandingReviews::default())
-        .manage(ntfy::SenderIdentityCacheState::default())
-        .manage(tray::AppState::default())
+        .manage(hitl_transport::ntfy::review::AckWaiters::default())
+        .manage(hitl_transport::ntfy::review::OutstandingReviews::default())
+        .manage(hitl_transport::ntfy::identity::SenderIdentityCacheState::default())
+        .manage(hitl_transport::ConnectionStatus::default())
         .invoke_handler(tauri::generate_handler![
             submit_answer,
             submit_plan_review,

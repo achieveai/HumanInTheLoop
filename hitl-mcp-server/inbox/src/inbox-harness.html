@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Inbox — Test Harness</title>
+    <!-- Same order as index.html, and for the same reason. See the comment there. -->
+    <link rel="stylesheet" href="review.css">
+    <link rel="stylesheet" href="inbox.css">
+    <script src="vendor/markdown-it.min.js"></script>
+    <!-- Mocks window.__TAURI__ so the real inbox.js / pane-agents.js /
+         pane-list.js modules run outside a Tauri backend, mirroring
+         review-harness.html and notifications-harness.html in client/.
+
+         The fixture is delivered on `window.__INBOX_FIXTURE` rather than a
+         query string: a whole message list does not survive query-string
+         encoding, which is the same reason app.js stopped putting questions on
+         the URL. Playwright sets it with page.addInitScript().
+
+         The fixture is a *recording of what the Rust commands return*, never a
+         reimplementation of them. Filtering, ordering, session state and the
+         Unattributed grouping are all decided in Rust and tested there; what
+         these tests check is that the panes draw what they are handed and ask
+         for the right thing when clicked.
+
+           window.__INBOX_FIXTURE = {
+             sessions: <SessionTree>,
+             messages: <MessageList> | { "<scopeKey>|<filter>": <MessageList> },
+           }
+
+         Every invoke() is recorded on window.__INVOCATIONS so a test can
+         assert what the UI asked for, not just what it drew. -->
+    <script>
+        window.__INVOCATIONS = [];
+        window.__listeners = {};
+
+        window.__TAURI__ = {
+            core: {
+                invoke: (cmd, args) => {
+                    window.__INVOCATIONS.push({ cmd, args: args ?? null });
+                    const fixture = window.__INBOX_FIXTURE ?? {};
+
+                    if (cmd === 'list_sessions') {
+                        return Promise.resolve(fixture.sessions ?? emptyTree());
+                    }
+                    if (cmd === 'list_messages') {
+                        return Promise.resolve(resolveList(fixture.messages, args));
+                    }
+                    if (cmd === 'get_message') {
+                        return resolveKeyed(fixture.details, args?.messageId, null);
+                    }
+                    if (cmd === 'get_body') {
+                        return resolveKeyed(fixture.bodies, args?.messageId, { outcome: 'absent' });
+                    }
+
+                    // The reply commands (spec §9). Each returns the messageId
+                    // it minted, exactly as the Rust does — that id is what
+                    // `reply.js` compares against `row.responseId` to decide
+                    // whether this device won the race, so a mock that returned
+                    // nothing would make every submission look lost.
+                    //
+                    // `window.__REPLIES` lets a test pin the id (to match a
+                    // fixture row's `responseId`) or make a publish fail.
+                    if (cmd === 'submit_answer' || cmd === 'dismiss_notification') {
+                        return reply(cmd, `resp-${window.__INVOCATIONS.length}`);
+                    }
+                    if (cmd === 'submit_plan_review') {
+                        return reply(cmd, { status: 'received', responseId: 'resp-review', reason: null });
+                    }
+                    if (cmd === 'save_review_draft' || cmd === 'clear_review_draft') {
+                        return reply(cmd, null);
+                    }
+                    if (cmd === 'load_review_draft') {
+                        return reply(cmd, null);
+                    }
+
+                    return Promise.reject(new Error(`unmocked command: ${cmd}`));
+                },
+            },
+            event: {
+                listen: (name, callback) => {
+                    window.__listeners[name] = callback;
+                    return Promise.resolve(() => {});
+                },
+            },
+        };
+
+        // A reply command's answer. `window.__REPLIES[cmd]` overrides the
+        // default; `{ __error }` there is a publish that never left the
+        // machine, which is a distinct outcome from one that lost a race.
+        function reply(cmd, fallback) {
+            const pinned = window.__REPLIES?.[cmd];
+            if (pinned === undefined) return Promise.resolve(fallback);
+            if (pinned && pinned.__error) return Promise.reject(new Error(pinned.__error));
+            return Promise.resolve(pinned);
+        }
+
+        function emptyTree() {
+            return { projects: [], totalPending: 0, totalMessages: 0, scopeKey: 'all', now: 0 };
+        }
+
+        function emptyList(args) {
+            return {
+                messages: [],
+                counts: { all: 0, needsYou: 0, answered: 0, notifications: 0 },
+                filter: args?.filter ?? 'all',
+                defaultFilter: 'all',
+                scopeKey: args?.sessionKey ?? 'all',
+                now: 0,
+            };
+        }
+
+        // A bare MessageList answers every call; a keyed object lets a test
+        // hand back a different one per (scope, filter) pair, which is how the
+        // filter and selection tests assert that the UI re-asked.
+        function resolveList(messages, args) {
+            if (!messages) return emptyList(args);
+            if (Array.isArray(messages.messages)) return messages;
+
+            const scope = args?.sessionKey ?? 'all';
+            const filter = args?.filter ?? null;
+            return messages[`${scope}|${filter}`]
+                ?? messages[`${scope}|*`]
+                ?? messages[`*|${filter}`]
+                ?? messages.default
+                ?? emptyList(args);
+        }
+
+        // Per-message fixtures for pane 3, keyed by messageId.
+        //
+        // Three things a test needs to express and all three are shapes the
+        // real commands produce:
+        //   { ... }                     the value the command returns
+        //   { __error: 'boom' }         the command itself failed
+        //   { __delayMs: 50, value: X } a slow response, for the out-of-order test
+        function resolveKeyed(table, key, fallback) {
+            const entry = table?.[key];
+            if (entry === undefined) return Promise.resolve(fallback);
+            if (entry && entry.__error) return Promise.reject(new Error(entry.__error));
+            if (entry && entry.__delayMs !== undefined) {
+                return new Promise(resolve => setTimeout(() => resolve(entry.value), entry.__delayMs));
+            }
+            return Promise.resolve(entry);
+        }
+
+        // Lets a test push a live event through the real listener registered by
+        // inbox.js, rather than reimplementing its refresh here.
+        window.__simulateChange = () => window.__listeners['inbox-changed']?.({ payload: null });
+    </script>
+</head>
+<body>
+    <!-- Layout chrome (mobile spec §4). Hidden entirely at wide widths.
+         Lives outside every pane because pane 3 clears its own container. -->
+    <div class="inbox-bar">
+        <button id="pane-back" aria-label="Back">←</button>
+        <button id="agents-toggle" aria-label="Agents">☰</button>
+        <span class="inbox-bar-title">Inbox</span>
+    </div>
+    <div class="inbox-scrim" id="inbox-scrim"></div>
+
+    <div class="inbox">
+        <aside class="pane pane-agents" id="pane-agents" aria-label="Agents"></aside>
+        <section class="pane pane-list" aria-label="Messages">
+            <div class="filter-bar" id="filter-bar" role="tablist"></div>
+            <div class="message-list" id="message-list"></div>
+        </section>
+        <section class="pane pane-detail" id="pane-detail" aria-label="Detail"></section>
+    </div>
+
+    <script type="module" src="inbox.js"></script>
+</body>
+</html>

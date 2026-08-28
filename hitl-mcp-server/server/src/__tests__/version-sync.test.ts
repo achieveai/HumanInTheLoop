@@ -17,27 +17,86 @@ function readJson(relPath: string): { version?: string } {
   return JSON.parse(fs.readFileSync(path.join(REPO, relPath), 'utf8'));
 }
 
+/**
+ * Reads `version` out of a Cargo manifest's `[package]` section specifically.
+ *
+ * Slicing to the *next* section header rather than to a named one matters: not
+ * every crate here has `[build-dependencies]`, and a dependency that happens to
+ * share the project's version number (`bitflags`, `tauri-runtime`) sits further
+ * down the file waiting to be matched by a looser regex.
+ */
+function readCargoVersion(relPath: string): string | undefined {
+  const cargo = fs.readFileSync(path.join(REPO, relPath), 'utf8');
+  const start = cargo.indexOf('[package]');
+  const rest = cargo.slice(start + '[package]'.length);
+  const end = rest.search(/^\[/m);
+  const pkgSection = end === -1 ? rest : rest.slice(0, end);
+
+  return /^version\s*=\s*"([^"]+)"/m.exec(pkgSection)?.[1];
+}
+
+/**
+ * Every manifest that must carry the release version.
+ *
+ * Each of these files states in a comment that this test fails the build when
+ * its version drifts. That claim was false for five of them once, and
+ * `inbox/src-tauri/tauri.conf.json` had already drifted to 2.11.3 while the rest
+ * of the repo read 2.12.0. Adding a manifest here is what makes the comment true.
+ */
+const JSON_MANIFESTS = [
+  'package.json',
+  'client/package.json',
+  'inbox/package.json',
+  'client/src-tauri/tauri.conf.json',
+  'inbox/src-tauri/tauri.conf.json',
+];
+
+const CARGO_MANIFESTS = [
+  'client/src-tauri/Cargo.toml',
+  'inbox/src-tauri/Cargo.toml',
+  'crates/hitl-transport/Cargo.toml',
+  'crates/hitl-store/Cargo.toml',
+  'crates/hitl-archivist/Cargo.toml',
+];
+
 describe('version sync', () => {
   it('reads SERVER_VERSION from server/package.json rather than a literal', () => {
     expect(SERVER_VERSION).toBe(readJson('server/package.json').version);
     expect(SERVER_VERSION).toMatch(/^\d+\.\d+\.\d+/);
   });
 
-  it('agrees across the root, server and client package manifests', () => {
-    expect(readJson('package.json').version).toBe(SERVER_VERSION);
-    expect(readJson('client/package.json').version).toBe(SERVER_VERSION);
+  it.each(JSON_MANIFESTS)('agrees with %s', (relPath) => {
+    expect(readJson(relPath).version).toBe(SERVER_VERSION);
   });
 
-  it('agrees with tauri.conf.json', () => {
-    expect(readJson('client/src-tauri/tauri.conf.json').version).toBe(SERVER_VERSION);
+  it.each(CARGO_MANIFESTS)('agrees with the [package] version in %s', (relPath) => {
+    expect(readCargoVersion(relPath)).toBe(SERVER_VERSION);
   });
 
-  it('agrees with the Rust crate version in Cargo.toml', () => {
-    const cargo = fs.readFileSync(path.join(REPO, 'client/src-tauri/Cargo.toml'), 'utf8');
-    const pkgSection = cargo.slice(cargo.indexOf('[package]'), cargo.indexOf('[build-dependencies]'));
-    const version = /^version\s*=\s*"([^"]+)"/m.exec(pkgSection)?.[1];
+  it('covers every versioned manifest in the repo', () => {
+    // The guard above only helps for files it has been told about, so a new
+    // crate or app can reintroduce the drift by simply not being listed. Walk
+    // the tree instead and fail on anything carrying a version we do not check.
+    const skip = new Set(['node_modules', 'target', 'dist', '.git']);
+    const found: string[] = [];
 
-    expect(version).toBe(SERVER_VERSION);
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(path.join(REPO, dir), { withFileTypes: true })) {
+        const rel = dir ? `${dir}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          if (!skip.has(entry.name)) walk(rel);
+        } else if (entry.name === 'Cargo.toml' && readCargoVersion(rel)) {
+          found.push(rel);
+        } else if (entry.name === 'tauri.conf.json') {
+          found.push(rel);
+        }
+      }
+    };
+    walk('');
+
+    expect(found.sort()).toEqual(
+      [...CARGO_MANIFESTS, ...JSON_MANIFESTS.filter((p) => p.endsWith('tauri.conf.json'))].sort()
+    );
   });
 
   it('does not derive the wire protocol version from the package version', () => {

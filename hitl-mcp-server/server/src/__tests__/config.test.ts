@@ -1,9 +1,11 @@
 import { describe, it, expect, jest, beforeEach } from '@jest/globals';
 
 // --- Module-level mocks ---
-// config.ts always resolves CONFIG_DIR/CONFIG_FILE from homedir() at import
-// time (unlike ntfy-transport.ts/snapshot-store.ts, it does not honor
-// HITL_HOME), so mock os/fs the same way host-settings.test.ts/cli.test.ts do.
+// These cases are about the shape of the parsed config, not where it lives, so
+// os/fs are mocked the same way host-settings.test.ts/cli.test.ts do.
+// config.ts now resolves its directory per call and honors HITL_HOME, matching
+// ntfy-transport.ts, snapshot-store.ts and the Rust `hitl_dir()` — that
+// resolution is covered against the real filesystem in config-paths.test.ts.
 
 const mockExistsSync = jest.fn<(p: string) => boolean>();
 const mockReadFileSync = jest.fn<(p: string, enc: string) => string>();

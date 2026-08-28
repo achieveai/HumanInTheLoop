@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Inbox</title>
+    <!-- review.css first, inbox.css second, deliberately: review.css carries
+         the plan reviewer's own global rules (`html, body`, `.badge`,
+         `.button`) from when it owned a whole window. Loading it first lets
+         inbox.css win every collision at equal specificity, so the reviewer
+         keeps its layout inside pane 3 without repainting the shell around it.
+         Both files are copies of client/src, refreshed by scripts/sync-shared-ui.mjs. -->
+    <link rel="stylesheet" href="review.css">
+    <link rel="stylesheet" href="inbox.css">
+    <script src="vendor/markdown-it.min.js"></script>
+</head>
+<body>
+    <!-- Layout chrome (mobile spec §4). Hidden entirely at wide widths.
+         Lives outside every pane because pane 3 clears its own container. -->
+    <div class="inbox-bar">
+        <button id="pane-back" aria-label="Back">←</button>
+        <button id="agents-toggle" aria-label="Agents">☰</button>
+        <span class="inbox-bar-title">Inbox</span>
+    </div>
+    <div class="inbox-scrim" id="inbox-scrim"></div>
+
+    <div class="inbox">
+        <!-- Pane 1: the agent tree (spec §6) -->
+        <aside class="pane pane-agents" id="pane-agents" aria-label="Agents"></aside>
+
+        <!-- Pane 2: the message list (spec §7). A list only — no body, no
+             controls; those belong to pane 3. -->
+        <section class="pane pane-list" aria-label="Messages">
+            <div class="filter-bar" id="filter-bar" role="tablist"></div>
+            <div class="message-list" id="message-list"></div>
+        </section>
+
+        <!-- Pane 3: the three renderers (spec §8). Filled by pane-detail.js,
+             which picks one per message type. -->
+        <section class="pane pane-detail" id="pane-detail" aria-label="Detail"></section>
+    </div>
+
+    <script type="module" src="inbox.js"></script>
+</body>
+</html>
