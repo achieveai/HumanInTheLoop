@@ -259,3 +259,54 @@ test.describe('both survive a restart', () => {
     await expect(page.locator('.pane-detail')).toBeVisible();
   });
 });
+
+test.describe('a handle sits on the boundary it drags', () => {
+  /**
+   * Position, not just presence.
+   *
+   * The drag tests above pass whether or not the handles are where they claim
+   * to be: Playwright aims at the element's own box, so a handle stacked at the
+   * left edge still drags. Only a human would notice there was nothing to grab
+   * at the seam. That is what this asserts.
+   */
+  const leftEdgeOf = async (page: Page, selector: string) =>
+    (await page.locator(selector).boundingBox())?.x ?? -1;
+
+  test('with three panes, each handle is at the seam behind it', async ({ page }) => {
+    await open(page, WIDE);
+
+    const listLeft = await leftEdgeOf(page, '.pane-list');
+    const detailLeft = await leftEdgeOf(page, '.pane-detail');
+
+    // The handle straddles the seam, so its own left edge sits half a width to
+    // the left of it.
+    expect(await leftEdgeOf(page, '#pane-handle-1')).toBeCloseTo(listLeft - 5, 0);
+    expect(await leftEdgeOf(page, '#pane-handle-2')).toBeCloseTo(detailLeft - 5, 0);
+  });
+
+  test('collapsing moves the remaining handle to the seam that is left', async ({ page }) => {
+    await open(page, WIDE);
+    await page.locator('#pane-cycle').click();
+    await expectCollapse(page, '1');
+
+    const detailLeft = await leftEdgeOf(page, '.pane-detail');
+
+    expect(await leftEdgeOf(page, '#pane-handle-2')).toBeCloseTo(detailLeft - 5, 0);
+  });
+
+  test('a drag carries the handle along with the seam', async ({ page }) => {
+    await open(page, WIDE);
+    const handle = page.locator('#pane-handle-1');
+    const box = await handle.boundingBox();
+    if (!box) throw new Error('no handle');
+    const y = box.y + box.height / 2;
+
+    await page.mouse.move(box.x + box.width / 2, y);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 80, y, { steps: 10 });
+    await page.mouse.up();
+
+    const listLeft = await leftEdgeOf(page, '.pane-list');
+    expect(await leftEdgeOf(page, '#pane-handle-1')).toBeCloseTo(listLeft - 5, 0);
+  });
+});
