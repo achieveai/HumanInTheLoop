@@ -65,15 +65,21 @@ const expectLayout = (page: Page, value: string) =>
   expect(page.locator('html')).toHaveAttribute('data-layout', value);
 
 test.describe('§4 — how many panes each width shows', () => {
-  test('wide shows all three and no chrome', async ({ page }) => {
+  test('wide shows all three and no navigation chrome', async ({ page }) => {
     await open(page, WIDE);
 
     await expectLayout(page, 'wide');
     await expect(page.locator('.pane-agents')).toBeVisible();
     await expect(page.locator('.pane-list')).toBeVisible();
     await expect(page.locator('.pane-detail')).toBeVisible();
-    // Nothing to navigate, so nothing to navigate with.
-    await expect(page.locator('.inbox-bar')).toBeHidden();
+
+    // Nothing to navigate, so nothing to navigate with. The bar itself is on
+    // screen at this width because the collapse control lives in it, but every
+    // control that exists to move between panes stays hidden.
+    await expect(page.locator('#pane-back')).toBeHidden();
+    await expect(page.locator('#agents-toggle')).toBeHidden();
+    await expect(page.locator('.inbox-bar-title')).toBeHidden();
+    await expect(page.locator('#pane-cycle')).toBeVisible();
   });
 
   test('tablet keeps list and detail, and hides the agent tree', async ({ page }) => {

@@ -154,6 +154,7 @@
     <div class="inbox-bar">
         <button id="pane-back" aria-label="Back">←</button>
         <button id="agents-toggle" aria-label="Agents">☰</button>
+        <button id="pane-cycle" aria-label="Collapse panes" title="Collapse panes (Ctrl+B)">◧</button>
         <span class="inbox-bar-title">Inbox</span>
     </div>
     <div class="inbox-scrim" id="inbox-scrim"></div>
@@ -165,6 +166,8 @@
             <div class="message-list" id="message-list"></div>
         </section>
         <section class="pane pane-detail" id="pane-detail" aria-label="Detail"></section>
+        <button class="pane-handle" id="pane-handle-1" aria-label="Resize agents" tabindex="-1"></button>
+        <button class="pane-handle" id="pane-handle-2" aria-label="Resize list" tabindex="-1"></button>
     </div>
 
     <script type="module" src="inbox.js"></script>

@@ -24,8 +24,12 @@ body {
 
 .inbox {
     display: grid;
-    grid-template-columns: 260px minmax(320px, 1fr) minmax(340px, 1.2fr);
+    grid-template-columns:
+        var(--pane-1-width, 260px)
+        var(--pane-2-width, minmax(320px, 1fr))
+        minmax(340px, 1.2fr);
     height: 100vh;
+    position: relative;   /* the drag handles are positioned against this */
 }
 
 .pane {
@@ -808,7 +812,7 @@ body {
     align-items: center;
     background: #edf2f7;
     border-bottom: 1px solid #cbd5e0;
-    display: none;          /* wide: no chrome at all */
+    display: flex;
     flex: 0 0 auto;
     gap: 8px;
     padding: 8px 12px;
@@ -837,22 +841,31 @@ body {
 
 /* The shell becomes a column so the bar can sit above the grid without
    overlaying it. `.inbox` keeps being the grid; only its height changes. */
-[data-layout='tablet'] body,
-[data-layout='phone'] body {
+body {
     display: flex;
     flex-direction: column;
 }
 
-[data-layout='tablet'] .inbox-bar,
-[data-layout='phone'] .inbox-bar {
+.inbox-bar {
     display: flex;
 }
 
-[data-layout='tablet'] .inbox,
-[data-layout='phone'] .inbox {
+.inbox {
     flex: 1;
     height: auto;
     min-height: 0;
+}
+
+/* Wide carries the collapse control and nothing else: there is still nothing
+   to navigate at this width, so none of the navigation chrome appears. */
+[data-layout='wide'] .inbox-bar #agents-toggle,
+[data-layout='wide'] .inbox-bar-title {
+    display: none;
+}
+
+/* Phone ignores collapse — one pane already fits — so it offers no control. */
+[data-layout='phone'] .inbox-bar #pane-cycle {
+    display: none;
 }
 
 /* --- Tablet: list + detail, agents on demand --- */
@@ -946,4 +959,66 @@ body {
 
 [data-layout='phone'][data-pane='detail'] .inbox-bar #agents-toggle {
     display: none;
+}
+
+/* --- Hand-set pane controls (panes.js) ---------------------------------
+ *
+ * `data-collapse` says how many panes are hidden, counting from the left.
+ * Hiding a pane is not enough on its own: a `display: none` grid child still
+ * leaves its track behind, and the panes that remain would slide left into
+ * columns sized for the panes that left. So each state names its own tracks.
+ *
+ * Phone is absent from every selector here on purpose. It shows one pane
+ * already, and `data-pane` decides which — collapse is not consulted, only
+ * remembered.
+ */
+
+[data-layout='wide'][data-collapse='1'] .pane-agents,
+[data-layout='tablet'][data-collapse='1'] .pane-agents,
+[data-layout='wide'][data-collapse='2'] .pane-agents,
+[data-layout='wide'][data-collapse='2'] .pane-list,
+[data-layout='tablet'][data-collapse='2'] .pane-agents,
+[data-layout='tablet'][data-collapse='2'] .pane-list {
+    display: none;
+}
+
+[data-layout='wide'][data-collapse='1'] .inbox {
+    grid-template-columns: var(--pane-2-width, minmax(320px, 1fr)) minmax(340px, 1.2fr);
+}
+
+[data-layout='wide'][data-collapse='2'] .inbox,
+[data-layout='tablet'][data-collapse='2'] .inbox {
+    grid-template-columns: 1fr;
+}
+
+/* The handles sit over the boundaries rather than in the grid: a fourth and
+   fifth grid child would change what the columns mean. Absolutely positioned,
+   so they are out of flow and the track count is untouched. */
+.pane-handle {
+    background: transparent;
+    border: 0;
+    bottom: 0;
+    cursor: col-resize;
+    display: none;
+    padding: 0;
+    position: absolute;
+    top: 0;
+    touch-action: none;     /* the pointer stream is ours, not the scroller's */
+    transform: translateX(-5px);
+    width: 10px;
+    z-index: 5;
+}
+
+.pane-handle:hover,
+.pane-handle[data-dragging='true'] {
+    background: rgba(66, 153, 225, 0.25);
+}
+
+/* A handle appears only where there is a boundary to drag. Resizing is a wide
+   affordance: at tablet the agent tree is an overlay, so there is one boundary
+   and little to gain. */
+[data-layout='wide'][data-collapse='0'] #pane-handle-1,
+[data-layout='wide'][data-collapse='0'] #pane-handle-2,
+[data-layout='wide'][data-collapse='1'] #pane-handle-2 {
+    display: block;
 }

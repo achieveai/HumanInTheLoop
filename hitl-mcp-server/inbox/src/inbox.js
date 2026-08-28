@@ -7,6 +7,7 @@
 // events say, because nothing here remembers anything.
 
 import { createLayoutObserver, createPaneState } from './layout.js';
+import { createPaneSizing, bindPaneControls } from './panes.js';
 import { renderAgentTree } from './pane-agents.js';
 import { createDetailPane } from './pane-detail.js';
 import { renderFilterBar, renderMessageList } from './pane-list.js';
@@ -123,6 +124,13 @@ async function main() {
     // collapsing to one.
     createLayoutObserver();
     const panes = createPaneState();
+
+    // Sizing is the hand-set half of the layout, and is published before the
+    // first paint for the same reason the observer is: a window that opens
+    // collapsed should not flash three panes on the way there.
+    const sizing = createPaneSizing();
+    sizing.publish();
+    bindPaneControls({ sizing });
 
     // The back gesture has no DOM event to hang off: on Android the platform
     // delivers it to the shell, which has to reach into the page to answer it
