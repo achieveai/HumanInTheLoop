@@ -201,10 +201,26 @@ pub async fn subscribe_loop(sink: &impl NtfySink, status: &ConnectionStatus) {
     let started = std::time::Instant::now();
 
     // Phase 1: Poll all cached messages once, then process
+    //
+    // Timed, and the timings are `info` rather than `debug`, because this phase
+    // is the whole of the startup stall the window shows as a freeze — and it
+    // runs exactly once per launch, so it costs one line each and cannot spam.
     log::info!("Fetching cached messages to find pending questions...");
+    let t = std::time::Instant::now();
     let cached_body = fetch_cached_body(&base_url).await;
+    log::info!(
+        "cache poll: {} bytes in {:?}",
+        cached_body.len(),
+        t.elapsed()
+    );
+
+    let t = std::time::Instant::now();
     let answered_ids = extract_answered_ids(&cached_body, &config);
-    log::info!("Found {} settled questions and reviews in cache", answered_ids.len());
+    log::info!(
+        "Found {} settled questions and reviews in cache ({:?})",
+        answered_ids.len(),
+        t.elapsed()
+    );
 
     // One de-dup set for both phases. The cache replay and the live stream
     // overlap by design, so a question seen in the cache must not re-dispatch
@@ -257,12 +273,32 @@ async fn show_pending_from_cache(
 ) {
     if body.is_empty() { return; }
 
-    for (event, decrypted, was_encrypted) in decrypt_and_reassemble_cache(body, config) {
+    let t = std::time::Instant::now();
+    let messages = decrypt_and_reassemble_cache(body, config);
+    log::info!(
+        "cache decrypt/reassemble: {} messages in {:?}",
+        messages.len(),
+        t.elapsed()
+    );
+
+    // Split, because "the cache replay is slow" is not actionable and these two
+    // have nothing in common: one writes to SQLite and fetches attachments, the
+    // other decides what the human sees. Whichever dominates is the one to fix.
+    let mut recording = std::time::Duration::ZERO;
+    let mut dispatching = std::time::Duration::ZERO;
+    let mut worst = (std::time::Duration::ZERO, String::new());
+    let count = messages.len();
+
+    for (event, decrypted, was_encrypted) in messages {
         // Before the filters, not after: `Origin::Cache` drops questions that
         // were already answered, which is exactly the history a recorder is
         // for. See `NtfySink::on_event`.
+        let t = std::time::Instant::now();
         sink.on_event(&event, &decrypted);
+        let recorded = t.elapsed();
+        recording += recorded;
 
+        let t = std::time::Instant::now();
         dispatch_message(
             sink,
             config,
@@ -272,7 +308,21 @@ async fn show_pending_from_cache(
             Origin::Cache { answered_ids, seen },
         )
         .await;
+        let dispatched = t.elapsed();
+        dispatching += dispatched;
+
+        // One outlier can be the entire story — a single 40 s attachment fetch
+        // and 364 uniformly slow messages produce the same total.
+        if recorded + dispatched > worst.0 {
+            worst = (recorded + dispatched, event.id.clone());
+        }
     }
+
+    log::info!(
+        "cache replay: {count} messages, recording {recording:?}, dispatching {dispatching:?},          slowest {:?} on event {}",
+        worst.0,
+        worst.1
+    );
 }
 
 /// Subscribe to live (new) messages from ntfy.

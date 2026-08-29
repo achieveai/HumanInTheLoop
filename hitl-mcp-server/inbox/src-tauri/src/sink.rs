@@ -27,6 +27,13 @@ use crate::capture::{self, Queue};
 /// high-water marks and a backfill cursor that disagreed with itself.
 pub type SharedStore = Arc<Mutex<Store>>;
 
+/// Above this, one event's trip through the sink is worth a line of its own.
+///
+/// Chosen to be far above an append and a hash lookup on a warm SQLite file and
+/// far below anything that reaches the network, so a quiet startup logs nothing
+/// and a slow one names the events responsible.
+const SLOW_EVENT: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Called once per genuinely new event, never on a replay.
 pub type OnChanged = Box<dyn Fn() + Send + Sync>;
 
@@ -105,9 +112,14 @@ impl InboxSink {
 
 impl NtfySink for InboxSink {
     fn on_event(&self, event: &NtfyEvent, decrypted: &str) {
+        // Timed against a threshold rather than logged per event: the startup
+        // cache replay calls this several hundred times, and a line each would
+        // bury the outliers it exists to find.
+        let t = std::time::Instant::now();
         if self.record(event, decrypted) {
             (self.changed)();
         }
+        let recorded = t.elapsed();
 
         // Every delivery, not just the new ones. A replay is exactly how a
         // fetch that died with the window gets retried, and the attachment URL
@@ -117,8 +129,17 @@ impl NtfySink for InboxSink {
         // Run even when `record` reported nothing new (including an append that
         // failed): a plan body ntfy is about to delete must not be lost because
         // of a row that did not write.
+        let t = std::time::Instant::now();
         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(decrypted) {
             capture::capture(&self.store, &self.queue, &payload, event);
+        }
+        let captured = t.elapsed();
+
+        if recorded + captured > SLOW_EVENT {
+            log::info!(
+                "slow event {}: record {recorded:?}, capture {captured:?}",
+                event.id
+            );
         }
     }
 
