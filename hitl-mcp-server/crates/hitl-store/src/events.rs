@@ -88,6 +88,24 @@ impl Store {
     /// reconnect, so the same event arriving twice is the normal case, not an
     /// error. A second append returns the seq the first one got.
     pub fn append(&self, event: &NtfyEvent, raw: &str) -> Result<i64> {
+        // Read before write, because on this path the write is almost always a
+        // no-op. ntfy replays its whole cache window on every startup and every
+        // reconnect, so a launch that learns two new events still calls this
+        // several hundred times.
+        //
+        // `INSERT OR IGNORE` looks free when it ignores, and is not: SQLite
+        // opens a write transaction for the statement and commits it whether or
+        // not a row changed, which under WAL is an fsync each time. Measured on
+        // the startup replay, that was 8.6 s of the cold path — and it is held
+        // under the store mutex, so every one of those fsyncs is a moment the
+        // window's own commands cannot reach the database. A click landing in
+        // that window looks like a freeze, because it is one.
+        //
+        // The lookup is on a UNIQUE index and touches no lock at all.
+        if let Some(seq) = self.seq_of(&event.id)? {
+            return Ok(seq);
+        }
+
         let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
 
         let msg_type = payload
@@ -115,12 +133,26 @@ impl Store {
             ],
         )?;
 
+        // Re-read rather than trusting `last_insert_rowid`: two writers can
+        // race here, and the loser's `OR IGNORE` must still return the seq the
+        // winner wrote, not the rowid its own ignored statement never used.
         let seq: i64 = self.conn.query_row(
             "SELECT seq FROM events WHERE ntfy_id = ?1",
             params![event.id],
             |row| row.get(0),
         )?;
         Ok(seq)
+    }
+
+    /// The seq this ntfy id already has, if the log has seen it.
+    fn seq_of(&self, ntfy_id: &str) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT seq FROM events WHERE ntfy_id = ?1",
+                params![ntfy_id],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     /// Every event about `subject_id`, in ntfy order.
@@ -259,6 +291,35 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         let (e, raw) = sample_event("ntfy-1", "msg-1", "question");
         assert_eq!(s.append(&e, &raw).unwrap(), s.append(&e, &raw).unwrap());
+    }
+
+    #[test]
+    fn a_replayed_event_costs_the_log_nothing() {
+        // The startup and reconnect cache replays re-append the whole ntfy
+        // window, and almost none of it is new. `INSERT OR IGNORE` still opened
+        // a write transaction and still consumed an AUTOINCREMENT rowid for
+        // every one of those, so the counter advanced by hundreds on a launch
+        // that learned nothing — and each of those was an fsync taken while
+        // holding the store mutex the window needs to answer a click.
+        //
+        // The burned seq is the observable half of that, so assert on it: if a
+        // replay ever writes again, the next genuinely new event will not land
+        // where this expects.
+        let s = Store::open_in_memory().unwrap();
+        let (e1, raw1) = sample_event("ntfy-1", "m", "question");
+        let first = s.append(&e1, &raw1).unwrap();
+
+        for _ in 0..20 {
+            assert_eq!(s.append(&e1, &raw1).unwrap(), first, "still idempotent");
+        }
+
+        let (e2, raw2) = sample_event("ntfy-2", "m", "answer");
+        assert_eq!(
+            s.append(&e2, &raw2).unwrap(),
+            first + 1,
+            "the replays consumed seqs a genuinely new event should have had"
+        );
+        assert_eq!(s.count_events().unwrap(), 2);
     }
 
     #[test]

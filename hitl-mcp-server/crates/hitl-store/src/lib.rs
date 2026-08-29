@@ -56,6 +56,17 @@ impl Store {
         // Ignored rather than propagated: an in-memory database refuses WAL,
         // and that is not a failure to open a store.
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        // SQLite defaults to `FULL`, which fsyncs on every commit. That default
+        // exists for rollback-journal mode, where it is the only thing standing
+        // between a power cut and a corrupt file. In WAL mode `NORMAL` cannot
+        // corrupt the database at all — the worst a crash costs is the last few
+        // committed transactions, which for an append-only log of ntfy events is
+        // a handful of messages the next cache poll replays anyway.
+        //
+        // Measured on the startup replay: fsync-per-append was the single
+        // largest cost in the cold path, ahead of decryption and dispatch
+        // combined.
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         schema::migrate(&conn)?;
         Ok(Self { conn })
     }
