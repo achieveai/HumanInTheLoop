@@ -44,6 +44,27 @@ const BATCH = {
   ],
 };
 
+// Reported from a screenshot: the preview panel scrolled while a tall stretch of
+// the pane below it sat empty. The cap was a flat `max-height: 320px`, which is
+// the same height whether the window is 700px tall or 1400px.
+//
+// Long enough to overflow the old cap, short enough to fit under a viewport-
+// relative one — so a fix that simply removed the cap and a fix that scaled it
+// are told apart by the short-viewport test below.
+const TALL_PREVIEW = {
+  question: 'Which layout?',
+  allowMultiple: false,
+  allowOther: true,
+  options: [
+    {
+      label: 'Roomy',
+      value: 'roomy',
+      preview: Array.from({ length: 18 }, (_, i) => `Paragraph ${i + 1} of the preview.`).join('\n\n'),
+    },
+    { label: 'Compact', value: 'compact', preview: 'Short.' },
+  ],
+};
+
 function pending(request: Record<string, unknown>, over = {}) {
   return detail(
     message({ messageId: 'q-1', msgType: 'question', title: 'Which storage backend?', ...over }),
@@ -300,5 +321,40 @@ test.describe('Pane 3 — an answered question (spec §8.2)', () => {
     await expect(page.locator('.sub-question[data-index="1"] .option.is-chosen')).toHaveCount(2);
     await expect(page.locator('.sub-question[data-index="1"] .other-answered-text')).toHaveText('Both, for now.');
     await expect(page.locator('.detail-actions .button')).toHaveCount(0);
+  });
+});
+
+
+test.describe('the preview panel is sized to the window, not to a constant', () => {
+  /** What the panel actually got, and whether it had to scroll to show it. */
+  const measure = (page: import('@playwright/test').Page) =>
+    page.locator('.preview-panel').evaluate(el => ({
+      clientHeight: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+      bottom: el.getBoundingClientRect().bottom,
+    }));
+
+  test('a tall window lets the preview grow instead of scrolling', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 1200 });
+    await mount(page, 'question', pending(TALL_PREVIEW));
+
+    const { clientHeight, scrollHeight } = await measure(page);
+
+    // The old 320px cap is the thing under test, so assert past it explicitly:
+    // a panel that still stops at 320 fails here even if nothing scrolls.
+    expect(clientHeight, 'panel is still pinned near the old 320px cap').toBeGreaterThan(360);
+    expect(scrollHeight, 'panel scrolls despite room below it').toBeLessThanOrEqual(clientHeight + 1);
+  });
+
+  test('a short window still caps it, rather than running off the bottom', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 700 });
+    await mount(page, 'question', pending(TALL_PREVIEW));
+
+    const { clientHeight, scrollHeight, bottom } = await measure(page);
+
+    // Removing the cap outright would pass the test above and fail this one.
+    expect(bottom, 'panel runs past the bottom of the window').toBeLessThanOrEqual(700);
+    expect(scrollHeight, 'nothing was actually clipped, so the fixture is too short')
+      .toBeGreaterThan(clientHeight);
   });
 });
