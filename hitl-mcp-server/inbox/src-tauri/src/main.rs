@@ -208,9 +208,42 @@ async fn catch_up(store: SharedStore) {
     }
 }
 
+/// Chromium flags that keep the webview alive when its window is not in front.
+///
+/// WebView2 is Chromium, and Chromium assumes a window you cannot see is a
+/// window nobody is waiting on: it throttles timers, deprioritises the
+/// renderer, and stops compositing occluded windows entirely. That is right for
+/// a browser tab and wrong for this app, whose entire job is to be sitting
+/// behind whatever you are actually working in until an agent needs you.
+///
+/// The symptom is a window that looks hung and then "unfreezes" the moment it
+/// is raised — a paused renderer, not a blocked one, which is why the process
+/// stays Responding and burns no CPU while it happens.
+///
+/// Set through the environment rather than `additionalBrowserArgs` in
+/// tauri.conf.json, because that key *replaces* the arguments Tauri passes by
+/// default instead of adding to them, and has its own history of leaving
+/// windows blank. The environment variable is additive.
+const WEBVIEW_FLAGS: &str = concat!(
+    "--disable-background-timer-throttling ",
+    "--disable-renderer-backgrounding ",
+    "--disable-backgrounding-occluded-windows",
+);
+
 fn main() {
     init_logging();
     log::info!("HITL Inbox {} starting", env!("CARGO_PKG_VERSION"));
+
+    // Before anything can construct a webview, and appended rather than
+    // assigned so a value set outside still wins its own flags.
+    let flags = match std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
+        Ok(existing) if !existing.trim().is_empty() => {
+            format!("{existing} {WEBVIEW_FLAGS}")
+        }
+        _ => WEBVIEW_FLAGS.to_string(),
+    };
+    std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &flags);
+    log::info!("webview flags: {flags}");
 
     let path = match database_path() {
         Ok(path) => path,
