@@ -13,6 +13,8 @@
 //! webview, and compared against `MessageRow::response_id` on the next fold.
 //! That comparison is the entire race decision (spec §9.3).
 
+use std::sync::Arc;
+
 use hitl_transport::config::load_config;
 use hitl_transport::drafts::ReviewDraft;
 use hitl_transport::ntfy::publish::{publish_answer, publish_dismiss_notification};
@@ -125,7 +127,11 @@ pub async fn dismiss_notification(notification_id: String) -> Result<String, Str
 /// third copy of one rule is a third thing to keep in step.
 #[tauri::command]
 pub async fn submit_plan_review(
-    waiters: tauri::State<'_, AckWaiters>,
+    // `Arc<AckWaiters>`, not `AckWaiters`: `main` shares this one value with
+    // `InboxSink`, which is the only thing that ever sees the ack that
+    // resolves a waiter registered here. Tauri resolves `State` by TypeId, so
+    // the wrapper has to be named or the lookup misses at runtime.
+    waiters: tauri::State<'_, Arc<AckWaiters>>,
     outstanding: tauri::State<'_, OutstandingReviews>,
     review_id: String,
     snapshot_hash: String,
