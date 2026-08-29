@@ -224,7 +224,26 @@ async fn catch_up(store: SharedStore) {
 /// tauri.conf.json, because that key *replaces* the arguments Tauri passes by
 /// default instead of adding to them, and has its own history of leaving
 /// windows blank. The environment variable is additive.
+/// `CalculateNativeWinOcclusion` is the one that matters, and the other three
+/// are not a substitute for it. They govern how Chromium *prioritises* a
+/// background window — its timers, its renderer's scheduling. Native window
+/// occlusion is a separate mechanism that decides the window is not visible at
+/// all and stops painting it outright; Chromium's own documentation says an
+/// occluded window's foreground tabs are treated as background tabs, "rendering
+/// stops, and js is throttled".
+///
+/// That distinction cost a round trip: with only the first three set, the
+/// window still froze, and still woke on a click — because input is what pulls
+/// a stopped compositor back, and nothing about timer priority was ever going
+/// to prevent it.
+///
+/// The `msWeb*` entries are the ones Tauri passes by default. Chromium takes a
+/// single `--disable-features` list and a second occurrence replaces the first
+/// rather than extending it, so they have to be repeated here or turning
+/// occlusion off would quietly turn those back on.
 const WEBVIEW_FLAGS: &str = concat!(
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,",
+    "CalculateNativeWinOcclusion ",
     "--disable-background-timer-throttling ",
     "--disable-renderer-backgrounding ",
     "--disable-backgrounding-occluded-windows",
