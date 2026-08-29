@@ -278,7 +278,12 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         <div class="review-root">
             <header class="review-header">
                 <div class="review-titlebar">
-                    <span class="review-title">Plan review</span>
+                    <button class="review-header-toggle" id="review-header-toggle"
+                            aria-expanded="true" aria-controls="review-header-body"
+                            title="Hide the plan details">
+                        <span class="arrow open" id="review-header-arrow">▶</span>
+                        <span class="review-title">Plan review</span>
+                    </button>
                     <div class="review-find">
                         <input type="search" id="review-find-input" class="review-find-input"
                                placeholder="Find in plan (Ctrl+F)" aria-label="Find in plan">
@@ -287,20 +292,25 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
                         <button class="review-find-btn" id="review-find-next" title="Next match" aria-label="Next match">↓</button>
                     </div>
                 </div>
-                <div class="review-meta">
-                    <span class="review-path" title="${escapeHtml(displayPath)}">${escapeHtml(displayPath)}</span>
-                    <span class="review-badges">${badges.join('')}</span>
-                </div>
-                ${msg.summary ? `<div class="review-summary md-content" id="review-summary"></div>` : ''}
-                ${msg.context ? `
-                <div class="review-context">
-                    <button class="review-context-toggle" id="review-context-toggle" aria-expanded="false">
-                        <span class="arrow" id="review-context-arrow">▶</span> Why the agent is asking
-                    </button>
-                    <div class="review-context-body" id="review-context-body" style="display:none;">
-                        <div class="md-content" id="review-context-content"></div>
+                <div class="review-header-body" id="review-header-body">
+                    <div class="review-meta">
+                        <span class="review-path" title="${escapeHtml(displayPath)}">${escapeHtml(displayPath)}</span>
+                        <span class="review-badges">${badges.join('')}</span>
                     </div>
-                </div>` : ''}
+                    ${msg.summary ? `<div class="review-summary md-content" id="review-summary"></div>` : ''}
+                    ${msg.context ? `
+                    <div class="review-context">
+                        <button class="review-context-toggle" id="review-context-toggle" aria-expanded="false">
+                            <span class="arrow" id="review-context-arrow">▶</span> Why the agent is asking
+                        </button>
+                        <div class="review-context-body" id="review-context-body" style="display:none;">
+                            <div class="md-content" id="review-context-content"></div>
+                        </div>
+                    </div>` : ''}
+                </div>
+                <!-- Outside the collapsible block on purpose: a superseded or
+                     cancelled review that silently stops saying so is the worst
+                     thing this pane can do. -->
                 <div class="review-banners" id="review-banners"></div>
             </header>
 
@@ -363,6 +373,43 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     perf.markdownRenderMs = performance.now() - tMd;
     if (msg.summary) renderMarkdownInto(container.querySelector('#review-summary'), msg.summary);
     if (msg.context) renderMarkdownInto(container.querySelector('#review-context-content'), msg.context);
+
+    // The header is ~173px of chrome sitting above a pane whose whole job is to
+    // show as much of the plan as it can. Collapsing it hands that back.
+    //
+    // The titlebar deliberately stays: it carries "Find in plan", and in the
+    // popup client `review.js` is the entire window, so there is nowhere else
+    // for search to go. Remembered rather than reset per review, because a
+    // reader who collapsed it once means it for the next plan too.
+    const HEADER_COLLAPSED_KEY = 'review.headerCollapsed';
+    const headerToggle = container.querySelector('#review-header-toggle');
+    const headerBody = container.querySelector('#review-header-body');
+
+    function setHeaderCollapsed(collapsed) {
+        if (!headerToggle || !headerBody) return;
+        headerBody.hidden = collapsed;
+        headerToggle.setAttribute('aria-expanded', String(!collapsed));
+        headerToggle.title = collapsed ? 'Show the plan details' : 'Hide the plan details';
+        container.querySelector('#review-header-arrow')?.classList.toggle('open', !collapsed);
+    }
+
+    try {
+        setHeaderCollapsed(localStorage.getItem(HEADER_COLLAPSED_KEY) === '1');
+    } catch {
+        // A private window, cleared site data, or a browser set to refuse
+        // storage. None of those are a reason to fail to draw the reviewer.
+        setHeaderCollapsed(false);
+    }
+
+    headerToggle?.addEventListener('click', () => {
+        const collapsed = headerBody.hidden !== true;
+        setHeaderCollapsed(collapsed);
+        try {
+            localStorage.setItem(HEADER_COLLAPSED_KEY, collapsed ? '1' : '0');
+        } catch {
+            // Losing the memory of the choice must not lose the choice itself.
+        }
+    });
 
     container.querySelector('#review-context-toggle')?.addEventListener('click', () => {
         const bodyEl = container.querySelector('#review-context-body');

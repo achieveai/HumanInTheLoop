@@ -48,6 +48,31 @@ body {
     gap: 12px;
 }
 
+/* "▶ Plan review" is one target: a bare arrow is a small thing to hit, and
+   the label is the only other text in the row that could carry the affordance. */
+.review-header-toggle {
+    align-items: center;
+    background: none;
+    border: none;
+    cursor: pointer;
+    display: flex;
+    font-family: inherit;
+    gap: 6px;
+    padding: 0;
+}
+
+.review-header-toggle .arrow {
+    color: #a0aec0;
+    display: inline-block;
+    font-size: 9px;
+    transition: transform 0.15s ease;
+}
+
+.review-header-toggle .arrow.open { transform: rotate(90deg); }
+
+/* `hidden` alone loses to the descendant rules above it. */
+.review-header-body[hidden] { display: none; }
+
 .review-title {
     font-size: 11px;
     font-weight: 600;

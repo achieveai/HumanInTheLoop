@@ -237,3 +237,85 @@ test.describe('Pane 3 — a plan that cannot be vouched for (spec §8.3)', () =>
     await expect(page.locator('.detail-kicker')).toHaveText('Plan review');
   });
 });
+
+
+// The header block — path, chips, the agent's summary and the context toggle —
+// is ~215px of a 859px window, which left the source and rendered panes about
+// 265px between them. Collapsing it is worth ~173px, roughly a 65% taller
+// review area.
+//
+// The titlebar deliberately survives a collapse: it carries "Find in plan", and
+// in the client popup `review.js` is the whole window, so there is nowhere else
+// for search to live.
+test.describe('the review header collapses (spec §8.3)', () => {
+  const toggle = '#review-header-toggle';
+  const body = '#review-header-body';
+
+  test('starts expanded, with the path, chips and summary on screen', async ({ page }) => {
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
+
+    await expect(page.locator(toggle)).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator('.review-meta')).toBeVisible();
+    await expect(page.locator('.review-summary')).toContainText('Three steps.');
+  });
+
+  test('collapsing hides the block but keeps the title and the find box', async ({ page }) => {
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
+
+    await page.locator(toggle).click();
+
+    await expect(page.locator(toggle)).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.locator(body)).toBeHidden();
+    await expect(page.locator('.review-meta')).toBeHidden();
+    await expect(page.locator('.review-summary')).toBeHidden();
+
+    // The two things a collapse must never take with it.
+    await expect(page.locator('.review-title')).toBeVisible();
+    await expect(page.locator('#review-find-input')).toBeVisible();
+  });
+
+  // Against what the header actually gave up, not a fixed pixel count: this
+  // fixture's summary is one line where a real one is a paragraph, so any
+  // constant here would either be unreachable or prove nothing.
+  test('collapsing gives the reviewing panes the height it took', async ({ page }) => {
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
+    const panes = () => page.locator('.review-body').boundingBox();
+
+    const before = (await panes())?.height ?? 0;
+    const surrendered = (await page.locator(body).boundingBox())?.height ?? 0;
+
+    await page.locator(toggle).click();
+
+    const gained = ((await panes())?.height ?? 0) - before;
+    expect(surrendered, 'the header body had no height to give').toBeGreaterThan(40);
+    expect(gained, 'the panes did not get what the header gave up')
+      .toBeGreaterThan(surrendered * 0.9);
+  });
+
+  // Structural rather than behavioural on purpose. Driving a message into the
+  // superseded state from here is a different fixture; what has to hold is that
+  // no future edit can move the banners inside the region that gets hidden,
+  // because a cancelled review that silently stops saying so is the worst
+  // outcome this pane has.
+  test('banners are never inside the part that collapses', async ({ page }) => {
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
+
+    const nested = await page.evaluate(() =>
+      Boolean(document.querySelector('#review-header-body #review-banners')));
+
+    expect(nested, '#review-banners is inside the collapsible region').toBe(false);
+  });
+
+  test('the choice is remembered for the next review', async ({ page }) => {
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
+    await page.locator(toggle).click();
+    await expect(page.locator(body)).toBeHidden();
+
+    // Re-mounted rather than reloaded: the harness stages its fixture per
+    // mount, and "the next review" is literally a second mount anyway.
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
+
+    await expect(page.locator(toggle)).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.locator(body)).toBeHidden();
+  });
+});
