@@ -17,7 +17,12 @@ export const FILTERS = [
     { key: 'all', label: 'All', count: list => list.counts.all },
     { key: 'needs_you', label: 'Needs you', count: list => list.counts.needsYou },
     { key: 'answered', label: 'Answered', count: list => list.counts.answered },
-    { key: 'notifications', label: 'Notifications', count: list => list.counts.notifications },
+];
+
+export const TYPES = [
+    { key: 'notification', label: 'Notifications' },
+    { key: 'question', label: 'Questions' },
+    { key: 'plan_review', label: 'Review plans' },
 ];
 
 /**
@@ -75,6 +80,29 @@ export function renderFilterBar(container, list, { onFilter } = {}) {
         button.addEventListener('click', () => onFilter?.(filter.key));
         container.appendChild(button);
     }
+}
+
+export function renderTypeFilterBar(container, messages, enabled, { onToggle } = {}) {
+    for (const type of TYPES) {
+        const pressed = enabled.has(type.key);
+        let button = container.querySelector(`.type-filter[data-type="${type.key}"]`);
+        if (!button) {
+            button = el('button', 'type-filter');
+            button.dataset.type = type.key;
+            button.append(type.label, el('span', 'filter-count'));
+            button.addEventListener('click', () => onToggle?.(type.key));
+            container.appendChild(button);
+        }
+        button.setAttribute('aria-pressed', String(pressed));
+        button.disabled = pressed && enabled.size === 1;
+        button.querySelector('.filter-count').textContent = String(
+            messages.filter(message => message.msgType === type.key).length,
+        );
+    }
+}
+
+export function filterMessagesByType(messages, enabled) {
+    return messages.filter(message => enabled.has(message.msgType));
 }
 
 /**
@@ -165,16 +193,16 @@ function messageRow(message, { selectedId, onSelect } = {}) {
 
 /** Render the list. Server-ordered newest first; nothing is re-sorted here. */
 export function renderMessageList(container, list, options = {}) {
-    container.textContent = '';
+    const fragment = document.createDocumentFragment();
 
     if (!list.messages.length) {
-        container.appendChild(el('p', 'list-empty', emptyText(list)));
-        return;
+        fragment.appendChild(el('p', 'list-empty', options.emptyText ?? emptyText(list)));
+    } else {
+        for (const message of list.messages) {
+            fragment.appendChild(messageRow(message, options));
+        }
     }
-
-    for (const message of list.messages) {
-        container.appendChild(messageRow(message, options));
-    }
+    container.replaceChildren(fragment);
 }
 
 function emptyText(list) {

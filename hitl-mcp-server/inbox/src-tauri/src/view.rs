@@ -8,7 +8,7 @@
 //! its connection is private), and a projection that is a function of its
 //! inputs is worth more here than one query saved.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use hitl_store::{fold, Event, MessageState};
 use serde::Serialize;
@@ -557,6 +557,9 @@ pub struct FilterCounts {
 pub struct MessageList {
     /// Newest first.
     pub messages: Vec<MessageRow>,
+    /// Pending/stale notifications in this scope, independent of the selected
+    /// status filter. The native bulk action snapshots these exact IDs.
+    pub actionable_notification_ids: Vec<String>,
     /// Counts over the *scope*, before the filter — so the filter bar can show
     /// what each tab would contain rather than what the current one does.
     pub counts: FilterCounts,
@@ -592,6 +595,26 @@ pub fn build_list(events: &[Event], scope_key: Option<&str>, filter: Option<&str
         row.status = display_status(&row.status, state_for(&tree, row)).to_string();
     }
 
+    // Newest first (spec §7), by the request's ntfy time. Sort the complete
+    // scoped set before taking the bulk snapshot so every status filter sees
+    // the same stable order.
+    rows.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| a.message_id.cmp(&b.message_id))
+    });
+
+    let mut seen_notification_ids = HashSet::new();
+    let actionable_notification_ids = rows
+        .iter()
+        .filter(|row| {
+            row.msg_type == "notification"
+                && matches!(row.status.as_str(), "pending" | "stale")
+                && seen_notification_ids.insert(row.message_id.clone())
+        })
+        .map(|row| row.message_id.clone())
+        .collect();
+
     let counts = FilterCounts {
         all: rows.len() as u32,
         needs_you: rows.iter().filter(|r| Filter::NeedsYou.admits(r)).count() as u32,
@@ -603,17 +626,10 @@ pub fn build_list(events: &[Event], scope_key: Option<&str>, filter: Option<&str
     let applied = parse_filter(filter).unwrap_or(default_filter);
 
     rows.retain(|row| applied.admits(row));
-    // Newest first (spec §7), by the request's ntfy time. The message id breaks
-    // ties so a repaint never reorders two messages published in the same
-    // second.
-    rows.sort_by(|a, b| {
-        b.created_at
-            .cmp(&a.created_at)
-            .then_with(|| a.message_id.cmp(&b.message_id))
-    });
 
     MessageList {
         messages: rows,
+        actionable_notification_ids,
         counts,
         filter: applied.as_str(),
         default_filter: default_filter.as_str(),
@@ -721,6 +737,17 @@ mod tests {
             at,
             &format!(
                 r#"{{"type":"notification","messageId":"{id}","title":"{title}","body":"done"}}"#
+            ),
+        )
+    }
+
+    fn dismiss(notification_id: &str, dismissal_id: &str, at: u64) -> Event {
+        ev(
+            &format!("ntfy-{dismissal_id}"),
+            at,
+            &format!(
+                r#"{{"type":"dismiss_notification","messageId":"{dismissal_id}",
+                     "notificationId":"{notification_id}","dismissedFrom":"laptop"}}"#
             ),
         )
     }
@@ -1374,6 +1401,47 @@ mod tests {
     }
 
     #[test]
+    fn actionable_notification_ids_are_scope_wide_stable_and_filter_independent() {
+        // A bulk action snapshots every still-open notification in the selected
+        // scope. The visible status filter must not shrink that snapshot.
+        let events = [
+            notification("n-alpha", NOW - MINUTE, "alpha"),
+            identity("n-alpha", NOW - MINUTE, "Alpha · main · aaaa"),
+            // A replayed request still names one actionable subject.
+            notification("n-alpha", NOW - MINUTE, "alpha replay"),
+            notification("n-dismissed", NOW - 2 * MINUTE, "already read"),
+            identity("n-dismissed", NOW - 2 * MINUTE, "Alpha · main · aaaa"),
+            dismiss("n-dismissed", "d-dismissed", NOW - MINUTE),
+            question("q-open", NOW - 3 * MINUTE, "Alpha"),
+            identity("q-open", NOW - 3 * MINUTE, "Alpha · main · aaaa"),
+            notification("n-beta", NOW - 4 * MINUTE, "beta"),
+            identity("n-beta", NOW - 4 * MINUTE, "Beta · main · bbbb"),
+            notification("n-unattributed", NOW - 5 * MINUTE, "unattributed"),
+            notification("n-stale", NOW - 3 * DAY, "old but unread"),
+            identity("n-stale", NOW - 3 * DAY, "Alpha · old · cccc"),
+        ];
+        let cases = [
+            (
+                Some("all"),
+                vec!["n-alpha", "n-beta", "n-unattributed", "n-stale"],
+            ),
+            (Some("project:Alpha"), vec!["n-alpha", "n-stale"]),
+            (Some("session:Alpha · main · aaaa"), vec!["n-alpha"]),
+            (Some("unattributed"), vec!["n-unattributed"]),
+        ];
+
+        for (scope, expected) in cases {
+            for filter in ["all", "needs_you", "answered", "notifications"] {
+                let list = build_list(&events, scope, Some(filter), NOW);
+                assert_eq!(
+                    list.actionable_notification_ids, expected,
+                    "scope={scope:?}, filter={filter}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn an_unrecognised_filter_falls_back_to_the_default_rather_than_erroring() {
         assert_eq!(parse_filter(Some("nope")), None);
         let events = [question("q-1", NOW, "Hitl_MCP")];
@@ -1463,7 +1531,15 @@ mod tests {
         let list = serde_json::to_value(build_list(&events, None, None, NOW)).unwrap();
         assert_eq!(
             keys(&list),
-            ["counts", "defaultFilter", "filter", "messages", "now", "scopeKey"]
+            [
+                "actionableNotificationIds",
+                "counts",
+                "defaultFilter",
+                "filter",
+                "messages",
+                "now",
+                "scopeKey"
+            ]
         );
         assert_eq!(keys(&list["counts"]), ["all", "answered", "needsYou", "notifications"]);
         assert_eq!(

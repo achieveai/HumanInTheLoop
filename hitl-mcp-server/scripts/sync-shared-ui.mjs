@@ -44,7 +44,13 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  * `window`, and is also what the Inbox's own notification and question
  * renderers use, so the two apps render a plan the same way.
  */
-const ASSETS = ['review.js', 'review.css', 'vendor/markdown-it.min.js'];
+const ASSETS = [
+    'review.js',
+    'review.css',
+    'vendor/markdown-it.min.js',
+    'vendor/diff.min.js',
+    'vendor/diff.LICENSE.txt',
+];
 
 let copied = 0;
 let missing = 0;

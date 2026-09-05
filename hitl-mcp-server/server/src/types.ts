@@ -152,6 +152,17 @@ export interface DismissNotificationMessage extends BaseMessage {
   dismissedFrom: string;
 }
 
+/** Published by a client to undo one exact notification dismissal. */
+export interface RestoreNotificationMessage extends BaseMessage {
+  type: 'restore_notification';
+  /** The messageId of the notification being restored. */
+  notificationId: string;
+  /** The exact dismiss_notification messageId being undone. */
+  dismissalId: string;
+  /** Device that restored it. */
+  restoredFrom: string;
+}
+
 /**
  * Decorates a question or notification with the sender's resolved identity.
  *
@@ -312,7 +323,7 @@ export type PlanMessage =
   | CancelReviewMessage;
 
 /** Anything that can arrive on the topic (excluding the transport-only chunk wrapper). */
-export type AnyHitlMessage = HitlMessage | PlanMessage;
+export type AnyHitlMessage = HitlMessage | RestoreNotificationMessage | PlanMessage;
 
 // -----------------------------------------------------------
 // Configuration (~/.hitl/config.json)

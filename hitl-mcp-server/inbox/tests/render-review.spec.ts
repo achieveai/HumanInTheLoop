@@ -66,9 +66,60 @@ test.describe('Pane 3 — a reviewable plan (spec §8.3)', () => {
 
     await expect(page.locator('.detail-kicker')).toHaveText('Plan review');
     await expect(page.locator('.review-root')).toHaveCount(1);
+    await expect(page.getByRole('tab', { name: 'Changes' })).toHaveAttribute('aria-selected', 'true');
+    await page.getByRole('tab', { name: 'Source' }).click();
     await expect(page.locator('.diff-row[data-line]')).toHaveCount(6);
     await expect(page.locator('[data-verdict="approved"]')).toBeEnabled();
     await expect(page.locator('.review-panel')).toHaveCount(0);
+  });
+
+  test('the shared rendered reviewer exposes raw-line mappings and its selection action', async ({ page }) => {
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT) });
+    await expect(page.locator('#rendered-content [data-source-start]')).not.toHaveCount(0);
+    await expect(page.locator('#comment-rendered-selection')).toBeVisible();
+  });
+
+  test('rendered commenting works when the selected block is outside the Source diff hunk', async ({ page }) => {
+    await mount(page, 'review', review({ revision: 2, isNewPlan: false }), { body: bodyOk(CONTENT, DIFF) });
+    await page.evaluate(() => {
+      const paragraph = document.querySelector('#rendered-content p[data-source-start="3"]')!;
+      const range = document.createRange();
+      range.selectNodeContents(paragraph);
+      const selection = window.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      paragraph.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+    });
+    await page.locator('#comment-rendered-selection').click();
+    await expect(page.locator('.review-comments #comment-composer')).toBeVisible();
+  });
+
+  test('remounting a review leaves only the live selection listener', async ({ page }) => {
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT) });
+
+    const scheduledRefreshes = await page.evaluate(async ({ nextDetail, nextBody }) => {
+      const originalRaf = window.requestAnimationFrame;
+      const nativeRaf = originalRaf.bind(window);
+      let refreshes = 0;
+      window.requestAnimationFrame = callback => nativeRaf(timestamp => {
+        refreshes += 1;
+        callback(timestamp);
+      });
+
+      try {
+        const { renderReview } = await import('./render-review.js');
+        renderReview(document.querySelector('#pane-detail')!, nextDetail, nextBody);
+        await new Promise(resolve => setTimeout(resolve, 0));
+        refreshes = 0;
+        document.dispatchEvent(new Event('selectionchange'));
+        await new Promise(resolve => nativeRaf(() => nativeRaf(resolve)));
+        return refreshes;
+      } finally {
+        window.requestAnimationFrame = originalRaf;
+      }
+    }, { nextDetail: review({ revision: 2 }), nextBody: bodyOk(CONTENT) });
+
+    expect(scheduledRefreshes).toBe(1);
   });
 
   test('a revision shows the diff; a new plan shows the plan whole', async ({ page }) => {
@@ -78,10 +129,12 @@ test.describe('Pane 3 — a reviewable plan (spec §8.3)', () => {
     await mount(page, 'review', review({ revision: 2, isNewPlan: false }, { badges: { revision: 2 } as any }),
       { body: bodyOk(CONTENT, DIFF) });
 
+    await page.getByRole('tab', { name: 'Source' }).click();
     await expect(page.locator('.diff-row-add')).toHaveCount(1);
     await expect(page.locator('.diff-row-del')).toHaveCount(1);
 
     await mount(page, 'review', review({ revision: 1, isNewPlan: true }), { body: bodyOk(CONTENT, DIFF) });
+    await page.getByRole('tab', { name: 'Source' }).click();
     await expect(page.locator('.diff-row-add')).toHaveCount(0);
     await expect(page.locator('.diff-row[data-line]')).toHaveCount(6);
   });
@@ -95,6 +148,7 @@ test.describe('Pane 3 — a reviewable plan (spec §8.3)', () => {
     }), { body: bodyOk(CONTENT) });
 
     await expect(page.locator('.detail-root')).toHaveAttribute('data-read-only', 'true');
+    await page.getByRole('tab', { name: 'Source' }).click();
     await expect(page.locator('.diff-row[data-line]')).toHaveCount(6);
     await expect(page.locator('[data-verdict="approved"]')).toBeDisabled();
     await expect(page.locator('.review-banner-superseded')).toContainText('Kay9 desktop');

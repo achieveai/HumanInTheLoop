@@ -1,5 +1,7 @@
 //! The fold: events in, status out. Pure.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::events::Event;
 
 /// The unified status vocabulary of spec §7.2, across all three message types.
@@ -123,10 +125,44 @@ pub fn fold(events: &[Event]) -> MessageState {
     let mut ordered: Vec<&Event> = events.iter().collect();
     ordered.sort_by(|a, b| (a.ntfy_time, &a.ntfy_id).cmp(&(b.ntfy_time, &b.ntfy_id)));
 
+    // A restore is a targeted tombstone, not a chronological toggle. Collect
+    // every exact reference before considering settlements so the result is
+    // independent of both arrival order and ntfy order (including a restore
+    // observed before the dismissal it names).
+    let mut restored_dismissals: HashMap<String, HashSet<String>> = HashMap::new();
+    for event in &ordered {
+        if event.msg_type != "restore_notification" {
+            continue;
+        }
+        let Some(subject) = event.subject_id.as_deref() else {
+            continue;
+        };
+        if event.field("notificationId").as_deref() != Some(subject) {
+            continue;
+        }
+        let Some(dismissal_id) = event.field("dismissalId") else {
+            continue;
+        };
+        restored_dismissals
+            .entry(subject.to_string())
+            .or_default()
+            .insert(dismissal_id);
+    }
+
     let mut state = MessageState::default();
     let mut settled = false;
 
     for event in &ordered {
+        if event.msg_type == "dismiss_notification"
+            && event.subject_id.as_deref().is_some_and(|subject| {
+                restored_dismissals
+                    .get(subject)
+                    .is_some_and(|ids| ids.contains(&event.message_id))
+            })
+        {
+            continue;
+        }
+
         // Spec §9.2: the winning response is the *first* settling event in
         // ntfy order. Everything after it is a loser, and a loser must never
         // overwrite the winner — including a `cancel_review`, which races a
@@ -330,15 +366,40 @@ mod tests {
     }
 
     fn dismiss(subject: &str) -> Event {
-        event(
-            10,
-            subject,
-            "dismiss_notification",
-            format!(
-                r#"{{"type":"dismiss_notification","notificationId":"{subject}",
-                    "dismissedFrom":"phone"}}"#
-            ),
-        )
+        dismiss_at(subject, "dismiss-A", "phone", 10)
+    }
+
+    fn dismiss_at(subject: &str, dismissal_id: &str, responder: &str, at: u64) -> Event {
+        Event {
+            ntfy_id: format!("ntfy-{dismissal_id}"),
+            message_id: dismissal_id.to_string(),
+            ..event(
+                at,
+                subject,
+                "dismiss_notification",
+                format!(
+                    r#"{{"type":"dismiss_notification","messageId":"{dismissal_id}",
+                        "notificationId":"{subject}","dismissedFrom":"{responder}"}}"#
+                ),
+            )
+        }
+    }
+
+    fn restore_at(subject: &str, dismissal_id: &str, restore_id: &str, at: u64) -> Event {
+        Event {
+            ntfy_id: format!("ntfy-{restore_id}"),
+            message_id: restore_id.to_string(),
+            ..event(
+                at,
+                subject,
+                "restore_notification",
+                format!(
+                    r#"{{"type":"restore_notification","messageId":"{restore_id}",
+                        "notificationId":"{subject}","dismissalId":"{dismissal_id}",
+                        "restoredFrom":"laptop"}}"#
+                ),
+            )
+        }
     }
 
     fn plan_review(id: &str) -> Event {
@@ -453,6 +514,107 @@ mod tests {
         assert_eq!(
             fold(&[notification("n-1"), dismiss("n-1")]).status,
             Status::Dismissed
+        );
+    }
+
+    #[test]
+    fn restore_tombstones_only_the_exact_named_dismissal_in_any_order() {
+        let request = notification("n-1");
+        let dismissal_a = dismiss_at("n-1", "dismiss-A", "phone", 10);
+        let dismissal_b = dismiss_at("n-1", "dismiss-B", "laptop", 20);
+        let restore_a = restore_at("n-1", "dismiss-A", "restore-A", 30);
+        let restore_a_early = restore_at("n-1", "dismiss-A", "restore-A-early", 5);
+        let duplicate_restore_a = restore_at("n-1", "dismiss-A", "restore-A-duplicate", 40);
+        let restore_unknown = restore_at("n-1", "missing", "restore-missing", 30);
+
+        let pending = MessageState::default();
+        let dismissed_a = MessageState {
+            status: Status::Dismissed,
+            verdict: None,
+            responder: Some("phone".to_string()),
+            responded_at: Some(10),
+            response_id: Some("dismiss-A".to_string()),
+        };
+        let dismissed_b = MessageState {
+            status: Status::Dismissed,
+            verdict: None,
+            responder: Some("laptop".to_string()),
+            responded_at: Some(20),
+            response_id: Some("dismiss-B".to_string()),
+        };
+
+        let cases = vec![
+            (
+                "dismissal A",
+                vec![request.clone(), dismissal_a.clone()],
+                dismissed_a.clone(),
+            ),
+            (
+                "A + restore A",
+                vec![request.clone(), dismissal_a.clone(), restore_a.clone()],
+                pending.clone(),
+            ),
+            (
+                "A + B + restore A",
+                vec![
+                    request.clone(),
+                    dismissal_a.clone(),
+                    dismissal_b.clone(),
+                    restore_a.clone(),
+                ],
+                dismissed_b.clone(),
+            ),
+            (
+                "A + restore A + B",
+                vec![
+                    request.clone(),
+                    dismissal_a.clone(),
+                    restore_a.clone(),
+                    dismissal_b.clone(),
+                ],
+                dismissed_b,
+            ),
+            (
+                "restore A ingested and ordered before A",
+                vec![request.clone(), restore_a_early, dismissal_a.clone()],
+                pending.clone(),
+            ),
+            (
+                "duplicate restore",
+                vec![
+                    request.clone(),
+                    dismissal_a.clone(),
+                    restore_a.clone(),
+                    duplicate_restore_a,
+                ],
+                pending,
+            ),
+            (
+                "unknown dismissal ID",
+                vec![request, dismissal_a, restore_unknown],
+                dismissed_a,
+            ),
+        ];
+
+        for (name, events, expected) in cases {
+            assert_eq!(fold(&events), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_restore_from_another_notification_cannot_tombstone_this_one() {
+        let dismissal = dismiss_at("n-1", "dismiss-A", "phone", 10);
+        let alien_restore = restore_at("n-2", "dismiss-A", "restore-alien", 20);
+
+        assert_eq!(
+            fold(&[notification("n-1"), dismissal, alien_restore]),
+            MessageState {
+                status: Status::Dismissed,
+                verdict: None,
+                responder: Some("phone".to_string()),
+                responded_at: Some(10),
+                response_id: Some("dismiss-A".to_string()),
+            }
         );
     }
 

@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="review.css">
     <link rel="stylesheet" href="inbox.css">
     <script src="vendor/markdown-it.min.js"></script>
+    <script src="vendor/diff.min.js"></script>
     <!-- Mocks window.__TAURI__ so the real inbox.js / pane-agents.js /
          pane-list.js modules run outside a Tauri backend, mirroring
          review-harness.html and notifications-harness.html in client/.
@@ -67,6 +68,20 @@
                     if (cmd === 'submit_plan_review') {
                         return reply(cmd, { status: 'received', responseId: 'resp-review', reason: null });
                     }
+                    if (cmd === 'dismiss_notifications') {
+                        return reply(cmd, (args?.notificationIds ?? []).map((notificationId, index) => ({
+                            status: 'dismissed',
+                            notificationId,
+                            responseId: `bulk-dismiss-${index + 1}`,
+                        })));
+                    }
+                    if (cmd === 'restore_notifications') {
+                        return reply(cmd, (args?.restorations ?? []).map((restoration, index) => ({
+                            status: 'restored',
+                            ...restoration,
+                            responseId: `bulk-restore-${index + 1}`,
+                        })));
+                    }
                     if (cmd === 'save_review_draft' || cmd === 'clear_review_draft') {
                         return reply(cmd, null);
                     }
@@ -102,6 +117,7 @@
         function emptyList(args) {
             return {
                 messages: [],
+                actionableNotificationIds: [],
                 counts: { all: 0, needsYou: 0, answered: 0, notifications: 0 },
                 filter: args?.filter ?? 'all',
                 defaultFilter: 'all',
@@ -155,20 +171,46 @@
         <button id="pane-back" aria-label="Back">←</button>
         <button id="agents-toggle" aria-label="Agents">☰</button>
         <button id="pane-cycle" aria-label="Collapse panes" title="Collapse panes (Ctrl+B)">◧</button>
+        <button id="reading-pane-toggle" aria-label="Place reading pane below message list"
+                title="Place reading pane below message list">▥</button>
         <span class="inbox-bar-title">Inbox</span>
     </div>
     <div class="inbox-scrim" id="inbox-scrim"></div>
 
     <div class="inbox">
         <aside class="pane pane-agents" id="pane-agents" aria-label="Agents"></aside>
-        <section class="pane pane-list" aria-label="Messages">
+        <section class="pane pane-list" id="pane-list" aria-label="Messages">
             <div class="filter-bar" id="filter-bar" role="tablist"></div>
+            <div class="type-filter-bar" id="type-filter-bar">
+                <div class="type-filter-set" id="type-filter-set" role="group" aria-label="Message types"></div>
+                <div class="list-actions" id="list-actions">
+                    <span class="visually-hidden" id="mark-all-read-description"></span>
+                    <button class="mark-all-read" type="button"
+                            aria-describedby="mark-all-read-description" hidden></button>
+                </div>
+            </div>
+            <div class="bulk-status" id="bulk-status" role="status" aria-live="polite"
+                 aria-atomic="true" hidden>
+                <span class="bulk-status-message"></span>
+                <button class="undo-mark-all-read" type="button">Undo mark all read</button>
+                <button class="dismiss-bulk-status" type="button" aria-label="Dismiss Undo">Dismiss</button>
+            </div>
             <div class="message-list" id="message-list"></div>
         </section>
         <section class="pane pane-detail" id="pane-detail" aria-label="Detail"></section>
-        <button class="pane-handle" id="pane-handle-1" aria-label="Resize agents" tabindex="-1"></button>
-        <button class="pane-handle" id="pane-handle-2" aria-label="Resize list" tabindex="-1"></button>
+        <button class="pane-handle" id="pane-handle-1" aria-label="Resize agents" role="separator"
+                aria-controls="pane-agents" aria-orientation="vertical" tabindex="0"></button>
+        <button class="pane-handle" id="pane-handle-2" aria-label="Resize message list" role="separator"
+                aria-controls="pane-list" aria-orientation="vertical" tabindex="0"></button>
     </div>
+
+    <dialog class="action-error-dialog" id="action-error-dialog" aria-labelledby="action-error-title">
+        <form method="dialog">
+            <h2 id="action-error-title">Could not send</h2>
+            <p class="action-error-message" role="alert"></p>
+            <button class="button button-primary" type="submit">Close</button>
+        </form>
+    </dialog>
 
     <script type="module" src="inbox.js"></script>
 </body>

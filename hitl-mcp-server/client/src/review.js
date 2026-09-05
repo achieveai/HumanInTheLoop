@@ -123,6 +123,558 @@ function createMarkdownRenderer() {
     return md;
 }
 
+function logicalSourceLines(text) {
+    if (text === null || text === undefined || text === '') return [];
+    const source = String(text);
+    const lines = splitLines(source);
+    if (/(?:\r\n|\n|\r)$/.test(source) && lines.at(-1) === '') lines.pop();
+    return lines;
+}
+
+/**
+ * Rebuild the previous Markdown document from the full-document unified diff.
+ *
+ * The current document always comes from the hash-checked body, never from the
+ * patch. A malformed, partial, or mismatched patch therefore degrades to a
+ * truthful current document plus an unavailable previous document rather than
+ * presenting invented prose as something the agent removed.
+ */
+export function reconstructReviewDocuments(content, diffText) {
+    const newSource = typeof content === 'string' ? content : '';
+    const authoritativeNewLines = logicalSourceLines(newSource);
+    const failed = reason => ({
+        ok: false,
+        reason,
+        oldSource: '',
+        newSource,
+        oldLines: [],
+        newLines: authoritativeNewLines,
+    });
+    if (typeof diffText !== 'string' || diffText === '') {
+        return { ok: true, oldSource: '', newSource, oldLines: [], newLines: authoritativeNewLines };
+    }
+
+    const rawLines = splitLines(diffText);
+    if (/(?:\r\n|\n|\r)$/.test(diffText) && rawLines.at(-1) === '') rawLines.pop();
+    const hunks = rawLines
+        .map((line, index) => ({ line, index, match: /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line) }))
+        .filter(entry => entry.match);
+    if (hunks.length !== 1) return failed('The review patch is not one complete document hunk.');
+
+    const [{ index: hunkIndex, match }] = hunks;
+    const oldStart = Number(match[1]);
+    const oldCount = match[2] === undefined ? 1 : Number(match[2]);
+    const newStart = Number(match[3]);
+    const newCount = match[4] === undefined ? 1 : Number(match[4]);
+    if ((oldCount === 0 ? oldStart !== 0 : oldStart !== 1)
+        || (newCount === 0 ? newStart !== 0 : newStart !== 1)) {
+        return failed('The review patch omits document context.');
+    }
+
+    const oldLines = [];
+    const newLines = [];
+    let oldHasFinalNewline = true;
+    let newHasFinalNewline = true;
+    let sawNoFinalNewlineMarker = false;
+    let previousMarker = null;
+    for (const raw of rawLines.slice(hunkIndex + 1)) {
+        const marker = raw.charAt(0);
+        if (marker === '\\') {
+            if (raw !== '\\ No newline at end of file' || previousMarker === null) {
+                return failed('The review patch has an invalid newline marker.');
+            }
+            sawNoFinalNewlineMarker = true;
+            if (previousMarker === '-' || previousMarker === ' ') oldHasFinalNewline = false;
+            if (previousMarker === '+' || previousMarker === ' ') newHasFinalNewline = false;
+            continue;
+        }
+        const text = raw.slice(1);
+        if (marker === ' ') {
+            oldLines.push(text);
+            newLines.push(text);
+        } else if (marker === '-') {
+            oldLines.push(text);
+        } else if (marker === '+') {
+            newLines.push(text);
+        } else {
+            return failed('The review patch contains a row without a unified-diff marker.');
+        }
+        previousMarker = marker;
+    }
+
+    if (oldLines.length !== oldCount || newLines.length !== newCount) {
+        return failed('The review patch line counts do not match its hunk header.');
+    }
+    const authoritativeHasFinalNewline = newSource.length > 0 && /(?:\r\n|\n|\r)$/.test(newSource);
+    // Some producers omit the marker when both documents share the same EOF
+    // state. In that case the hash-checked current body is authoritative for
+    // both sides; otherwise reconstruction invents a false remove/add pair.
+    if (!sawNoFinalNewlineMarker) {
+        oldHasFinalNewline = authoritativeHasFinalNewline;
+        newHasFinalNewline = authoritativeHasFinalNewline;
+    }
+    if (newHasFinalNewline !== authoritativeHasFinalNewline) {
+        return failed('The review patch final-newline state disagrees with the current plan body.');
+    }
+    if (newLines.length !== authoritativeNewLines.length
+        || newLines.some((line, index) => line !== authoritativeNewLines[index])) {
+        return failed('The review patch does not describe the current plan body.');
+    }
+
+    const oldSource = oldLines.join('\n')
+        + (oldHasFinalNewline && oldLines.length > 0 ? '\n' : '');
+    return { ok: true, oldSource, newSource, oldLines, newLines: authoritativeNewLines };
+}
+
+const MAPPED_BLOCK_SELECTOR = '[data-source-start][data-source-end][data-source-side]';
+const mappedControllerCleanup = new WeakMap();
+
+function clearMappedController(container) {
+    mappedControllerCleanup.get(container)?.();
+    mappedControllerCleanup.delete(container);
+}
+
+/** Release document-level review listeners before a host is removed externally. */
+export function disposeReview(container) {
+    if (container) clearMappedController(container);
+}
+
+/**
+ * Render a complete Markdown document while retaining markdown-it's block maps.
+ * Token maps are zero-based and half-open; review anchors are 1-based and
+ * inclusive. Only source-backed opening/standalone block tokens can emit an
+ * element, so inline containers and closing tokens deliberately carry no DOM
+ * metadata.
+ */
+export function renderMappedMarkdown(md, text, side = 'new') {
+    if (!md) return null;
+    const fixedSide = side === 'old' ? 'old' : 'new';
+    const env = {};
+    const tokens = md.parse(text || '', env);
+    for (const token of tokens) {
+        const start = token.map?.[0];
+        const end = token.map?.[1];
+        if (!token.block || token.type === 'inline' || (token.nesting !== 1 && token.nesting !== 0)) continue;
+        if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) continue;
+        token.attrSet('data-source-start', String(start + 1));
+        token.attrSet('data-source-end', String(end));
+        token.attrSet('data-source-side', fixedSide);
+    }
+    return md.renderer.render(tokens, md.options, env);
+}
+
+const FORMATTED_DIFF_TIMEOUT_MS = 50;
+const FORMATTED_DIFF_MAX_EDIT_LENGTH = 2000;
+
+function normalizeVisibleText(text) {
+    return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function sourceSlice(lines, startLine, endLine) {
+    return lines.slice(startLine - 1, endLine).join('\n');
+}
+
+/** Parse once, retaining complete top-level blocks for alignment and inner maps for selection. */
+function createMappedDocument(md, source, side) {
+    const html = renderMappedMarkdown(md, source, side) || '';
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    const lines = logicalSourceLines(source);
+    const renderedBlocks = Array.from(template.content.children)
+        .map(element => {
+            let mapped = mappedElementData(element);
+            if (!mapped) {
+                // markdown-it's fence renderer places token attributes on the
+                // inner <code>. Alignment must still operate on the complete
+                // top-level <pre>, never on a fragment of a rendered block.
+                const descendants = Array.from(element.querySelectorAll(MAPPED_BLOCK_SELECTOR))
+                    .map(node => ({ node, mapped: mappedElementData(node) }))
+                    .filter(item => item.mapped);
+                const sides = new Set(descendants.map(item => item.mapped.side));
+                if (descendants.length && sides.size === 1) {
+                    mapped = {
+                        startLine: Math.min(...descendants.map(item => item.mapped.startLine)),
+                        endLine: Math.max(...descendants.map(item => item.mapped.endLine)),
+                        side: descendants[0].mapped.side,
+                    };
+                    element.setAttribute('data-source-start', String(mapped.startLine));
+                    element.setAttribute('data-source-end', String(mapped.endLine));
+                    element.setAttribute('data-source-side', mapped.side);
+                    // A descendant with exactly the promoted range is not a
+                    // separate source block; leaving both would make the same
+                    // fence appear twice to selection and accessibility APIs.
+                    descendants.filter(item => item.mapped.startLine === mapped.startLine
+                        && item.mapped.endLine === mapped.endLine)
+                        .forEach(item => {
+                            item.node.removeAttribute('data-source-start');
+                            item.node.removeAttribute('data-source-end');
+                            item.node.removeAttribute('data-source-side');
+                        });
+                }
+            }
+            if (!mapped) return null;
+            return {
+                ...mapped,
+                source: sourceSlice(lines, mapped.startLine, mapped.endLine),
+                visibleText: normalizeVisibleText(element.textContent),
+                html: element.outerHTML,
+                sourceOnly: false,
+                rejectedHtml: /<\/?[A-Za-z][^>]*>/.test(sourceSlice(lines, mapped.startLine, mapped.endLine)),
+            };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.startLine - b.startLine || a.endLine - b.endLine);
+
+    // Reference definitions and other parser-consumed source have no DOM node.
+    // Keep each contiguous nonblank gap as a block so a destination-only change
+    // can never disappear from the formatted comparison.
+    const blocks = [];
+    let cursor = 1;
+    const addGaps = endExclusive => {
+        let runStart = null;
+        for (let line = cursor; line < endExclusive; line++) {
+            if ((lines[line - 1] || '').trim()) {
+                if (runStart === null) runStart = line;
+            } else if (runStart !== null) {
+                const raw = sourceSlice(lines, runStart, line - 1);
+                blocks.push({ side, startLine: runStart, endLine: line - 1, source: raw,
+                    visibleText: '', html: '', sourceOnly: true, rejectedHtml: /<\/?[A-Za-z][^>]*>/.test(raw) });
+                runStart = null;
+            }
+        }
+        if (runStart !== null) {
+            const raw = sourceSlice(lines, runStart, endExclusive - 1);
+            blocks.push({ side, startLine: runStart, endLine: endExclusive - 1, source: raw,
+                visibleText: '', html: '', sourceOnly: true, rejectedHtml: /<\/?[A-Za-z][^>]*>/.test(raw) });
+        }
+    };
+    for (const block of renderedBlocks) {
+        if (block.startLine > cursor) addGaps(block.startLine);
+        blocks.push(block);
+        cursor = Math.max(cursor, block.endLine + 1);
+    }
+    if (cursor <= lines.length) addGaps(lines.length + 1);
+    blocks.sort((a, b) => a.startLine - b.startLine || Number(a.sourceOnly) - Number(b.sourceOnly));
+    if (blocks.length === 0 && source.length > 0) {
+        blocks.push({ side, startLine: 1, endLine: Math.max(1, lines.length), source,
+            comparisonSource: source, visibleText: '', html: '', sourceOnly: true, rejectedHtml: false });
+    }
+    const hasFinalNewline = /(?:\r\n|\n|\r)$/.test(source);
+    blocks.forEach((block, index) => {
+        const startLine = index === 0 ? 1 : block.startLine;
+        const next = blocks[index + 1];
+        const endLine = next ? next.startLine - 1 : lines.length;
+        block.comparisonSource = sourceSlice(lines, startLine, Math.max(startLine - 1, endLine));
+        if (!next) block.comparisonSource += hasFinalNewline ? '\n<EOF-newline>' : '<EOF-no-newline>';
+    });
+    return { side, source, html, blocks };
+}
+
+function changeHunkIsSourceOnly(removed, added) {
+    const oldRaw = removed.map(block => block.comparisonSource ?? block.source).join('\n');
+    const newRaw = added.map(block => block.comparisonSource ?? block.source).join('\n');
+    const oldVisible = normalizeVisibleText(removed.map(block => block.visibleText).join(' '));
+    const newVisible = normalizeVisibleText(added.map(block => block.visibleText).join(' '));
+    // A source-only marker is warranted only when the rendered meaning is
+    // unchanged. Merely containing an HTML-looking token (for example `<T>`
+    // in code) does not make a visible change source-only.
+    return oldRaw !== newRaw && oldVisible === newVisible;
+}
+
+/** Bounded complete-block alignment. `undefined` is a deliberate safe fallback. */
+function createFormattedModel(md, documents, bounds = {}) {
+    const parseStarted = performance.now();
+    const oldDocument = createMappedDocument(md, documents.oldSource, 'old');
+    const newDocument = createMappedDocument(md, documents.newSource, 'new');
+    const parseMs = performance.now() - parseStarted;
+    if (!documents.ok) return { ok: false, reason: documents.reason, oldDocument, newDocument,
+        hunks: [], parseMs, diffMs: 0 };
+    const diffApi = window.Diff;
+    if (!diffApi || typeof diffApi.diffArrays !== 'function') {
+        return { ok: false, reason: 'The local formatted-diff library is unavailable.', oldDocument, newDocument,
+            hunks: [], parseMs, diffMs: 0 };
+    }
+    let runs;
+    const diffStarted = performance.now();
+    try {
+        runs = diffApi.diffArrays(oldDocument.blocks, newDocument.blocks, {
+            comparator: (oldBlock, newBlock) => (oldBlock.comparisonSource ?? oldBlock.source)
+                === (newBlock.comparisonSource ?? newBlock.source),
+            timeout: bounds.timeout ?? FORMATTED_DIFF_TIMEOUT_MS,
+            maxEditLength: bounds.maxEditLength ?? FORMATTED_DIFF_MAX_EDIT_LENGTH,
+        });
+    } catch (error) {
+        return { ok: false, reason: error?.message || 'Formatted block alignment failed.', oldDocument, newDocument,
+            hunks: [], parseMs, diffMs: performance.now() - diffStarted };
+    }
+    const diffMs = performance.now() - diffStarted;
+    if (!Array.isArray(runs)) {
+        return { ok: false, reason: 'Formatted block alignment exceeded its work limit.', oldDocument, newDocument,
+            hunks: [], parseMs, diffMs };
+    }
+
+    const segments = [];
+    const hunks = [];
+    let pending = null;
+    const flushPending = () => {
+        if (!pending) return;
+        pending.id = `change-${hunks.length + 1}`;
+        pending.sourceOnly = changeHunkIsSourceOnly(pending.removed, pending.added);
+        hunks.push(pending);
+        segments.push({ kind: 'change', hunk: pending });
+        pending = null;
+    };
+    for (const run of runs) {
+        const value = Array.isArray(run.value) ? run.value : [];
+        if (run.added || run.removed) {
+            pending ||= { removed: [], added: [] };
+            pending[run.removed ? 'removed' : 'added'].push(...value);
+        } else {
+            flushPending();
+            segments.push({ kind: 'equal', blocks: value });
+        }
+    }
+    flushPending();
+    return { ok: true, oldDocument, newDocument, segments, hunks, parseMs, diffMs };
+}
+
+function formattedBlockHtml(block, kind, hunkId) {
+    if (block.sourceOnly) return '';
+    if (kind === 'equal') return block.html;
+    const label = kind === 'removed' ? 'Removed' : 'Added';
+    return `<div class="formatted-change formatted-change-${kind}" data-change-hunk="${hunkId}">
+        <div class="formatted-change-label">${label}</div>${block.html}</div>`;
+}
+
+function renderEqualBlocks(blocks, collapsedRuns) {
+    if (blocks.length <= 20 || blocks.some(block => block.sourceOnly)) {
+        return blocks.map(block => formattedBlockHtml(block, 'equal', '')).join('');
+    }
+    const leading = blocks.slice(0, 3);
+    const hidden = blocks.slice(3, -3);
+    const trailing = blocks.slice(-3);
+    const collapsedId = `unchanged-${collapsedRuns.size + 1}`;
+    collapsedRuns.set(collapsedId, hidden);
+    return `${leading.map(block => formattedBlockHtml(block, 'equal', '')).join('')}
+        <div class="formatted-unchanged-collapsed">
+            <button type="button" class="formatted-unchanged-reveal" data-collapsed-run="${collapsedId}">Show ${hidden.length} unchanged blocks</button>
+        </div>
+        ${trailing.map(block => formattedBlockHtml(block, 'equal', '')).join('')}`;
+}
+
+function renderChangesHtml(model, collapsedRuns) {
+    if (!model.ok) {
+        return model.newDocument.blocks.map(block => formattedBlockHtml(block, 'added', 'change-fallback')).join('');
+    }
+    return model.segments.map(segment => {
+        if (segment.kind === 'equal') {
+            return renderEqualBlocks(segment.blocks, collapsedRuns);
+        }
+        const hunk = segment.hunk;
+        const indicator = hunk.sourceOnly
+            ? `<button type="button" class="source-change-indicator" data-source-hunk="${hunk.id}">Source change; inspect Source</button>`
+            : '';
+        return `<section class="formatted-hunk" id="${hunk.id}" tabindex="-1" aria-label="Changed section">
+            ${hunk.removed.map(block => formattedBlockHtml(block, 'removed', hunk.id)).join('')}
+            ${hunk.added.map(block => formattedBlockHtml(block, 'added', hunk.id)).join('')}
+            ${indicator}</section>`;
+    }).join('');
+}
+
+function renderBeforeAfterDocument(documentModel, kind, changedBlocks = new Map()) {
+    if (documentModel.blocks.length === 0) {
+        return '<p class="formatted-empty">No previous plan.</p>';
+    }
+    return documentModel.blocks.map(block => {
+        if (block.sourceOnly) return '';
+        return changedBlocks.has(block) ? formattedBlockHtml(block, kind, changedBlocks.get(block)) : block.html;
+    }).join('');
+}
+
+function mappedElementData(element) {
+    const startLine = Number(element?.getAttribute('data-source-start'));
+    const endLine = Number(element?.getAttribute('data-source-end'));
+    const side = element?.getAttribute('data-source-side');
+    if (!Number.isInteger(startLine) || !Number.isInteger(endLine)
+        || startLine < 1 || endLine < startLine || (side !== 'old' && side !== 'new')) return null;
+    return { startLine, endLine, side };
+}
+
+function nodeInside(root, node) {
+    if (!root || !node) return false;
+    const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    return element === root || root.contains(element);
+}
+
+/**
+ * Return mapped leaves from a document-ordered element list in linear work.
+ * Each element is pushed and popped once; the nearest mapped parent is enough
+ * to mark every non-leaf because that parent was itself marked by its child.
+ */
+function innermostMappedElements(elements, stats = null) {
+    const stack = [];
+    const nonLeaves = new Set();
+    let containmentChecks = 0;
+    for (const element of elements) {
+        while (stack.length) {
+            containmentChecks++;
+            if (stack.at(-1).contains(element)) break;
+            stack.pop();
+        }
+        if (stack.length) nonLeaves.add(stack.at(-1));
+        stack.push(element);
+    }
+    if (stats) stats.containmentChecks = containmentChecks;
+    return elements.filter(element => !nonLeaves.has(element));
+}
+
+/** Resolve a live DOM selection to the innermost intersecting mapped blocks. */
+export function mappedAnchorFromSelection(root, domSelection = window.getSelection(), stats = null) {
+    if (!root || !domSelection || domSelection.rangeCount !== 1 || domSelection.isCollapsed
+        || !domSelection.toString()) return null;
+    const range = domSelection.getRangeAt(0);
+    if (range.collapsed || !nodeInside(root, range.startContainer) || !nodeInside(root, range.endContainer)) return null;
+
+    let intersectionTests = 0;
+    const intersected = Array.from(root.querySelectorAll(MAPPED_BLOCK_SELECTOR)).filter(element => {
+        if (!mappedElementData(element)) return false;
+        intersectionTests++;
+        try { return range.intersectsNode(element); } catch { return false; }
+    });
+    if (stats) {
+        stats.intersectionTests = intersectionTests;
+        stats.intersected = intersected.length;
+    }
+    const innermost = innermostMappedElements(intersected, stats);
+    if (innermost.length === 0) return null;
+
+    const mapped = innermost.map(mappedElementData);
+    const sides = new Set(mapped.map(item => item.side));
+    if (sides.size !== 1) return null;
+    return {
+        startLine: Math.min(...mapped.map(item => item.startLine)),
+        endLine: Math.max(...mapped.map(item => item.endLine)),
+        side: mapped[0].side,
+    };
+}
+
+function mappedLeafElements(root) {
+    const mapped = Array.from(root?.querySelectorAll(MAPPED_BLOCK_SELECTOR) || [])
+        .filter(element => mappedElementData(element));
+    return innermostMappedElements(mapped);
+}
+
+function createMappedDocumentController(root, action, onActivate, onSelectionMeasured = () => {}, onLeafMeasured = () => {}) {
+    let candidate = null;
+    let readOnly = false;
+    let scheduledFrame = null;
+    let destroyed = false;
+    const listenerAbort = new AbortController();
+    const view = root.ownerDocument.defaultView || window;
+    const leaves = () => {
+        const elements = mappedLeafElements(root);
+        onLeafMeasured(elements.length);
+        return elements;
+    };
+
+    function destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        listenerAbort.abort();
+        if (scheduledFrame !== null) view.cancelAnimationFrame(scheduledFrame);
+        scheduledFrame = null;
+    }
+
+    function paintCandidate() {
+        leaves().forEach(element => element.classList.toggle(
+            'is-selection-candidate',
+            Boolean(candidate && (() => {
+                const mapped = mappedElementData(element);
+                return mapped.side === candidate.side
+                    && mapped.endLine >= candidate.startLine
+                    && mapped.startLine <= candidate.endLine;
+            })()),
+        ));
+        action.disabled = readOnly || !candidate;
+    }
+
+    function refreshCandidate() {
+        const started = performance.now();
+        const nextCandidate = readOnly ? null : mappedAnchorFromSelection(root);
+        onSelectionMeasured(performance.now() - started);
+        if (!nextCandidate && !candidate && !root.querySelector('.is-selection-candidate')) {
+            action.disabled = true;
+            return;
+        }
+        candidate = nextCandidate;
+        paintCandidate();
+    }
+
+    const scheduleCandidateRefresh = () => {
+        // Pointer default actions finalize a click-count/drag selection after
+        // pointerup dispatch. Read it on the next frame, not one event early.
+        if (destroyed || readOnly || !root.isConnected || scheduledFrame !== null) return;
+        scheduledFrame = view.requestAnimationFrame(() => {
+            scheduledFrame = null;
+            refreshCandidate();
+        });
+    };
+    root.addEventListener('pointerup', scheduleCandidateRefresh);
+    root.addEventListener('mouseup', scheduleCandidateRefresh);
+    root.ownerDocument.addEventListener('selectionchange', scheduleCandidateRefresh, {
+        signal: listenerAbort.signal,
+    });
+    action.addEventListener('pointerdown', (event) => {
+        // Preserve touch selection handles until the explicit action commits
+        // the cached source range. Keyboard activation has no pointerdown.
+        if (candidate) event.preventDefault();
+    });
+    action.addEventListener('click', () => {
+        if (!candidate) return;
+        const selected = candidate;
+        candidate = null;
+        window.getSelection()?.removeAllRanges();
+        paintCandidate();
+        onActivate(selected);
+    });
+
+    return {
+        destroy,
+        clearCandidate() {
+            candidate = null;
+            paintCandidate();
+        },
+        setResolved(resolved) {
+            readOnly = resolved;
+            if (resolved) candidate = null;
+            paintCandidate();
+        },
+        paintSelection(anchor) {
+            leaves().forEach(element => {
+                const mapped = mappedElementData(element);
+                element.classList.toggle('is-selected', Boolean(anchor
+                    && mapped.side === anchor.side
+                    && mapped.endLine >= anchor.startLine
+                    && mapped.startLine <= anchor.endLine));
+            });
+        },
+        paintComments(comments) {
+            leaves().forEach(element => {
+                const mapped = mappedElementData(element);
+                const anchored = comments.filter(comment => comment.side === mapped.side
+                    && comment.endLine >= mapped.startLine
+                    && comment.startLine <= mapped.endLine);
+                element.classList.toggle('has-comment', anchored.length > 0);
+                if (anchored.length > 0) {
+                    element.setAttribute('aria-describedby', anchored.map(comment => `comment-list-${comment.id}`).join(' '));
+                } else {
+                    element.removeAttribute('aria-describedby');
+                }
+            });
+        },
+    };
+}
+
 let commentSeq = 0;
 function nextCommentId() {
     commentSeq += 1;
@@ -168,6 +720,7 @@ export function sortComments(comments) {
  * feature exists to prevent.
  */
 export function renderReviewPanel(container, state) {
+    clearMappedController(container);
     const kind = state?.kind || 'error';
     let icon = '⚠️';
     let title = 'Something went wrong';
@@ -237,6 +790,8 @@ export function renderReviewPanel(container, state) {
  * @returns a controller for the states that arrive after first paint.
  */
 export function renderPlanReview(container, planMessage, callbacks = {}) {
+    clearMappedController(container);
+    const lifecycleAbort = new AbortController();
     const msg = planMessage || {};
     const body = msg.body && typeof msg.body === 'object' ? msg.body : {};
     const content = typeof body.content === 'string' ? body.content : (msg.content || '');
@@ -247,6 +802,13 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
 
     const rows = diff ? parseDiff(diff) : rowsFromContent(content);
     const md = createMarkdownRenderer();
+    const tFormatted = performance.now();
+    const reconstructed = reconstructReviewDocuments(content, diff);
+    const formattedModel = md
+        ? createFormattedModel(md, reconstructed, callbacks.formattedDiffBounds || {})
+        : { ok: false, reason: 'The Markdown renderer is unavailable.',
+            oldDocument: { blocks: [] }, newDocument: { blocks: [] }, hunks: [] };
+    const formattedBuildMs = performance.now() - tFormatted;
 
     /** @type {{id:string,path:string,startLine:number,endLine:number,side:string,comment:string}[]} */
     let comments = [];
@@ -258,7 +820,15 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     let draftSaveFailed = false;
     let resolved = false;   // superseded or cancelled — verdict controls disabled
 
-    const perf = { initialRenderMs: 0, markdownRenderMs: 0, lastCommentUpdateMs: 0, rowCount: rows.length };
+    const perf = { initialRenderMs: 0, markdownRenderMs: 0, formattedBuildMs,
+        formattedParseMs: formattedModel.parseMs || 0,
+        formattedDiffMs: formattedModel.diffMs || 0,
+        formattedDomRenderMs: 0, lastModeDomRenderMs: 0, lastSelectionMapMs: 0,
+        lastMappedLeafCount: 0,
+        lastCommentUpdateMs: 0, rowCount: rows.length,
+        formattedBlockCount: (formattedModel.oldDocument?.blocks?.length || 0)
+            + (formattedModel.newDocument?.blocks?.length || 0),
+        formattedFallback: !formattedModel.ok };
     window.__reviewPerf = perf;
 
     // ── shell ────────────────────────────────────────────────────────────────
@@ -315,16 +885,54 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
             </header>
 
             <div class="review-body">
-                <section class="review-pane review-pane-diff" id="review-pane-diff"
-                         aria-label="Plan source with line numbers">
-                    <div class="review-pane-label">Source · click a line, shift-click another to select a range</div>
-                    <div class="diff-rows" id="diff-rows" tabindex="0" role="list"></div>
-                </section>
-                <section class="review-pane review-pane-rendered" id="review-pane-rendered"
-                         aria-label="Rendered plan (read-only)">
-                    <div class="review-pane-label">Rendered · read-only</div>
-                    <div class="md-content" id="rendered-content"></div>
-                </section>
+            <section class="review-pane review-pane-rendered" id="review-pane-rendered"
+                     aria-label="Plan review document">
+                <div class="review-pane-label review-rendered-toolbar">
+                    <div class="review-view-tabs" role="tablist" aria-label="Review view">
+                        <button type="button" role="tab" id="review-tab-changes"
+                                aria-controls="review-panel-changes" aria-selected="true">Changes</button>
+                        <button type="button" role="tab" id="review-tab-before-after"
+                                aria-controls="review-pane-before-after" aria-selected="false" tabindex="-1">Before &amp; after</button>
+                        <button type="button" role="tab" id="review-tab-source"
+                                aria-controls="review-pane-diff" aria-selected="false" tabindex="-1">Source</button>
+                    </div>
+                    <div class="review-change-nav" aria-label="Change navigation">
+                        <button type="button" aria-label="Previous change">↑</button>
+                        <button type="button" aria-label="Next change">↓</button>
+                    </div>
+                    <button class="rendered-selection-action" id="comment-rendered-selection"
+                            type="button" disabled>Comment on selection</button>
+                </div>
+                <div class="review-view-status" id="review-view-status" role="status" aria-live="polite"></div>
+                <div class="review-view-panels">
+                    <div class="review-view-panel" id="review-panel-changes" role="tabpanel"
+                         aria-labelledby="review-tab-changes">
+                        <div class="md-content formatted-changes" id="rendered-content"></div>
+                    </div>
+                    <div class="review-view-panel" id="review-pane-before-after" role="tabpanel"
+                         aria-labelledby="review-tab-before-after" hidden>
+                        <div class="before-after-toggle" role="group" aria-label="Comparison side">
+                            <button type="button" data-comparison-side="before" aria-pressed="true">Before</button>
+                            <button type="button" data-comparison-side="after" aria-pressed="false">After</button>
+                        </div>
+                        <div class="before-after-grid">
+                            <section class="before-after-side" aria-label="Before">
+                                <h2 class="before-after-heading">Before</h2>
+                                <div class="md-content" id="before-content"></div>
+                            </section>
+                            <section class="before-after-side" aria-label="After">
+                                <h2 class="before-after-heading">After</h2>
+                                <div class="md-content" id="after-content"></div>
+                            </section>
+                        </div>
+                    </div>
+                    <section class="review-view-panel review-pane-diff" id="review-pane-diff"
+                             role="tabpanel" aria-labelledby="review-tab-source" aria-label="Plan source with line numbers" hidden>
+                        <div class="review-pane-label">Source · click a line, shift-click another to select a range</div>
+                        <div class="diff-rows" id="diff-rows" tabindex="0" role="list"></div>
+                    </section>
+                </div>
+            </section>
                 <aside class="review-comments" aria-label="Inline comments">
                     <div class="review-pane-label">
                         Comments <span class="comment-count" id="comment-count">0</span>
@@ -352,25 +960,62 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     const diffPaneEl = container.querySelector('#review-pane-diff');
     const renderedPaneEl = container.querySelector('#review-pane-rendered');
     const renderedEl = container.querySelector('#rendered-content');
+    const beforeEl = container.querySelector('#before-content');
+    const afterEl = container.querySelector('#after-content');
+    const formattedRootEl = container.querySelector('.review-view-panels');
+    const renderedSelectionAction = container.querySelector('#comment-rendered-selection');
+    const viewStatusEl = container.querySelector('#review-view-status');
     const commentListEl = container.querySelector('#comment-list');
     const commentCountEl = container.querySelector('#comment-count');
     const bannersEl = container.querySelector('#review-banners');
     const errorEl = container.querySelector('#review-error');
     const feedbackEl = container.querySelector('#overall-feedback');
+    let mappedController = null;
+    let sourceRendered = false;
 
     // ── rendered pane (read-only in v1) ──────────────────────────────────────
-    function renderMarkdownInto(el, text) {
+    function renderMarkdownInto(el, text, mapped = false) {
         if (!el) return;
         if (md) {
-            el.innerHTML = md.render(text || '');
+            el.innerHTML = mapped ? renderMappedMarkdown(md, text, 'new') : md.render(text || '');
         } else {
             // markdown-it missing — degrade to escaped text rather than to raw HTML.
             el.textContent = text || '';
         }
     }
     const tMd = performance.now();
-    renderMarkdownInto(renderedEl, content);
+    const collapsedRuns = new Map();
+    renderedEl.innerHTML = renderChangesHtml(formattedModel, collapsedRuns);
+    const changedOld = new Map((formattedModel.hunks || [])
+        .flatMap(hunk => hunk.removed.map(block => [block, hunk.id])));
+    const changedNew = new Map((formattedModel.hunks || [])
+        .flatMap(hunk => hunk.added.map(block => [block, hunk.id])));
+    let beforeAfterRendered = false;
+    function ensureBeforeAfterRendered() {
+        if (beforeAfterRendered) return;
+        const started = performance.now();
+        beforeEl.innerHTML = renderBeforeAfterDocument(formattedModel.oldDocument, 'removed', changedOld);
+        afterEl.innerHTML = renderBeforeAfterDocument(formattedModel.newDocument, 'added', changedNew);
+        perf.lastModeDomRenderMs = performance.now() - started;
+        beforeAfterRendered = true;
+        mappedController?.paintComments(comments);
+        mappedController?.paintSelection(selectionAnchorObject());
+    }
+    if (!formattedModel.ok) {
+        ensureBeforeAfterRendered();
+        // Keep Task 10's stable `#rendered-content` contract on the visible
+        // current document even when Changes itself cannot be constructed.
+        renderedEl.replaceChildren();
+        renderedEl.id = 'formatted-changes-unavailable';
+        afterEl.id = 'rendered-content';
+        viewStatusEl.textContent = 'Formatted Changes could not be built for this plan. '
+            + 'Showing Before & after; Source is still available.';
+        const changesTab = container.querySelector('#review-tab-changes');
+        changesTab.disabled = true;
+        changesTab.setAttribute('aria-describedby', 'review-view-status');
+    }
     perf.markdownRenderMs = performance.now() - tMd;
+    perf.formattedDomRenderMs = perf.markdownRenderMs;
     if (msg.summary) renderMarkdownInto(container.querySelector('#review-summary'), msg.summary);
     if (msg.context) renderMarkdownInto(container.querySelector('#review-context-content'), msg.context);
 
@@ -420,15 +1065,147 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         container.querySelector('#review-context-toggle')?.setAttribute('aria-expanded', String(hidden));
     });
 
+    // One view at a time: formatted changes by default, full documents for
+    // broader context, and the original line-addressable Source as the syntax
+    // escape hatch. The choice lives only for this open review.
+    const viewTabs = Array.from(container.querySelectorAll('.review-view-tabs [role="tab"]'));
+    const viewPanels = {
+        changes: container.querySelector('#review-panel-changes'),
+        'before-after': container.querySelector('#review-pane-before-after'),
+        source: container.querySelector('#review-pane-diff'),
+    };
+    let viewMode = 'changes';
+    let rerunFindForView = () => {};
+
+    function setViewMode(mode, focusTab = false) {
+        if (!viewPanels[mode]) return;
+        if (mode === 'before-after') ensureBeforeAfterRendered();
+        if (mode === 'source') ensureSourceRendered();
+        viewMode = mode;
+        for (const [key, panel] of Object.entries(viewPanels)) panel.hidden = key !== mode;
+        for (const tab of viewTabs) {
+            const selected = tab.id === `review-tab-${mode}`;
+            tab.setAttribute('aria-selected', String(selected));
+            tab.tabIndex = selected ? 0 : -1;
+            if (selected && focusTab) tab.focus();
+        }
+        renderedSelectionAction.hidden = mode === 'source';
+        container.querySelector('.review-change-nav').hidden = mode === 'source'
+            || (formattedModel.hunks || []).length === 0;
+        mappedController?.clearCandidate();
+        rerunFindForView();
+    }
+
+    viewTabs.forEach(tab => tab.addEventListener('click', () => {
+        setViewMode(tab.id.replace('review-tab-', ''));
+    }));
+    container.querySelector('.review-view-tabs')?.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const navigableTabs = viewTabs.filter(tab => !tab.disabled);
+        const current = Math.max(0, navigableTabs.indexOf(event.target.closest('[role="tab"]')));
+        const next = event.key === 'Home' ? 0
+            : event.key === 'End' ? navigableTabs.length - 1
+            : (current + (event.key === 'ArrowRight' ? 1 : -1) + navigableTabs.length) % navigableTabs.length;
+        navigableTabs[next].click();
+        navigableTabs[next].focus();
+    });
+    setViewMode(formattedModel.ok ? 'changes' : 'before-after');
+
+    const comparisonGrid = container.querySelector('.before-after-grid');
+    const setComparisonSide = side => {
+        comparisonGrid.dataset.narrowSide = side;
+        container.querySelectorAll('[data-comparison-side]').forEach(candidate => {
+            candidate.setAttribute('aria-pressed', String(candidate.dataset.comparisonSide === side));
+        });
+    };
+    container.querySelectorAll('[data-comparison-side]').forEach(button => {
+        button.addEventListener('click', () => {
+            setComparisonSide(button.dataset.comparisonSide);
+        });
+    });
+    // A failed reconstruction has no trustworthy previous document. On a
+    // narrow host, show the authoritative current plan rather than an empty or
+    // unavailable Before side while hiding the useful content behind a toggle.
+    setComparisonSide(!formattedModel.ok || formattedModel.oldDocument.blocks.length === 0
+        ? 'after' : 'before');
+
+    let activeHunkIndex = -1;
+    const comparisonTargetSide = target => target?.closest('.before-after-side')
+        ?.getAttribute('aria-label')?.toLowerCase();
+    function revealNarrowComparisonTarget(target) {
+        if (viewMode !== 'before-after' || !target) return;
+        const toggle = container.querySelector('.before-after-toggle');
+        if (getComputedStyle(toggle).display === 'none') return;
+        const side = comparisonTargetSide(target);
+        if (side === 'before' || side === 'after') setComparisonSide(side);
+    }
+    function focusChange(delta) {
+        const hunks = viewMode === 'changes'
+            ? Array.from(container.querySelectorAll('#rendered-content .formatted-hunk'))
+            : (formattedModel.hunks || []).map(hunk => {
+                const selectedSide = comparisonGrid.dataset.narrowSide === 'after' ? 'After' : 'Before';
+                return container.querySelector(
+                    `#review-pane-before-after .before-after-side[aria-label="${selectedSide}"] `
+                    + `.formatted-change[data-change-hunk="${hunk.id}"]`)
+                    || container.querySelector(
+                        `#review-pane-before-after .formatted-change[data-change-hunk="${hunk.id}"]`);
+            }).filter(Boolean);
+        if (hunks.length === 0) return;
+        activeHunkIndex = (activeHunkIndex + delta + hunks.length) % hunks.length;
+        revealNarrowComparisonTarget(hunks[activeHunkIndex]);
+        if (!hunks[activeHunkIndex].hasAttribute('tabindex')) hunks[activeHunkIndex].tabIndex = -1;
+        hunks[activeHunkIndex].focus();
+        hunks[activeHunkIndex].scrollIntoView({ block: 'center' });
+    }
+    container.querySelector('[aria-label="Previous change"]')?.addEventListener('click', () => focusChange(-1));
+    container.querySelector('[aria-label="Next change"]')?.addEventListener('click', () => focusChange(1));
+
+    function revealCollapsedRun(reveal, focus = true) {
+        const collapsed = reveal?.closest('.formatted-unchanged-collapsed');
+        if (!collapsed) return [];
+        const blocks = collapsedRuns.get(reveal.dataset.collapsedRun) || [];
+        const template = document.createElement('template');
+        template.innerHTML = blocks.map(block => formattedBlockHtml(block, 'equal', '')).join('');
+        const revealed = Array.from(template.content.children);
+        collapsed.replaceWith(...revealed);
+        collapsedRuns.delete(reveal.dataset.collapsedRun);
+        if (focus) {
+            const focusTarget = revealed.find(element => element.matches(MAPPED_BLOCK_SELECTOR)
+                || element.querySelector(MAPPED_BLOCK_SELECTOR));
+            const mapped = focusTarget?.matches(MAPPED_BLOCK_SELECTOR)
+                ? focusTarget : focusTarget?.querySelector(MAPPED_BLOCK_SELECTOR);
+            if (mapped) { mapped.tabIndex = -1; mapped.focus(); }
+        }
+        return revealed;
+    }
+
+    formattedRootEl.addEventListener('click', event => {
+        const reveal = event.target.closest('.formatted-unchanged-reveal');
+        if (reveal) {
+            revealCollapsedRun(reveal);
+            return;
+        }
+        const indicator = event.target.closest('.source-change-indicator');
+        if (!indicator) return;
+        const hunk = formattedModel.hunks.find(item => item.id === indicator.dataset.sourceHunk);
+        const block = hunk?.removed[0] || hunk?.added[0];
+        setViewMode('source', true);
+        const row = block && diffRowsEl.querySelector(
+            `.diff-row[data-side="${block.side}"][data-line="${block.startLine}"]`);
+        row?.focus();
+        row?.scrollIntoView({ block: 'center' });
+    });
+
     // Click-to-load for remote images. Under the shipped CSP (`img-src 'self'
     // data:`) the load itself is blocked, so we fall back to offering the URL —
     // the point of F-7 is that nothing is fetched without an explicit human act.
-    renderedEl?.addEventListener('click', (e) => {
+    renderedPaneEl?.addEventListener('click', (e) => {
         const ph = e.target.closest('.md-image-placeholder');
         if (!ph) return;
         loadPlaceholderImage(ph);
     });
-    renderedEl?.addEventListener('keydown', (e) => {
+    renderedPaneEl?.addEventListener('keydown', (e) => {
         const ph = e.target.closest('.md-image-placeholder');
         if (!ph || (e.key !== 'Enter' && e.key !== ' ')) return;
         e.preventDefault();
@@ -528,32 +1305,57 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         diffRowsEl.innerHTML = html.join('');
     }
 
+    function ensureSourceRendered() {
+        if (sourceRendered) return;
+        renderDiff();
+        sourceRendered = true;
+    }
+
     function renderCommentList() {
+        // A rendered-selection composer lives inside the comment list. Keep the
+        // exact form node across list updates so removing another comment cannot
+        // erase its textarea value, selection, focus, or source anchor.
+        const liveComposer = commentListEl.querySelector(':scope > #comment-composer');
+        const focused = liveComposer?.contains(document.activeElement) ? document.activeElement : null;
+        const focusSelection = focused instanceof HTMLTextAreaElement || focused instanceof HTMLInputElement
+            ? { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection }
+            : null;
+        const restoreComposerFocus = () => {
+            if (!focused) return;
+            focused.focus();
+            if (focusSelection) focused.setSelectionRange(
+                focusSelection.start, focusSelection.end, focusSelection.direction);
+        };
+        liveComposer?.remove();
         commentCountEl.textContent = String(comments.length);
         if (comments.length === 0) {
             commentListEl.innerHTML = '<p class="comment-empty">No inline comments yet. '
-                + 'Click a line in the source pane, shift-click another to extend, then add a comment.</p>';
+                + 'Select text in the rendered plan, or click lines in Source, then add a comment.</p>';
+            if (liveComposer) commentListEl.prepend(liveComposer);
+            restoreComposerFocus();
             return;
         }
         commentListEl.innerHTML = sortComments(comments).map(c => `
-            <div class="comment-card comment-card-list" data-comment-id="${c.id}">
+            <div class="comment-card comment-card-list" id="comment-list-${c.id}" data-comment-id="${c.id}">
                 <button class="comment-card-anchor comment-jump" data-jump="${c.id}">${escapeHtml(anchorLabel(c))}</button>
                 <div class="comment-card-body">${escapeHtml(c.comment)}</div>
                 <button class="comment-remove" data-remove="${c.id}" aria-label="Remove comment">Remove</button>
             </div>
         `).join('');
+        if (liveComposer) commentListEl.prepend(liveComposer);
+        restoreComposerFocus();
     }
 
     function rerenderComments() {
         const t0 = performance.now();
-        renderDiff();
+        if (sourceRendered) renderDiff();
         renderCommentList();
+        mappedController?.paintComments(comments);
         perf.lastCommentUpdateMs = performance.now() - t0;
         notifyDraft();
     }
 
     const t0 = performance.now();
-    renderDiff();
     renderCommentList();
     perf.initialRenderMs = performance.now() - t0;
 
@@ -580,12 +1382,13 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
             const on = isSelected(el.dataset.side, parseInt(el.dataset.line, 10));
             el.classList.toggle('is-selected', on);
         });
+        mappedController?.paintSelection(selectionAnchorObject());
         renderComposer();
     }
 
     function setSelection(side, line, extend) {
-        if (!selection || selection.side !== side || !extend) {
-            selection = { side, anchor: line, focus: line };
+        if (!selection || selection.side !== side || selection.origin !== 'source' || !extend) {
+            selection = { side, anchor: line, focus: line, origin: 'source' };
         } else {
             selection.focus = line;
         }
@@ -608,9 +1411,10 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         const existing = container.querySelector('#comment-composer');
         if (!selection || resolved) { existing?.remove(); return; }
         const anchor = selectionAnchorObject();
+        const renderedOrigin = selection.origin === 'rendered';
         const lastRow = diffRowsEl.querySelector(
             `.diff-row[data-side="${anchor.side}"][data-line="${anchor.endLine}"]`);
-        if (!lastRow) { existing?.remove(); return; }
+        if (!renderedOrigin && !lastRow) { existing?.remove(); return; }
 
         let composer = existing;
         if (!composer) {
@@ -634,7 +1438,14 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
             composer.querySelector('#comment-cancel').addEventListener('click', clearSelection);
         }
         composer.querySelector('.composer-anchor').textContent = `Commenting on ${anchorLabel(anchor)}`;
-        if (composer.previousElementSibling !== lastRow) lastRow.after(composer);
+        composer.classList.toggle('comment-composer-rendered', renderedOrigin);
+        if (renderedOrigin) {
+            if (composer.parentElement !== commentListEl || composer !== commentListEl.firstElementChild) {
+                commentListEl.prepend(composer);
+            }
+        } else if (composer.previousElementSibling !== lastRow) {
+            lastRow.after(composer);
+        }
         if (opts.focus) composer.querySelector('#comment-input').focus();
     }
 
@@ -655,12 +1466,36 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         rerenderComments();
     }
 
+    mappedController = createMappedDocumentController(
+        formattedRootEl,
+        renderedSelectionAction,
+        anchor => {
+            if (resolved) return;
+            selection = {
+                side: anchor.side,
+                anchor: anchor.startLine,
+                focus: anchor.endLine,
+                origin: 'rendered',
+            };
+            paintSelection();
+            renderComposer({ focus: true });
+        },
+        duration => { perf.lastSelectionMapMs = duration; },
+        count => { perf.lastMappedLeafCount = count; },
+    );
+    mappedControllerCleanup.set(container, () => {
+        mappedController.destroy();
+        lifecycleAbort.abort();
+    });
+    mappedController.paintComments(comments);
+
     diffRowsEl.addEventListener('click', (e) => {
         const removeBtn = e.target.closest('[data-remove]');
         if (removeBtn) { removeComment(removeBtn.dataset.remove); return; }
         if (e.target.closest('.comment-composer')) return;
         const row = e.target.closest('.diff-row[data-line]');
         if (!row || resolved) return;
+        mappedController.clearCandidate();
         setSelection(row.dataset.side, parseInt(row.dataset.line, 10), e.shiftKey);
         row.focus();
     });
@@ -670,8 +1505,42 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         if (removeBtn) { removeComment(removeBtn.dataset.remove); return; }
         const jump = e.target.closest('[data-jump]');
         if (jump) {
-            const card = diffRowsEl.querySelector(`#comment-${jump.dataset.jump}`);
-            card?.scrollIntoView({ block: 'center' });
+            const comment = comments.find(item => item.id === jump.dataset.jump);
+            if (!comment) return;
+            if (viewMode === 'source') {
+                const row = diffRowsEl.querySelector(
+                    `.diff-row[data-side="${comment.side}"][data-line="${comment.startLine}"]`);
+                row?.focus();
+                row?.scrollIntoView({ block: 'center' });
+                return;
+            }
+            const findMappedTarget = panel => mappedLeafElements(panel)
+                .filter(element => {
+                    const mapped = mappedElementData(element);
+                    return mapped.side === comment.side
+                        && mapped.endLine >= comment.startLine
+                        && mapped.startLine <= comment.endLine;
+                })
+                .sort((a, b) => {
+                    const am = mappedElementData(a);
+                    const bm = mappedElementData(b);
+                    return (am.endLine - am.startLine) - (bm.endLine - bm.startLine);
+                })[0];
+            let target = findMappedTarget(viewPanels[viewMode]);
+            if (!target) {
+                setViewMode('before-after');
+                comparisonGrid.dataset.narrowSide = comment.side === 'old' ? 'before' : 'after';
+                container.querySelectorAll('[data-comparison-side]').forEach(button => {
+                    button.setAttribute('aria-pressed', String(button.dataset.comparisonSide
+                        === comparisonGrid.dataset.narrowSide));
+                });
+                target = findMappedTarget(viewPanels['before-after']);
+            }
+            if (target) {
+                target.tabIndex = -1;
+                target.focus();
+                target.scrollIntoView({ block: 'center' });
+            }
         }
     });
 
@@ -746,13 +1615,33 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     const findCountEl = container.querySelector('#review-find-count');
 
     function runFind() {
-        diffRowsEl.querySelectorAll('.is-find-match').forEach(el => el.classList.remove('is-find-match', 'is-find-current'));
+        formattedRootEl.querySelectorAll('.is-find-match, .is-find-current')
+            .forEach(el => el.classList.remove('is-find-match', 'is-find-current'));
         const needle = (findInput.value || '').toLowerCase();
         findMatches = [];
         findIndex = -1;
         if (needle) {
-            diffRowsEl.querySelectorAll('.diff-row').forEach(el => {
-                if ((el.querySelector('.diff-text')?.textContent || '').toLowerCase().includes(needle)) {
+            if (viewMode === 'changes') {
+                // Equal context is collapsed by complete Markdown block, but
+                // Find must still search the document rather than just the
+                // currently materialized DOM. Reveal only runs that contain a
+                // match, then use the normal mapped-node path below.
+                for (const [collapsedId, blocks] of Array.from(collapsedRuns.entries())) {
+                    if (!blocks.some(block => block.visibleText.toLowerCase().includes(needle))) continue;
+                    const reveal = formattedRootEl.querySelector(
+                        `.formatted-unchanged-reveal[data-collapsed-run="${collapsedId}"]`);
+                    revealCollapsedRun(reveal, false);
+                }
+            }
+            const activePanel = viewPanels[viewMode];
+            const candidates = viewMode === 'source'
+                ? activePanel.querySelectorAll('.diff-row')
+                : mappedLeafElements(activePanel);
+            candidates.forEach(el => {
+                const text = viewMode === 'source'
+                    ? el.querySelector('.diff-text')?.textContent || ''
+                    : el.textContent || '';
+                if (text.toLowerCase().includes(needle)) {
                     el.classList.add('is-find-match');
                     findMatches.push(el);
                 }
@@ -761,11 +1650,13 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         findCountEl.textContent = needle ? `${findMatches.length ? 1 : 0}/${findMatches.length}` : '';
         if (findMatches.length) stepFind(0);
     }
+    rerunFindForView = runFind;
     function stepFind(delta) {
         if (!findMatches.length) return;
         findMatches[findIndex]?.classList.remove('is-find-current');
         findIndex = findIndex < 0 ? 0 : (findIndex + delta + findMatches.length) % findMatches.length;
         const el = findMatches[findIndex];
+        revealNarrowComparisonTarget(el);
         el.classList.add('is-find-current');
         el.scrollIntoView({ block: 'center' });
         findCountEl.textContent = `${findIndex + 1}/${findMatches.length}`;
@@ -778,12 +1669,15 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     container.querySelector('#review-find-next').addEventListener('click', () => stepFind(1));
     container.querySelector('#review-find-prev').addEventListener('click', () => stepFind(-1));
     document.addEventListener('keydown', (e) => {
+        // Parked Inbox panes deliberately retain their exact DOM and draft,
+        // but a detached review must not take over global shortcuts.
+        if (!findInput.isConnected) return;
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
             e.preventDefault();
             findInput.focus();
             findInput.select();
         }
-    });
+    }, { signal: lifecycleAbort.signal });
 
     // ── banners, errors, drafts ──────────────────────────────────────────────
     function showError(message) {
@@ -933,10 +1827,26 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         get comments() { return sortComments(comments).map(({ id, ...rest }) => rest); },
         get perf() { return perf; },
         getDraft: currentDraft,
+        captureRecovery() {
+            return {
+                draft: currentDraft(),
+                selection: selection ? { ...selection } : null,
+                composerText: container.querySelector('#comment-input')?.value ?? '',
+            };
+        },
+        restoreRecovery(recovery) {
+            if (!recovery) return;
+            this.restoreDraft(recovery.draft);
+            selection = recovery.selection ? { ...recovery.selection } : null;
+            renderComposer();
+            const input = container.querySelector('#comment-input');
+            if (input) input.value = recovery.composerText ?? '';
+        },
 
         /** Another device reviewed first (D-5/D-6). Never closes, never destroys the draft. */
         setSuperseded(device) {
             resolved = true;
+            mappedController.setResolved(true);
             setControlsDisabled(true);
             renderComposer();
             showBanner('superseded',
@@ -946,6 +1856,7 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         /** The agent exited (D-3). Comments stay on screen and go to the draft. */
         setCancelled(reason) {
             resolved = true;
+            mappedController.setResolved(true);
             setControlsDisabled(true);
             renderComposer();
             notifyDraft();
@@ -999,6 +1910,7 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
 
 /** Terminal success state, shown only after the submit actually succeeded. */
 export function showSubmitted(container, verdict) {
+    clearMappedController(container);
     const labels = {
         approved: 'Plan approved',
         changes_requested: 'Changes requested',

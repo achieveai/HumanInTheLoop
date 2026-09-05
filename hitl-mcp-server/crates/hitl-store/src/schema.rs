@@ -21,7 +21,7 @@ use rusqlite::{Connection, Result};
 /// **Append only. Never edit a step that has shipped** — an existing database
 /// has already run it and will never run it again, so a change here reaches
 /// only new installs and silently forks the schema in two.
-const MIGRATIONS: &[&str] = &[DDL_V1, DDL_V2];
+const MIGRATIONS: &[&str] = &[DDL_V1, DDL_V2, DDL_V3];
 
 /// Derived from [`MIGRATIONS`] rather than maintained by hand, because the one
 /// way this scheme breaks is a step added without the version bumped to match.
@@ -109,6 +109,25 @@ CREATE TABLE IF NOT EXISTS body_failures (
 );
 "#;
 
+/// v3: repair restores recorded by builds that did not yet recognize their
+/// subject. This is data-only: no table or column is added.
+///
+/// The outer `CASE` is intentionally the lazy-evaluation guard. Passing
+/// malformed JSON to `json_type` or `json_extract` aborts the migration.
+const DDL_V3: &str = r#"
+UPDATE events
+SET subject_id = CASE
+  WHEN json_valid(payload) THEN
+    CASE
+      WHEN json_type(payload, '$.notificationId') = 'text'
+      THEN NULLIF(json_extract(payload, '$.notificationId'), '')
+      ELSE subject_id
+    END
+  ELSE subject_id
+END
+WHERE type = 'restore_notification' AND subject_id IS NULL;
+"#;
+
 /// Bring `conn` up to [`SCHEMA_VERSION`], doing nothing when it is already there.
 ///
 /// Each step is idempotent on its own (`IF NOT EXISTS` throughout), which is
@@ -117,9 +136,16 @@ CREATE TABLE IF NOT EXISTS body_failures (
 /// steps on the next open and finishes the job.
 pub fn migrate(conn: &Connection) -> Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if current >= SCHEMA_VERSION {
-        // Also the guard for a database written by a *newer* build: leave it
-        // alone rather than run steps against a shape we do not know.
+    if current > SCHEMA_VERSION {
+        // A database written by a newer build must be left alone rather than
+        // running repairs against a shape we do not know.
+        return Ok(());
+    }
+    if current == SCHEMA_VERSION {
+        // v3 is a data repair, not a shape change. An older binary can write
+        // another NULL restore subject after the initial upgrade, so repair it
+        // idempotently whenever a current-schema database is reopened.
+        conn.execute_batch(DDL_V3)?;
         return Ok(());
     }
 
@@ -142,7 +168,9 @@ mod tests {
         migrate(&conn).unwrap();
         migrate(&conn).unwrap();
 
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
     }
 
@@ -151,9 +179,15 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
 
-        for table in
-            ["events", "messages", "sessions", "projects", "bodies", "summaries", "body_failures"]
-        {
+        for table in [
+            "events",
+            "messages",
+            "sessions",
+            "projects",
+            "bodies",
+            "summaries",
+            "body_failures",
+        ] {
             let found: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -184,6 +218,73 @@ mod tests {
         conn
     }
 
+    fn a_v2_database() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(DDL_V1).unwrap();
+        conn.execute_batch(DDL_V2).unwrap();
+        conn.execute_batch("PRAGMA user_version = 2").unwrap();
+        conn
+    }
+
+    #[test]
+    fn v3_backfills_valid_restore_subjects_and_tolerates_malformed_payloads() {
+        let conn = a_v2_database();
+        let rows = [
+            (
+                "restore-valid",
+                r#"{"type":"restore_notification","messageId":"r-1","notificationId":"n-1","dismissalId":"d-1"}"#,
+            ),
+            ("restore-malformed", "not json"),
+            (
+                "restore-non-string",
+                r#"{"type":"restore_notification","messageId":"r-3","notificationId":42,"dismissalId":"d-1"}"#,
+            ),
+        ];
+        for (ntfy_id, payload) in rows {
+            conn.execute(
+                "INSERT INTO events (ntfy_id, ntfy_time, message_id, type, subject_id, payload)
+                 VALUES (?1, 1, ?1, 'restore_notification', NULL, ?2)",
+                (ntfy_id, payload),
+            )
+            .unwrap();
+        }
+
+        migrate(&conn).unwrap();
+
+        let valid: Option<String> = conn
+            .query_row(
+                "SELECT subject_id FROM events WHERE ntfy_id = 'restore-valid'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let malformed: Option<String> = conn
+            .query_row(
+                "SELECT subject_id FROM events WHERE ntfy_id = 'restore-malformed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let non_string: Option<String> = conn
+            .query_row(
+                "SELECT subject_id FROM events WHERE ntfy_id = 'restore-non-string'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(valid.as_deref(), Some("n-1"));
+        assert_eq!(malformed, None, "malformed JSON remains safely ungrouped");
+        assert_eq!(
+            non_string, None,
+            "subject extraction accepts only string IDs"
+        );
+        assert_eq!(version, 3);
+    }
+
     #[test]
     fn a_v1_database_gains_the_new_table_without_losing_what_it_held() {
         // The upgrade path, which a fresh-create test cannot exercise: every
@@ -196,22 +297,39 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute("INSERT INTO bodies VALUES ('sha-1', x'01020304')", []).unwrap();
+        conn.execute("INSERT INTO bodies VALUES ('sha-1', x'01020304')", [])
+            .unwrap();
 
         migrate(&conn).unwrap();
 
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, SCHEMA_VERSION, "the step must be recorded, or it repeats forever");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            version, SCHEMA_VERSION,
+            "the step must be recorded, or it repeats forever"
+        );
 
-        conn.execute_batch("INSERT INTO body_failures (content_hash, reason, at) VALUES ('h','gone',1)")
-            .expect("v2's table must exist after the upgrade");
+        conn.execute_batch(
+            "INSERT INTO body_failures (content_hash, reason, at) VALUES ('h','gone',1)",
+        )
+        .expect("v2's table must exist after the upgrade");
 
-        let payload: String =
-            conn.query_row("SELECT payload FROM events", [], |r| r.get(0)).unwrap();
-        assert_eq!(payload, "{\"kept\":true}", "the log must survive the migration");
-        let body: Vec<u8> =
-            conn.query_row("SELECT bytes FROM bodies", [], |r| r.get(0)).unwrap();
-        assert_eq!(body, vec![1, 2, 3, 4], "and so must the unrecoverable bytes");
+        let payload: String = conn
+            .query_row("SELECT payload FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            payload, "{\"kept\":true}",
+            "the log must survive the migration"
+        );
+        let body: Vec<u8> = conn
+            .query_row("SELECT bytes FROM bodies", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            body,
+            vec![1, 2, 3, 4],
+            "and so must the unrecoverable bytes"
+        );
     }
 
     #[test]
@@ -248,11 +366,14 @@ mod tests {
         // Downgrade: an older binary must not run its steps against a shape it
         // does not know, and must not stamp the version back down.
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 5)).unwrap();
+        conn.execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION + 5))
+            .unwrap();
 
         migrate(&conn).unwrap();
 
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(version, SCHEMA_VERSION + 5);
     }
 
@@ -261,7 +382,38 @@ mod tests {
         // The bump this scheme is most likely to be forgotten on: adding a step
         // without moving the version leaves existing databases un-migrated.
         assert_eq!(SCHEMA_VERSION, MIGRATIONS.len() as i64);
-        assert_eq!(SCHEMA_VERSION, 2, "v2 adds body_failures");
+        assert_eq!(
+            SCHEMA_VERSION, 3,
+            "v3 backfills restore_notification subjects"
+        );
+    }
+
+    #[test]
+    fn reopening_current_schema_repairs_restore_subjects_after_a_downgrade_cycle() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO events (ntfy_id, ntfy_time, message_id, type, subject_id, payload)
+             VALUES ('restore-after-downgrade', 1, 'restore-1', 'restore_notification', NULL,
+                     '{\"notificationId\":\"notification-1\"}')",
+            [],
+        )
+        .unwrap();
+        // Simulate an older build reopening the database and then a current
+        // build seeing an already-current version after that build upgraded it.
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
+            .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let subject: Option<String> = conn
+            .query_row(
+                "SELECT subject_id FROM events WHERE ntfy_id = 'restore-after-downgrade'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(subject.as_deref(), Some("notification-1"));
     }
 
     #[test]
@@ -281,7 +433,9 @@ mod tests {
         conn.execute_batch("DROP TABLE messages; DROP TABLE sessions; DROP TABLE projects;")
             .unwrap();
 
-        let events: i64 = conn.query_row("SELECT count(*) FROM events", [], |r| r.get(0)).unwrap();
+        let events: i64 = conn
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(events, 1);
     }
 }

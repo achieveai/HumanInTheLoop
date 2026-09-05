@@ -248,6 +248,123 @@ test.describe('Orphans (spec §16.5)', () => {
 });
 
 test.describe('Publishing a reply (spec §9.1)', () => {
+  test('reply actions return transport results and retain each published response id', async ({ page }) => {
+    await page.goto('/inbox-harness.html');
+
+    const result = await page.evaluate(async () => {
+      const { createReplyActions } = await import('./reply.js');
+      const replies: Record<string, unknown> = {
+        submit_answer: 'answer-response',
+        dismiss_notification: 'dismiss-response',
+        submit_plan_review: { status: 'received', responseId: 'review-response', reason: null },
+      };
+      const actions = createReplyActions({ invoke: (command: string) => Promise.resolve(replies[command]) });
+      const questionRow = { messageId: 'q-contract' } as any;
+      const notificationRow = { messageId: 'n-contract' } as any;
+      const reviewRow = { messageId: 'p-contract' } as any;
+
+      const answer = await actions.onSubmit({
+        row: questionRow,
+        selectedValues: ['yes'],
+        otherText: '',
+        subAnswers: null,
+      });
+      const dismiss = await actions.onDismiss(notificationRow);
+      const review = await actions.onSubmitReview(reviewRow, {
+        reviewId: reviewRow.messageId,
+        snapshotHash: 'abc123',
+        verdict: 'approved',
+        overallFeedback: '',
+        inlineComments: [],
+      });
+
+      return {
+        answer,
+        dismiss,
+        review,
+        mine: [questionRow, notificationRow, reviewRow]
+          .map(row => actions.myResponseId(row.messageId)),
+      };
+    });
+
+    expect(result).toEqual({
+      answer: 'answer-response',
+      dismiss: 'dismiss-response',
+      review: { status: 'received', responseId: 'review-response', reason: null },
+      mine: ['answer-response', 'dismiss-response', 'review-response'],
+    });
+  });
+
+  test('bulk reply actions use exact camelCase arguments and reject malformed keyed outcomes', async ({ page }) => {
+    await page.goto('/inbox-harness.html');
+
+    const result = await page.evaluate(async () => {
+      const { createReplyActions } = await import('./reply.js');
+      const calls: Array<{ command: string; args: unknown }> = [];
+      const replies: Record<string, unknown> = {
+        dismiss_notifications: [
+          { status: 'dismissed', notificationId: 'n-good', responseId: 'd-good' },
+          { status: 'dismissed', notificationId: 'n-duplicate', responseId: 'd-first' },
+          { status: 'dismissed', notificationId: 'n-duplicate', responseId: 'd-second' },
+          { status: 'future', notificationId: 'n-unknown', responseId: 'd-unknown' },
+        ],
+        restore_notifications: [
+          { status: 'restored', notificationId: 'n-good', dismissalId: 'd-good', responseId: 'r-good' },
+          { status: 'failed', notificationId: 'n-failed', dismissalId: 'd-failed', error: 'still offline' },
+        ],
+      };
+      const actions = createReplyActions({
+        invoke: (command: string, args: unknown) => {
+          calls.push({ command, args });
+          return Promise.resolve(replies[command]);
+        },
+      });
+      const notificationIds = ['n-duplicate', 'n-good', 'n-missing', 'n-unknown'];
+      const restorations = [
+        { notificationId: 'n-good', dismissalId: 'd-good' },
+        { notificationId: 'n-failed', dismissalId: 'd-failed' },
+      ];
+
+      return {
+        dismiss: await actions.onDismissMany(notificationIds),
+        restore: await actions.onRestoreMany(restorations),
+        mine: notificationIds.map(id => actions.myResponseId(id)),
+        calls,
+      };
+    });
+
+    expect(result).toEqual({
+      dismiss: {
+        successes: [{ notificationId: 'n-good', dismissalId: 'd-good' }],
+        failures: [
+          { notificationId: 'n-duplicate', error: 'duplicate outcome' },
+          { notificationId: 'n-missing', error: 'missing outcome' },
+          { notificationId: 'n-unknown', error: 'unknown outcome status: future' },
+        ],
+      },
+      restore: {
+        successes: [{ notificationId: 'n-good', dismissalId: 'd-good', responseId: 'r-good' }],
+        failures: [{ notificationId: 'n-failed', dismissalId: 'd-failed', error: 'still offline' }],
+      },
+      mine: [null, 'd-good', null, null],
+      calls: [
+        {
+          command: 'dismiss_notifications',
+          args: { notificationIds: ['n-duplicate', 'n-good', 'n-missing', 'n-unknown'] },
+        },
+        {
+          command: 'restore_notifications',
+          args: {
+            restorations: [
+              { notificationId: 'n-good', dismissalId: 'd-good' },
+              { notificationId: 'n-failed', dismissalId: 'd-failed' },
+            ],
+          },
+        },
+      ],
+    });
+  });
+
   test('an answer goes out and the controls stay down', async ({ page }) => {
     // Optimistic on purpose. Once the answer is on the wire this is a race, and
     // offering to send a second answer would only add a second loser.
@@ -468,7 +585,7 @@ test.describe('Losing the race must not cost the writing (spec §9.3)', () => {
     await applyRow(page, settled({ messageId: 'n-1', msgType: 'notification', status: 'dismissed' }));
 
     await expect(page.locator('.detail-banner .detail-banner-title')).toHaveText('Dismissed elsewhere');
-    await expect(page.locator('.detail-actions .button')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Mark unread' })).toBeDisabled();
     // The body survives, which is the whole reason a dismissed notification is
     // kept at all.
     await expect(page.locator('.notification-body strong')).toHaveText('v2.11.2');

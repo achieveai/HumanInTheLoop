@@ -87,6 +87,7 @@ export interface SessionTree {
 
 export interface MessageList {
   messages: MessageRow[];
+  actionableNotificationIds: string[];
   counts: { all: number; needsYou: number; answered: number; notifications: number };
   filter: string;
   defaultFilter: string;
@@ -197,12 +198,17 @@ export function list(over: Partial<MessageList> = {}): MessageList {
     notifications: messages.filter(m => m.msgType === 'notification').length,
   };
   const defaultFilter = over.defaultFilter ?? (counts.needsYou > 0 ? 'needs_you' : 'all');
+  const actionableNotificationIds = over.actionableNotificationIds
+    ?? messages
+      .filter(m => m.msgType === 'notification' && open(m))
+      .map(m => m.messageId);
   return {
     filter: defaultFilter,
     scopeKey: 'all',
     now: NOW,
     ...over,
     messages,
+    actionableNotificationIds,
     counts,
     defaultFilter,
   };

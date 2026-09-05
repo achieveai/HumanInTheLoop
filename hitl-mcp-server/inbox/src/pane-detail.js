@@ -54,14 +54,36 @@ export function createDetailPane({ container, invoke, onError = console.error, a
     /** What is on screen: `{ messageId, status, controller }`, or `null`. */
     let painted = null;
 
-    function empty() {
+    /** Detached panes retain their exact controls, listeners and controller state. */
+    const parked = new Map();
+    /** Lightweight editor state captured when a parked controller must die. */
+    const recovered = new Map();
+
+    function dispose(entry) {
+        entry?.controller?.dispose?.();
+    }
+
+    function disposePainted() {
+        dispose(painted);
         painted = null;
+    }
+
+    function empty() {
+        disposePainted();
         panel(container, 'detail-empty', 'Nothing selected', 'Pick a message to see it here.');
     }
 
     async function show(message) {
+        // Re-activating the already painted row must not reconstruct its form;
+        // rollback deliberately restores the exact live controller first.
+        if (painted?.messageId === message.messageId
+            && painted.status === message.status
+            && painted.row?.status === message.status
+            && painted.row?.title === message.title) return true;
+        if (restore(message.messageId)) return true;
+
         const token = ++generation;
-        painted = null;
+        disposePainted();
 
         // Named immediately, from the row we already have. The alternative is a
         // pane that goes blank on every click and fills in a moment later.
@@ -131,7 +153,53 @@ export function createDetailPane({ container, invoke, onError = console.error, a
     }
 
     function remember(row, controller) {
-        painted = { messageId: row.messageId, status: row.status, controller };
+        painted = { messageId: row.messageId, status: row.status, row, controller };
+        const hasRecovery = recovered.has(row.messageId);
+        const recovery = recovered.get(row.messageId);
+        if (hasRecovery) {
+            controller?.restoreRecovery?.(recovery);
+            recovered.delete(row.messageId);
+        }
+    }
+
+    function park(messageId) {
+        if (!painted || painted.messageId !== messageId) return false;
+
+        generation += 1;
+        const fragment = document.createDocumentFragment();
+        fragment.append(...container.childNodes);
+        parked.set(messageId, { fragment, painted });
+        painted = null;
+        return true;
+    }
+
+    function restore(messageId) {
+        const entry = parked.get(messageId);
+        if (!entry) return false;
+
+        generation += 1;
+        disposePainted();
+        container.replaceChildren(entry.fragment);
+        painted = entry.painted;
+        parked.delete(messageId);
+        return true;
+    }
+
+    function discard(messageId, { recover = false } = {}) {
+        const entry = parked.get(messageId);
+        if (recover && entry) {
+            try {
+                if (typeof entry.painted?.controller?.captureRecovery === 'function') {
+                    recovered.set(messageId, entry.painted.controller.captureRecovery());
+                }
+            } catch (error) {
+                onError?.(error);
+                return false;
+            }
+        }
+        dispose(entry?.painted);
+        parked.delete(messageId);
+        return true;
     }
 
     /**
@@ -158,5 +226,5 @@ export function createDetailPane({ container, invoke, onError = console.error, a
     }
 
     empty();
-    return { show, update, clear };
+    return { show, update, clear, park, restore, discard };
 }

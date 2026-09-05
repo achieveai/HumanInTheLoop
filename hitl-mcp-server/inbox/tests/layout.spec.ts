@@ -43,13 +43,17 @@ const FIXTURE: Fixture = {
   },
 };
 
-async function open(page: Page, viewport: { width: number; height: number }) {
+async function open(
+  page: Page,
+  viewport: { width: number; height: number },
+  fixture: Fixture = FIXTURE,
+) {
   await page.setViewportSize(viewport);
   await page.addInitScript(f => {
     (window as any).__INBOX_FIXTURE = f;
-  }, { sessions: AGENTS, ...FIXTURE });
+  }, { sessions: AGENTS, ...fixture });
   await page.goto('/inbox-harness.html');
-  await expect(page.locator('.filter-bar .filter')).toHaveCount(4);
+  await expect(page.locator('.filter-bar .filter')).toHaveCount(3);
 }
 
 /**
@@ -217,5 +221,303 @@ test.describe('§4.1 — the reply stays reachable', () => {
     // Pinned means "on screen without scrolling the pane", so its bottom edge
     // must fall within the window rather than somewhere past the fold.
     expect(box!.y + box!.height).toBeLessThanOrEqual(PHONE.height);
+  });
+});
+
+test.describe('§4 — large-list resize containment', () => {
+  test('contains cold and warm mixed-height rows through refresh and breakpoints', async ({ page }) => {
+    test.setTimeout(30_000);
+    const errors: string[] = [];
+    page.on('console', message => {
+      if (message.type() === 'error') errors.push(message.text());
+    });
+    page.on('pageerror', error => errors.push(error.message));
+
+    const rows = Array.from({ length: 2_322 }, (_, index) => message({
+      messageId: `large-${index}`,
+      title: index === 2_321 ? 'Final mixed-height row' : `Mixed-height row ${index}`,
+      contextSnippet: index % 4 === 1 || index % 4 === 3
+        ? `Context for mixed-height row ${index}`
+        : null,
+      badges: index % 4 >= 2
+        ? { repo: `Hitl_MCP · branch-${index}`, batchCount: null, revision: null, attachment: false, plaintext: null }
+        : undefined,
+    }));
+    const finalRow = rows.at(-1)!;
+    const largeFixture: Fixture = {
+      messages: list({ messages: rows }),
+      details: { [finalRow.messageId]: detail(finalRow, { request: { body: 'Final row body.' } }) },
+    };
+    await open(page, WIDE, largeFixture);
+
+    const messageRows = page.locator('.message-row');
+    await expect(messageRows).toHaveCount(2_322);
+    const cold = await page.evaluate(() => {
+      const listElement = document.querySelector('#message-list') as HTMLElement;
+      const rowElements = [...document.querySelectorAll('.message-row')] as HTMLElement[];
+      const style = getComputedStyle(rowElements[0]);
+      return {
+        contentVisibility: style.contentVisibility,
+        containIntrinsicSize: style.containIntrinsicSize,
+        scrollHeight: listElement.scrollHeight,
+        visibleHeights: [...new Set(rowElements.slice(0, 4).map(row => row.getBoundingClientRect().height))],
+      };
+    });
+    expect(cold.contentVisibility).toBe('auto');
+    expect(cold.containIntrinsicSize).toBe('auto 38px');
+    expect(cold.visibleHeights.length).toBeGreaterThan(1);
+
+    const last = messageRows.last();
+    await last.evaluate(row => row.scrollIntoView({ block: 'end' }));
+    await expect(last).toBeInViewport();
+    await last.click();
+    await last.focus();
+    await expect(last).toBeFocused();
+    await expect(last).toHaveAccessibleName(/Final mixed-height row/);
+
+    const beforeRefresh = await page.evaluate(() => {
+      const listElement = document.querySelector('#message-list') as HTMLElement;
+      const selected = document.querySelector('.message-row.is-selected') as HTMLElement;
+      const listRect = listElement.getBoundingClientRect();
+      const rowRect = selected.getBoundingClientRect();
+      return {
+        scrollHeight: listElement.scrollHeight,
+        scrollTop: listElement.scrollTop,
+        clientHeight: listElement.clientHeight,
+        bottomGap: listRect.bottom - rowRect.bottom,
+      };
+    });
+    expect(Math.abs(beforeRefresh.scrollHeight - cold.scrollHeight) / cold.scrollHeight)
+      .toBeLessThanOrEqual(0.01);
+
+    const refreshedRows = rows.map((row, index) => index === rows.length - 1
+      ? { ...row, title: 'Final mixed-height row refreshed' }
+      : row);
+    const refreshedFinal = refreshedRows.at(-1)!;
+    await page.evaluate(({ projection, refreshedDetail }) => {
+      const fixture = (window as any).__INBOX_FIXTURE;
+      fixture.messages = projection;
+      fixture.details[refreshedDetail.row.messageId] = refreshedDetail;
+      (window as any).__simulateChange();
+    }, {
+      projection: list({ messages: refreshedRows }),
+      refreshedDetail: detail(refreshedFinal, { request: { body: 'Refreshed final row body.' } }),
+    });
+
+    const selected = page.locator('.message-row.is-selected');
+    await expect(selected).toHaveAttribute('data-message-id', finalRow.messageId);
+    await expect(selected).toHaveAccessibleName(/Final mixed-height row refreshed/);
+    const afterRefresh = await page.evaluate(() => {
+      const listElement = document.querySelector('#message-list') as HTMLElement;
+      const selectedRow = document.querySelector('.message-row.is-selected') as HTMLElement;
+      const listRect = listElement.getBoundingClientRect();
+      const rowRect = selectedRow.getBoundingClientRect();
+      return {
+        scrollHeight: listElement.scrollHeight,
+        scrollTop: listElement.scrollTop,
+        clientHeight: listElement.clientHeight,
+        bottomGap: listRect.bottom - rowRect.bottom,
+      };
+    });
+    expect(Math.abs(afterRefresh.scrollHeight - beforeRefresh.scrollHeight) / beforeRefresh.scrollHeight)
+      .toBeLessThanOrEqual(0.01);
+    expect(Math.abs(afterRefresh.scrollTop - beforeRefresh.scrollTop))
+      .toBeLessThanOrEqual(beforeRefresh.clientHeight);
+    expect(Math.abs(afterRefresh.bottomGap - beforeRefresh.bottomGap))
+      .toBeLessThanOrEqual(2);
+
+    await selected.focus();
+    await expect(selected).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.detail-title')).toHaveText('Final mixed-height row refreshed');
+
+    let previousGeometry = afterRefresh;
+    for (const [viewport, layout] of [
+      [TABLET, 'tablet'],
+      [PHONE, 'phone'],
+      [WIDE, 'wide'],
+    ] as const) {
+      await page.setViewportSize(viewport);
+      await expectLayout(page, layout);
+      await page.evaluate(() => (window as any).__PANES?.show('list'));
+      await expect(page.locator('.pane-list')).toBeVisible();
+      await expect(selected).toBeInViewport();
+      const readGeometry = () => page.evaluate(() => {
+        const documentElement = document.documentElement;
+        const pane = document.querySelector('.pane-list') as HTMLElement;
+        const listElement = document.querySelector('#message-list') as HTMLElement;
+        const selectedRow = document.querySelector('.message-row.is-selected') as HTMLElement;
+        const listRect = listElement.getBoundingClientRect();
+        const rowRect = selectedRow.getBoundingClientRect();
+        return {
+          documentFits: documentElement.scrollWidth <= documentElement.clientWidth,
+          paneFits: pane.scrollWidth <= pane.clientWidth,
+          listFits: listElement.scrollWidth <= listElement.clientWidth,
+          scrollHeight: listElement.scrollHeight,
+          scrollTop: listElement.scrollTop,
+          clientHeight: listElement.clientHeight,
+          bottomGap: listRect.bottom - rowRect.bottom,
+        };
+      });
+      await expect.poll(readGeometry)
+        .toMatchObject({ documentFits: true, paneFits: true, listFits: true });
+      const geometry = await readGeometry();
+      expect(Math.abs(geometry.scrollHeight - previousGeometry.scrollHeight) / previousGeometry.scrollHeight)
+        .toBeLessThanOrEqual(0.01);
+      expect(Math.abs(geometry.scrollTop - previousGeometry.scrollTop))
+        .toBeLessThanOrEqual(Math.max(geometry.clientHeight, previousGeometry.clientHeight));
+      expect(
+        Math.abs(geometry.bottomGap - previousGeometry.bottomGap),
+        `${layout} selected-row bottom gap drifted from ${previousGeometry.bottomGap} to ${geometry.bottomGap}`,
+      )
+        .toBeLessThanOrEqual(8);
+      previousGeometry = geometry;
+    }
+
+    await expect(page.locator('html')).toHaveAttribute('data-pane', 'list');
+    await expect(page.locator('.message-row.is-selected')).toHaveAttribute('data-message-id', finalRow.messageId);
+    const beforeOrientation = await page.evaluate(() => {
+      const list = document.querySelector('#message-list') as HTMLElement;
+      return { scrollHeight: list.scrollHeight, scrollTop: list.scrollTop };
+    });
+    await page.locator('#reading-pane-toggle').click();
+    await expect(page.locator('html')).toHaveAttribute('data-reading-pane', 'bottom');
+    const bottomContainment = await page.evaluate(() => {
+      const documentElement = document.documentElement;
+      const inbox = document.querySelector('.inbox') as HTMLElement;
+      const pane = document.querySelector('.pane-list') as HTMLElement;
+      const list = document.querySelector('#message-list') as HTMLElement;
+      const selected = document.querySelector('.message-row.is-selected') as HTMLElement;
+      const style = getComputedStyle(selected);
+      const paneRect = pane.getBoundingClientRect();
+      const inboxRect = inbox.getBoundingClientRect();
+      return {
+        contentVisibility: style.contentVisibility,
+        containIntrinsicSize: style.containIntrinsicSize,
+        scrollHeight: list.scrollHeight,
+        scrollTop: list.scrollTop,
+        documentFits: documentElement.scrollWidth <= documentElement.clientWidth
+          && documentElement.scrollHeight <= documentElement.clientHeight,
+        inboxFits: inbox.scrollWidth <= inbox.clientWidth && inbox.scrollHeight <= inbox.clientHeight,
+        paneInside: paneRect.top >= inboxRect.top && paneRect.bottom <= inboxRect.bottom,
+      };
+    });
+    expect(bottomContainment.contentVisibility).toBe('auto');
+    expect(bottomContainment.containIntrinsicSize).toBe('auto 38px');
+    expect(Math.abs(bottomContainment.scrollHeight - beforeOrientation.scrollHeight) / beforeOrientation.scrollHeight)
+      .toBeLessThanOrEqual(0.01);
+    expect(bottomContainment.scrollTop).toBe(beforeOrientation.scrollTop);
+    expect(bottomContainment.documentFits).toBe(true);
+    expect(bottomContainment.inboxFits).toBe(true);
+    expect(bottomContainment.paneInside).toBe(true);
+
+    await page.locator('#reading-pane-toggle').click();
+    await expect(page.locator('html')).toHaveAttribute('data-reading-pane', 'right');
+    expect(await page.evaluate(() => (document.querySelector('#message-list') as HTMLElement).scrollTop))
+      .toBe(beforeOrientation.scrollTop);
+    expect(errors).toEqual([]);
+  });
+});
+
+test.describe('§4 — Right and Bottom reading-pane geometry', () => {
+  test('Bottom stacks list over detail beside the wide agent pane and fills the collapsed width', async ({ page }) => {
+    await open(page, WIDE);
+    await page.locator('#reading-pane-toggle').click();
+    await expect(page.locator('html')).toHaveAttribute('data-reading-pane', 'bottom');
+
+    const wide = await page.evaluate(() => {
+      const rect = (selector: string) => (document.querySelector(selector) as HTMLElement).getBoundingClientRect();
+      return { inbox: rect('.inbox'), agents: rect('.pane-agents'), list: rect('.pane-list'), detail: rect('.pane-detail') };
+    });
+    expect(wide.agents.top).toBeCloseTo(wide.inbox.top, 0);
+    expect(wide.agents.bottom).toBeCloseTo(wide.inbox.bottom, 0);
+    expect(wide.list.left).toBeCloseTo(wide.detail.left, 0);
+    expect(wide.list.right).toBeCloseTo(wide.detail.right, 0);
+    expect(wide.list.bottom).toBeCloseTo(wide.detail.top, 0);
+
+    await page.locator('#pane-cycle').click();
+    const collapsed = await page.evaluate(() => {
+      const inbox = document.querySelector('.inbox')!.getBoundingClientRect();
+      const list = document.querySelector('.pane-list')!.getBoundingClientRect();
+      const detail = document.querySelector('.pane-detail')!.getBoundingClientRect();
+      return { inbox, list, detail, overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth };
+    });
+    expect(collapsed.list.left).toBeCloseTo(collapsed.inbox.left, 0);
+    expect(collapsed.list.right).toBeCloseTo(collapsed.inbox.right, 0);
+    expect(collapsed.detail.left).toBeCloseTo(collapsed.inbox.left, 0);
+    expect(collapsed.detail.right).toBeCloseTo(collapsed.inbox.right, 0);
+    expect(collapsed.overflow).toBe(false);
+
+    await page.locator('#pane-cycle').click();
+    const detailOnly = await page.evaluate(() => {
+      const documentElement = document.documentElement;
+      const inbox = document.querySelector('.inbox')!.getBoundingClientRect();
+      const detail = document.querySelector('.pane-detail')!.getBoundingClientRect();
+      return {
+        inbox: { left: inbox.left, top: inbox.top, right: inbox.right, bottom: inbox.bottom },
+        detail: { left: detail.left, top: detail.top, right: detail.right, bottom: detail.bottom },
+        fits: documentElement.scrollWidth <= documentElement.clientWidth
+          && documentElement.scrollHeight <= documentElement.clientHeight,
+      };
+    });
+    expect(detailOnly.detail).toEqual(detailOnly.inbox);
+    expect(detailOnly.fits).toBe(true);
+  });
+
+  test('Bottom stacks at tablet, then phone navigation remains one pane and the preference returns', async ({ page }) => {
+    await open(page, WIDE);
+    await page.locator('#reading-pane-toggle').click();
+    await page.setViewportSize(TABLET);
+    await expectLayout(page, 'tablet');
+    await expect(page.locator('#reading-pane-toggle')).toBeVisible();
+    const tablet = await page.evaluate(() => {
+      const list = document.querySelector('.pane-list')!.getBoundingClientRect();
+      const detail = document.querySelector('.pane-detail')!.getBoundingClientRect();
+      return { list, detail };
+    });
+    expect(tablet.list.left).toBeCloseTo(tablet.detail.left, 0);
+    expect(tablet.list.bottom).toBeCloseTo(tablet.detail.top, 0);
+
+    await page.locator('#pane-cycle').click();
+    await expect(page.locator('html')).toHaveAttribute('data-collapse', '1');
+    await expect(page.locator('.pane-list')).toBeVisible();
+    await expect(page.locator('.pane-detail')).toBeVisible();
+    const tabletCollapsed = await page.evaluate(() => {
+      const inbox = document.querySelector('.inbox')!.getBoundingClientRect();
+      const list = document.querySelector('.pane-list')!.getBoundingClientRect();
+      const detail = document.querySelector('.pane-detail')!.getBoundingClientRect();
+      return { inbox: { left: inbox.left, right: inbox.right }, list: { left: list.left, right: list.right },
+        detail: { left: detail.left, right: detail.right } };
+    });
+    expect(tabletCollapsed.list).toEqual(tabletCollapsed.inbox);
+    expect(tabletCollapsed.detail).toEqual(tabletCollapsed.inbox);
+
+    await page.locator('#pane-cycle').click();
+    await expect(page.locator('html')).toHaveAttribute('data-collapse', '2');
+    await expect(page.locator('.pane-list')).toBeHidden();
+    const tabletDetailOnly = await page.evaluate(() => {
+      const documentElement = document.documentElement;
+      const inbox = document.querySelector('.inbox')!.getBoundingClientRect();
+      const detail = document.querySelector('.pane-detail')!.getBoundingClientRect();
+      return { inbox: { left: inbox.left, top: inbox.top, right: inbox.right, bottom: inbox.bottom },
+        detail: { left: detail.left, top: detail.top, right: detail.right, bottom: detail.bottom },
+        fits: documentElement.scrollWidth <= documentElement.clientWidth
+          && documentElement.scrollHeight <= documentElement.clientHeight };
+    });
+    expect(tabletDetailOnly.detail).toEqual(tabletDetailOnly.inbox);
+    expect(tabletDetailOnly.fits).toBe(true);
+
+    await page.setViewportSize(PHONE);
+    await expectLayout(page, 'phone');
+    await expect(page.locator('#reading-pane-toggle')).toBeHidden();
+    await page.locator('.message-row[data-message-id="q-1"]').click();
+    await expect(page.locator('.pane-detail')).toBeVisible();
+    await page.locator('#pane-back').click();
+    await expect(page.locator('.pane-list')).toBeVisible();
+
+    await page.setViewportSize(WIDE);
+    await expectLayout(page, 'wide');
+    await expect(page.locator('html')).toHaveAttribute('data-reading-pane', 'bottom');
+    await expect(page.locator('html')).toHaveAttribute('data-collapse', '2');
   });
 });

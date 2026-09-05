@@ -11,7 +11,7 @@ use crate::ntfy::subscribe::NtfyEvent;
 use crate::types::{
     AnswerMessage, AttachmentRef, CancelReviewMessage, DismissNotificationMessage,
     NotificationMessage, PlanReviewAckMessage, PlanReviewMessage, PlanReviewResponseMessage,
-    QuestionMessage, SenderIdentityMessage,
+    QuestionMessage, RestoreNotificationMessage, SenderIdentityMessage,
 };
 
 /// Everything the transport needs to hand outward. Implemented by each host
@@ -50,6 +50,11 @@ pub trait NtfySink: Send + Sync {
     fn on_answer(&self, msg: &AnswerMessage);
     fn on_notification(&self, msg: &NotificationMessage, was_encrypted: bool);
     fn on_dismiss_notification(&self, msg: &DismissNotificationMessage);
+    /// A targeted undo of one notification dismissal.
+    ///
+    /// Default no-op keeps older UI hosts source-compatible. Recorder hosts see
+    /// the raw event through `on_event` before dispatch reaches this callback.
+    fn on_restore_notification(&self, _msg: &RestoreNotificationMessage) {}
 
     fn on_plan_review(
         &self,
@@ -90,6 +95,7 @@ pub(crate) mod test_sink {
         Answer(String),
         Notification(String),
         DismissNotification(String),
+        RestoreNotification(String, String),
         PlanReview(String),
         PlanReviewResponse(String),
         PlanReviewAck(String),
@@ -135,6 +141,12 @@ pub(crate) mod test_sink {
         }
         fn on_dismiss_notification(&self, m: &DismissNotificationMessage) {
             self.push(Call::DismissNotification(m.notification_id.clone()));
+        }
+        fn on_restore_notification(&self, m: &crate::types::RestoreNotificationMessage) {
+            self.push(Call::RestoreNotification(
+                m.notification_id.clone(),
+                m.dismissal_id.clone(),
+            ));
         }
         fn on_plan_review(&self, m: &PlanReviewMessage, _: bool, _: Option<AttachmentRef>) {
             self.push(Call::PlanReview(m.message_id.clone()));

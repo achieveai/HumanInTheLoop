@@ -129,6 +129,23 @@ pub struct DismissNotificationMessage {
     pub dismissed_from: String,
 }
 
+/// Restore a notification by tombstoning one exact dismissal.
+///
+/// This is additive rather than a change to the frozen dismiss wire shape. All
+/// fields default so an incomplete settlement is still recordable and safely
+/// ignored by the fold instead of disappearing during concrete parsing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RestoreNotificationMessage {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub message_id: String,
+    pub timestamp: u64,
+    pub notification_id: String,
+    pub dismissal_id: String,
+    pub restored_from: String,
+}
+
 /// A fragment of an oversized message body, published as its own ntfy message.
 /// Transport-only wrapper — never survives past reassembly on the receiving side.
 ///
@@ -592,6 +609,42 @@ mod tests {
 
         assert_eq!(json, golden);
         assert!(!json.contains("protocolVersion"), "{json}");
+    }
+
+    #[test]
+    fn restore_notification_message_emits_and_parses_the_additive_shape() {
+        let restore = RestoreNotificationMessage {
+            msg_type: "restore_notification".to_string(),
+            message_id: "71ba33d7-08a8-4761-9abf-5f4e6ba364b6".to_string(),
+            timestamp: 1_788_566_400_000,
+            notification_id: "31ba33d7-08a8-4761-9abf-5f4e6ba364b2".to_string(),
+            dismissal_id: "51ba33d7-08a8-4761-9abf-5f4e6ba364b4".to_string(),
+            restored_from: "Kay9 laptop".to_string(),
+        };
+
+        let json = serde_json::to_string(&restore).unwrap();
+        let golden = r#"{"type":"restore_notification","messageId":"71ba33d7-08a8-4761-9abf-5f4e6ba364b6","timestamp":1788566400000,"notificationId":"31ba33d7-08a8-4761-9abf-5f4e6ba364b2","dismissalId":"51ba33d7-08a8-4761-9abf-5f4e6ba364b4","restoredFrom":"Kay9 laptop"}"#;
+        assert_eq!(json, golden);
+        assert!(!json.contains("protocolVersion"), "{json}");
+
+        let with_future_field = json.replace("}", r#","futureMetadata":{"producer":"newer"}}"#);
+        let parsed: RestoreNotificationMessage = serde_json::from_str(&with_future_field).unwrap();
+        assert_eq!(parsed.notification_id, restore.notification_id);
+        assert_eq!(parsed.dismissal_id, restore.dismissal_id);
+        assert_eq!(parsed.restored_from, restore.restored_from);
+    }
+
+    #[test]
+    fn restore_notification_message_tolerates_omitted_non_discriminant_fields() {
+        let parsed: RestoreNotificationMessage =
+            serde_json::from_str(r#"{"type":"restore_notification"}"#).unwrap();
+
+        assert_eq!(parsed.msg_type, "restore_notification");
+        assert_eq!(parsed.message_id, "");
+        assert_eq!(parsed.timestamp, 0);
+        assert_eq!(parsed.notification_id, "");
+        assert_eq!(parsed.dismissal_id, "");
+        assert_eq!(parsed.restored_from, "");
     }
 
     #[test]

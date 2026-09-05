@@ -32,6 +32,7 @@ const DISMISSED = detail(
     status: 'dismissed',
     responder: 'Kay9 phone',
     respondedAt: NOW - MINUTE,
+    responseId: 'dismissal-n-1',
   }),
   { request: REQUEST, settlement: {}, sender: { label: 'Hitl_MCP · master · a3f2', source: 'session' } },
 );
@@ -102,12 +103,57 @@ test.describe('Pane 3 — notifications (spec §8.1)', () => {
     await expect(page.locator('.detail-closed-verb')).toHaveText('Dismissed by');
     await expect(page.locator('.detail-responder')).toHaveText('Kay9 phone');
 
-    await expect(page.locator('.detail-actions .button')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Mark unread' })).toBeDisabled();
     await expect(page.locator('.detail-retained'))
       .toContainText('kept in the Inbox so the agent’s history stays readable');
 
     // Still readable. A dismissed notification whose body vanished would be a
     // record of nothing.
     await expect(page.locator('.notification-body strong')).toHaveText('v2.11.2');
+  });
+
+  test('dismissed and restored rows redraw both ways and mark unread targets the exact dismissal', async ({ page }) => {
+    await page.goto('/inbox-harness.html');
+    await page.evaluate(async dismissed => {
+      const { renderNotification } = await import('./render-notification.js');
+      const browserWindow = window as any;
+      browserWindow.__ACTIONS = [];
+      browserWindow.__CONTROLLER = renderNotification(
+        document.getElementById('pane-detail')!,
+        dismissed,
+        {
+          myResponseId: () => null,
+          onDismiss: (row: any) => {
+            browserWindow.__ACTIONS.push({ action: 'dismiss', messageId: row.messageId });
+            return Promise.resolve('dismiss-again');
+          },
+          onRestore: (row: any) => {
+            browserWindow.__ACTIONS.push({
+              action: 'restore',
+              messageId: row.messageId,
+              dismissalId: row.responseId,
+            });
+            return Promise.resolve('restore-n-1');
+          },
+        },
+      );
+    }, DISMISSED);
+
+    await page.getByRole('button', { name: 'Mark unread' }).click();
+    expect(await recorded(page)).toEqual([
+      { action: 'restore', messageId: 'n-1', dismissalId: 'dismissal-n-1' },
+    ]);
+
+    await page.evaluate(openRow => (window as any).__CONTROLLER.applyRow(openRow), OPEN.row);
+    await expect(page.getByRole('button', { name: 'Dismiss' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Mark unread' })).toHaveCount(0);
+    await expect(page.locator('.detail-retained')).toHaveCount(0);
+    await expect(page.locator('.detail-banner')).toHaveCount(0);
+
+    await page.evaluate(dismissedRow => (window as any).__CONTROLLER.applyRow(dismissedRow), DISMISSED.row);
+    await expect(page.getByRole('button', { name: 'Mark unread' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Dismiss' })).toHaveCount(0);
+    await expect(page.locator('.detail-retained')).toHaveCount(1);
+    await expect(page.locator('.detail-banner')).toHaveCount(1);
   });
 });

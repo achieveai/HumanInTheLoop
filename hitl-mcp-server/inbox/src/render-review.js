@@ -30,7 +30,7 @@
 // distinct causes therefore land on kind `unavailable`. `data-reason` keeps them
 // apart for tests and for anyone reading the DOM, without touching `review.js`.
 
-import { renderPlanReview, renderReviewPanel } from './review.js';
+import { disposeReview, renderPlanReview, renderReviewPanel } from './review.js';
 import {
     detailHeader,
     el,
@@ -259,6 +259,7 @@ function lock(controller, row) {
 export function renderReview(container, detail, body, actions = {}, draft = null) {
     const { row, request } = detail;
 
+    disposeReview(container.querySelector('.detail-review-host'));
     container.textContent = '';
     const root = el('article', 'detail-root detail-review');
     root.dataset.messageId = row.messageId;
@@ -268,6 +269,7 @@ export function renderReview(container, detail, body, actions = {}, draft = null
     const host = el('div', 'detail-review-host');
     root.appendChild(host);
     container.appendChild(root);
+    const dispose = () => disposeReview(host);
 
     if (body?.outcome !== 'ok') {
         const state = panelStateFor(body);
@@ -277,7 +279,7 @@ export function renderReview(container, detail, body, actions = {}, draft = null
         root.dataset.readOnly = 'true';
         // No `applyRow`: there is no form to lock and no plan on screen, so a
         // status change has nothing here to change.
-        return { readOnly: true, reason: state.reason, kind: state.kind };
+        return { readOnly: true, reason: state.reason, kind: state.kind, dispose };
     }
 
     root.dataset.readOnly = String(!isOpen(row));
@@ -363,5 +365,12 @@ export function renderReview(container, detail, body, actions = {}, draft = null
         showNotice(root, raceNotice(nextRow, actions.myResponseId?.(nextRow.messageId) ?? null));
     }
 
-    return { readOnly: !isOpen(row), controller, applyRow };
+    return {
+        readOnly: !isOpen(row),
+        controller,
+        applyRow,
+        captureRecovery: () => controller.captureRecovery(),
+        restoreRecovery: recovery => controller.restoreRecovery(recovery),
+        dispose,
+    };
 }

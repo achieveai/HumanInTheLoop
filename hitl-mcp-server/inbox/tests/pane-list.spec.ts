@@ -39,12 +39,20 @@ async function open(page: Page, fixture: Fixture) {
     (window as any).__INBOX_FIXTURE = f;
   }, { sessions: AGENTS, ...fixture });
   await page.goto('/inbox-harness.html');
-  await expect(page.locator('.filter-bar .filter')).toHaveCount(4);
+  await expect(page.locator('.filter-bar .filter')).toHaveCount(3);
+  await expect(page.locator('.type-filter')).toHaveCount(3);
 }
 
 /** One list, answering every scope/filter combination. */
 function only(...messages: ReturnType<typeof message>[]): Fixture {
   return { messages: list({ messages }) };
+}
+
+async function projectionCounts(page: Page) {
+  return page.evaluate(() => ({
+    trees: (window as any).__INVOCATIONS.filter((call: any) => call.cmd === 'list_sessions').length,
+    lists: (window as any).__INVOCATIONS.filter((call: any) => call.cmd === 'list_messages').length,
+  }));
 }
 
 test.describe('Pane 2 — the header fields (spec §7.1)', () => {
@@ -269,6 +277,175 @@ test.describe('Pane 2 — ordering and selection', () => {
   });
 });
 
+test.describe('Pane 2 — event refresh scheduling', () => {
+  test('refreshes after 100ms quiet and by 500ms under continuous events', async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-09-04T08:00:00Z') });
+    await open(page, only(message({ messageId: 'q-1' })));
+    await page.clock.pauseAt(new Date('2026-09-04T09:00:00Z'));
+
+    const initial = await projectionCounts(page);
+    await page.evaluate(() => (window as any).__simulateChange());
+    await page.clock.runFor(99);
+    expect(await projectionCounts(page)).toEqual(initial);
+
+    await page.clock.runFor(1);
+    await expect.poll(() => projectionCounts(page)).toEqual({
+      trees: initial.trees + 1,
+      lists: initial.lists + 1,
+    });
+
+    const beforeNoisyBurst = await projectionCounts(page);
+    await page.evaluate(() => (window as any).__simulateChange());
+    for (let event = 0; event < 5; event += 1) {
+      await page.clock.runFor(90);
+      await page.evaluate(() => (window as any).__simulateChange());
+    }
+    await page.clock.runFor(49);
+    expect(await projectionCounts(page)).toEqual(beforeNoisyBurst);
+
+    await page.clock.runFor(1);
+    await expect.poll(() => projectionCounts(page)).toEqual({
+      trees: beforeNoisyBurst.trees + 1,
+      lists: beforeNoisyBurst.lists + 1,
+    });
+  });
+
+  test('keeps one active projection, one trailing projection, and immediate explicit refreshes', async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-09-04T08:00:00Z') });
+    await open(page, {
+      messages: {
+        'all|null': list({ messages: [message({ messageId: 'q-open', title: 'open' })] }),
+        'all|answered': list({
+          filter: 'answered',
+          messages: [message({ messageId: 'q-done', title: 'done', status: 'answered' })],
+        }),
+      },
+    });
+    await page.clock.pauseAt(new Date('2026-09-04T09:00:00Z'));
+
+    const beforeExplicit = await projectionCounts(page);
+    await page.evaluate(() => (window as any).__simulateChange());
+    await page.locator('.filter[data-filter="answered"]').click();
+    await expect.poll(() => projectionCounts(page)).toEqual({
+      trees: beforeExplicit.trees + 1,
+      lists: beforeExplicit.lists + 1,
+    });
+    await expect(page.locator('.message-title')).toHaveText('done');
+    await page.clock.runFor(100);
+    expect(await projectionCounts(page)).toEqual({
+      trees: beforeExplicit.trees + 1,
+      lists: beforeExplicit.lists + 1,
+    });
+
+    await page.evaluate(async ({ agents, projection }) => {
+      const { createInbox } = await import('/inbox.js');
+      const host = document.createElement('section');
+      host.innerHTML = '<div class="agents"></div><div class="filters"></div>'
+        + '<div class="types"></div><div class="messages"></div><div class="detail"></div>';
+      document.body.appendChild(host);
+
+      const calls: string[] = [];
+      let releaseFirstTree: ((value: unknown) => void) | null = null;
+      let holdFirstTree = true;
+      const invoke = (command: string) => {
+        calls.push(command);
+        if (command === 'list_sessions' && holdFirstTree) {
+          holdFirstTree = false;
+          return new Promise(resolve => { releaseFirstTree = resolve; });
+        }
+        if (command === 'list_sessions') return Promise.resolve(agents);
+        if (command === 'list_messages') return Promise.resolve(projection);
+        return Promise.resolve(null);
+      };
+      const inbox = createInbox({
+        invoke,
+        elements: {
+          agents: host.querySelector('.agents'),
+          filterBar: host.querySelector('.filters'),
+          typeFilterSet: host.querySelector('.types'),
+          messageList: host.querySelector('.messages'),
+          detail: host.querySelector('.detail'),
+        },
+      });
+      (window as any).__CONTROLLED_REFRESH = {
+        calls,
+        inbox,
+        host,
+        releaseFirstTree: () => releaseFirstTree?.(agents),
+      };
+    }, {
+      agents: AGENTS,
+      projection: list({ messages: [message({ messageId: 'q-final', title: 'final' })] }),
+    });
+
+    await page.evaluate(() => {
+      void (window as any).__CONTROLLED_REFRESH.inbox.refreshAfterChange();
+    });
+    await page.clock.runFor(100);
+    expect(await page.evaluate(() => (window as any).__CONTROLLED_REFRESH.calls)).toEqual(['list_sessions']);
+
+    await page.evaluate(() => {
+      const controlled = (window as any).__CONTROLLED_REFRESH;
+      for (let event = 0; event < 20; event += 1) void controlled.inbox.refreshAfterChange();
+    });
+    await page.clock.runFor(100);
+    await page.evaluate(() => (window as any).__CONTROLLED_REFRESH.releaseFirstTree());
+
+    await expect.poll(() => page.evaluate(() => ({
+      calls: (window as any).__CONTROLLED_REFRESH.calls,
+      title: (window as any).__CONTROLLED_REFRESH.host.querySelector('.message-title')?.textContent,
+    }))).toEqual({ calls: ['list_sessions', 'list_sessions', 'list_messages'], title: 'final' });
+  });
+
+  test('bounds 500 paced events and converges to the final authoritative row', async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-09-04T08:00:00Z') });
+    await open(page, only(message({ messageId: 'q-1', title: 'event-0' })));
+    await page.clock.pauseAt(new Date('2026-09-04T09:00:00Z'));
+    const before = await projectionCounts(page);
+
+    await page.evaluate(() => {
+      const browserWindow = window as any;
+      const messageList = document.querySelector('#message-list') as HTMLElement;
+      const replaceChildren = messageList.replaceChildren.bind(messageList);
+      browserWindow.__LIST_COMMITS = 0;
+      messageList.replaceChildren = (...nodes: (Node | string)[]) => {
+        browserWindow.__LIST_COMMITS += 1;
+        replaceChildren(...nodes);
+      };
+
+      let emitted = 0;
+      const interval = setInterval(() => {
+        emitted += 1;
+        const current = browserWindow.__INBOX_FIXTURE.messages;
+        browserWindow.__INBOX_FIXTURE.messages = {
+          ...current,
+          messages: current.messages.map((row: any, index: number) => index === 0
+            ? { ...row, title: `event-${emitted}` }
+            : row),
+        };
+        browserWindow.__simulateChange();
+        if (emitted === 500) {
+          clearInterval(interval);
+          browserWindow.__EMITTED_EVENTS = emitted;
+        }
+      }, 10);
+    });
+
+    await page.clock.runFor(5_100);
+    await expect(page.locator('.message-title')).toHaveText('event-500');
+    const result = await page.evaluate(() => ({
+      commits: (window as any).__LIST_COMMITS,
+      emitted: (window as any).__EMITTED_EVENTS,
+    }));
+    const after = await projectionCounts(page);
+
+    expect(result.emitted).toBe(500);
+    expect(after.trees - before.trees).toBeLessThanOrEqual(11);
+    expect(after.lists - before.lists).toBeLessThanOrEqual(11);
+    expect(result.commits).toBeLessThanOrEqual(11);
+  });
+});
+
 test.describe('Pane 2 — the filters (spec §7.3)', () => {
   const FILTERED = {
     'all|null': list({
@@ -297,15 +474,130 @@ test.describe('Pane 2 — the filters (spec §7.3)', () => {
     }),
   };
 
-  test('all four filters are pinned at the top of the pane, with counts', async ({ page }) => {
+  test('status tabs and message type toggles are separate filter dimensions', async ({ page }) => {
     await open(page, { messages: FILTERED });
 
     await expect(page.locator('.filter')).toHaveText([
       /All\s*4/,
       /Needs you\s*2/,
       /Answered\s*2/,
-      /Notifications\s*1/,
     ]);
+    await expect(page.locator('.type-filter')).toHaveText([
+      /Notifications\s*1/,
+      /Questions\s*1/,
+      /Review plans\s*0/,
+    ]);
+    await expect(page.locator('.type-filter[aria-pressed="true"]')).toHaveCount(3);
+  });
+
+  test('a keyboard type toggle keeps focus on the same control after projection', async ({ page }) => {
+    await open(page, { messages: FILTERED });
+    const toggle = page.locator('.type-filter[data-type="notification"]');
+    await toggle.focus();
+    await page.keyboard.press('Enter');
+    await expect(toggle).toBeFocused();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  test('counted mark-all-read is a separate scope-wide action with one guarded activation and mobile reflow', async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 568 });
+    const answeredScope = list({
+      filter: 'answered',
+      defaultFilter: 'needs_you',
+      actionableNotificationIds: ['n-hidden-status', 'n-hidden-type', 'n-visible'],
+      counts: { all: 5, needsYou: 3, answered: 2, notifications: 3 },
+      messages: [
+        message({ messageId: 'q-answered', title: 'answered question', status: 'answered' }),
+        message({ messageId: 'n-dismissed', msgType: 'notification', title: 'read', status: 'dismissed' }),
+      ],
+    });
+    await open(page, {
+      messages: list({
+        filter: 'answered',
+        defaultFilter: 'needs_you',
+        actionableNotificationIds: [],
+        counts: { all: 2, needsYou: 0, answered: 2, notifications: 1 },
+        messages: answeredScope.messages,
+      }),
+    });
+
+    const outer = page.locator('#type-filter-bar');
+    await expect(outer).not.toHaveAttribute('role', 'group');
+    await expect(outer.locator('.type-filter-set')).toHaveAttribute('role', 'group');
+    await expect(outer.locator('.type-filter-set')).toHaveAttribute('aria-label', 'Message types');
+    await expect(outer.locator('.list-actions')).toHaveCount(1);
+
+    const mark = page.locator('.mark-all-read');
+    await expect(mark).toBeHidden();
+    await page.evaluate(projection => {
+      (window as any).__INBOX_FIXTURE.messages = projection;
+      (window as any).__simulateChange();
+    }, answeredScope);
+    await expect(mark).toBeVisible();
+    await expect(mark).toHaveAccessibleName('Mark all read (3)');
+    const describedBy = await mark.getAttribute('aria-describedby');
+    await expect(page.locator(`#${describedBy}`))
+      .toContainText('Status and message type filters do not limit this action.');
+
+    for (const width of [320, 420, 599, 600]) {
+      await page.setViewportSize({ width, height: 800 });
+      const layout = await page.evaluate(() => {
+        const row = document.querySelector('.type-filter-bar')!;
+        const actions = document.querySelector('.list-actions')!;
+        const rowStyle = getComputedStyle(row);
+        return {
+        documentFits: document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+        paneFits: document.querySelector('.pane-list')!.scrollWidth
+          <= document.querySelector('.pane-list')!.clientWidth,
+        actionWraps: getComputedStyle(document.querySelector('.mark-all-read')!).whiteSpace,
+          actionWidth: actions.getBoundingClientRect().width,
+          rowContentWidth: row.getBoundingClientRect().width
+            - Number.parseFloat(rowStyle.paddingLeft)
+            - Number.parseFloat(rowStyle.paddingRight),
+        };
+      });
+      expect(layout).toMatchObject({ documentFits: true, paneFits: true, actionWraps: 'nowrap' });
+      if (width < 600) expect(layout.actionWidth).toBeCloseTo(layout.rowContentWidth, 0);
+    }
+
+    await page.evaluate(() => {
+      const browserWindow = window as any;
+      browserWindow.__MARK_NODE = document.querySelector('.mark-all-read');
+      browserWindow.__REPLIES ??= {};
+      browserWindow.__REPLIES.dismiss_notifications = new Promise(() => {});
+    });
+    await mark.focus();
+    await page.keyboard.press('Enter');
+
+    await expect(mark).toHaveText('Marking 3…');
+    await expect(mark).toHaveAttribute('aria-disabled', 'true');
+    expect(await page.evaluate(() => {
+      const browserWindow = window as any;
+      const current = document.querySelector('.mark-all-read');
+      return browserWindow.__MARK_NODE === current && current?.isConnected;
+    })).toBe(true);
+
+    await mark.dispatchEvent('click');
+    expect(await page.evaluate(() => (window as any).__INVOCATIONS
+      .filter((call: any) => call.cmd === 'dismiss_notifications').length)).toBe(1);
+
+    await page.evaluate(projectProjection => {
+      const fixture = (window as any).__INBOX_FIXTURE;
+      fixture.messages = {
+        'all|answered': fixture.messages,
+        'project:Hitl_MCP|null': projectProjection,
+      };
+    }, list({
+      messages: [message({ messageId: 'n-project', msgType: 'notification' })],
+      actionableNotificationIds: ['n-project'],
+      scopeKey: 'project:Hitl_MCP',
+      filter: 'needs_you',
+      defaultFilter: 'needs_you',
+    }));
+    await page.setViewportSize({ width: 1200, height: 800 });
+    await page.locator('.agent-row--project', { hasText: 'Hitl_MCP' }).click();
+    await expect(mark).toHaveAccessibleName('Bulk action in All messages…');
+    await expect(mark).toHaveAttribute('aria-disabled', 'true');
   });
 
   test('Needs you is the default when anything is pending', async ({ page }) => {
@@ -345,36 +637,96 @@ test.describe('Pane 2 — the filters (spec §7.3)', () => {
     await expect(page.locator('.message-title')).toHaveText(['closed', 'gone']);
   });
 
-  test('the Notifications filter selects by type, not by status', async ({ page }) => {
-    await open(page, { messages: FILTERED });
+  test('type combinations apply locally without another native projection', async ({ page }) => {
+    await open(page, only(
+      message({ messageId: 'n-1', msgType: 'notification', title: 'notification' }),
+      message({ messageId: 'q-1', title: 'question' }),
+      message({ messageId: 'p-1', msgType: 'plan_review', title: 'review' }),
+    ));
+    const before = await page.evaluate(() => (window as any).__INVOCATIONS.length);
 
-    await page.locator('.filter[data-filter="notifications"]').click();
+    await page.locator('.type-filter[data-type="notification"]').click();
+    await page.locator('.type-filter[data-type="plan_review"]').click();
 
-    await expect(page.locator('.message-row')).toHaveCount(1);
-    await expect(page.locator('.message-row')).toHaveAttribute('data-type', 'notification');
+    await expect(page.locator('.message-title')).toHaveText(['question']);
+    expect(await page.evaluate(() => (window as any).__INVOCATIONS.length)).toBe(before);
+    await expect(page.locator('.type-filter[data-type="question"]')).toBeDisabled();
   });
 
-  test('a filter with nothing under it names the filter rather than claiming an empty inbox', async ({ page }) => {
-    await open(page, {
-      messages: {
-        'all|null': list({
-          filter: 'needs_you',
-          defaultFilter: 'needs_you',
-          counts: { all: 3, needsYou: 1, answered: 2, notifications: 0 },
-          messages: [message({ messageId: 'q-1' })],
-        }),
-        'all|notifications': list({
-          filter: 'notifications',
-          defaultFilter: 'needs_you',
-          counts: { all: 3, needsYou: 1, answered: 2, notifications: 0 },
-          messages: [],
-        }),
-      },
-    });
+  test('an enabled combination with no rows names the combined filters', async ({ page }) => {
+    await open(page, only(message({ messageId: 'q-1' })));
 
-    await page.locator('.filter[data-filter="notifications"]').click();
+    await page.locator('.type-filter[data-type="question"]').click();
 
-    await expect(page.locator('.list-empty')).toHaveText('Nothing under Notifications.');
+    await expect(page.locator('.list-empty')).toHaveText('Nothing matches these filters.');
+  });
+
+  test('the type combination survives a status refresh', async ({ page }) => {
+    await open(page, { messages: FILTERED });
+    await page.locator('.type-filter[data-type="notification"]').click();
+
+    await page.locator('.filter[data-filter="answered"]').click();
+
+    await expect(page.locator('.type-filter[data-type="notification"]'))
+      .toHaveAttribute('aria-pressed', 'false');
+    await expect(page.locator('.message-title')).toHaveText(['closed']);
+  });
+
+  test('the type combination survives an agent-scope refresh', async ({ page }) => {
+    const messages = {
+      'all|null': list({
+        filter: 'needs_you',
+        messages: [
+          message({ messageId: 'n-all', msgType: 'notification', title: 'all notification' }),
+          message({ messageId: 'q-all', title: 'all question' }),
+        ],
+      }),
+      'session:Hitl_MCP · master · a3f2|null': list({
+        filter: 'needs_you',
+        messages: [
+          message({ messageId: 'n-session', msgType: 'notification', title: 'session notification' }),
+          message({ messageId: 'q-session', title: 'session question' }),
+        ],
+      }),
+    };
+    await open(page, { messages });
+    await page.locator('.type-filter[data-type="notification"]').click();
+
+    await page.locator('.agent-row--session').click();
+
+    await expect(page.locator('.type-filter[data-type="notification"]'))
+      .toHaveAttribute('aria-pressed', 'false');
+    await expect(page.locator('.message-title')).toHaveText(['session question']);
+  });
+
+  test('excluding a selected middle type selects the next surviving row without phone navigation', async ({ page }) => {
+    await page.setViewportSize({ width: 420, height: 800 });
+    await open(page, only(
+      message({ messageId: 'n-1', msgType: 'notification', title: 'before' }),
+      message({ messageId: 'q-1', title: 'selected' }),
+      message({ messageId: 'p-1', msgType: 'plan_review', title: 'after' }),
+    ));
+
+    await page.locator('.message-row[data-message-id="q-1"]').click();
+    await page.locator('#pane-back').click();
+    await page.locator('.type-filter[data-type="question"]').click();
+
+    await expect(page.locator('.message-row.is-selected')).toHaveAttribute('data-message-id', 'p-1');
+    await expect(page.locator('html')).toHaveAttribute('data-pane', 'list');
+    await expect(page.locator('.pane-list')).toBeVisible();
+  });
+
+  test('excluding a selected final type selects the previous surviving row', async ({ page }) => {
+    await open(page, only(
+      message({ messageId: 'n-1', msgType: 'notification', title: 'before' }),
+      message({ messageId: 'q-1', title: 'middle' }),
+      message({ messageId: 'p-1', msgType: 'plan_review', title: 'selected' }),
+    ));
+
+    await page.locator('.message-row[data-message-id="p-1"]').click();
+    await page.locator('.type-filter[data-type="plan_review"]').click();
+
+    await expect(page.locator('.message-row.is-selected')).toHaveAttribute('data-message-id', 'q-1');
   });
 
   test('changing agent re-defaults the filter rather than inheriting it', async ({ page }) => {

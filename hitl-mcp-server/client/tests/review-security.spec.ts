@@ -53,6 +53,20 @@ test.describe('Rendered-pane hardening', () => {
     await expect(page.locator('#rendered-content a[href^="javascript:"]')).toHaveCount(0);
     expect(await page.evaluate(() => (window as any).__jsUriFired)).toBeUndefined();
   });
+
+  test('source-map metadata stays integer-only and raw HTML cannot forge it', async ({ page }) => {
+    await page.goto(securityUrl);
+    const mapped = page.locator('#rendered-content [data-source-start]');
+    await expect(mapped).not.toHaveCount(0);
+    const metadata = await mapped.evaluateAll(elements => elements.map(element => ({
+      start: element.getAttribute('data-source-start'),
+      end: element.getAttribute('data-source-end'),
+      side: element.getAttribute('data-source-side'),
+    })));
+    expect(metadata.every(({ start, end, side }) =>
+      /^\d+$/.test(start || '') && /^\d+$/.test(end || '') && side === 'new')).toBe(true);
+    await expect(page.locator('#rendered-content [data-source-side="old"]')).toHaveCount(0);
+  });
 });
 
 test.describe('Remote images (F-7)', () => {
@@ -68,7 +82,7 @@ test.describe('Remote images (F-7)', () => {
 
     expect(requested).toEqual([]);
     // It renders as a click-to-load placeholder that shows the URL.
-    const ph = page.locator('.md-image-placeholder');
+    const ph = page.locator('#rendered-content .md-image-placeholder');
     await expect(ph).toHaveCount(1);
     await expect(ph).toContainText('https://attacker.example/pixel.png?d=leak');
     await expect(page.locator('#rendered-content img')).toHaveCount(0);
@@ -85,7 +99,7 @@ test.describe('Remote images (F-7)', () => {
     await page.waitForTimeout(300);
     expect(requested).toEqual([]);
 
-    await page.locator('.md-image-placeholder').click();
+    await page.locator('#rendered-content .md-image-placeholder').click();
     await expect.poll(() => requested.length).toBeGreaterThan(0);
   });
 });
@@ -123,5 +137,14 @@ test.describe('Vendored libraries (E-11 / F-8)', () => {
 
     await page.goto('/review-harness.html');
     expect(await page.evaluate(() => typeof (window as any).markdownit)).toBe('function');
+  });
+
+  test('JsDiff 9 is served locally and available before a review renders', async ({ page, request }) => {
+    const jsDiff = await request.get('/vendor/diff.min.js');
+    expect(jsDiff.status()).toBe(200);
+    expect((await jsDiff.text())).toContain('exports.diffArrays');
+
+    await page.goto('/review-harness.html');
+    expect(await page.evaluate(() => typeof (window as any).Diff?.diffArrays)).toBe('function');
   });
 });

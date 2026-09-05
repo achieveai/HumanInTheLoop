@@ -420,6 +420,31 @@ export function renderQuestion(container, detail, actions = {}) {
         return root.querySelector(`#other-${name}`)?.value.trim() ?? '';
     }
 
+    let steps = null;
+
+    function captureRecovery() {
+        return {
+            checked: [...root.querySelectorAll('input:checked')].map(input => ({
+                name: input.name, value: input.value,
+            })),
+            text: [...root.querySelectorAll('.other-input')].map(input => ({
+                id: input.id, value: input.value,
+            })),
+            step: steps?.current ?? 0,
+        };
+    }
+
+    function restoreRecovery(recovery) {
+        for (const input of root.querySelectorAll('input')) {
+            input.checked = recovery?.checked?.some(item => item.name === input.name && item.value === input.value) ?? false;
+        }
+        for (const item of recovery?.text ?? []) {
+            const input = root.querySelector(`#${CSS.escape(item.id)}`);
+            if (input) input.value = item.value;
+        }
+        steps?.go(recovery?.step ?? 0);
+    }
+
     /**
      * Publish, and keep the form locked afterwards (spec §9.3).
      *
@@ -493,7 +518,7 @@ export function renderQuestion(container, detail, actions = {}) {
     if (!isBatch) {
         footer.appendChild(actionButton('Submit Response', 'button-primary',
             actions.onSubmit ? collectAndSubmit : null));
-        return { locked: false, applyRow };
+        return { locked: false, applyRow, captureRecovery, restoreRecovery };
     }
 
     const previous = actionButton('Previous', 'button-secondary', () => steps.go(steps.current - 1));
@@ -507,7 +532,7 @@ export function renderQuestion(container, detail, actions = {}) {
     footer.appendChild(previous);
     footer.appendChild(next);
 
-    const steps = stepper(root, subQuestions.length);
+    steps = stepper(root, subQuestions.length);
     const paint = () => {
         previous.hidden = steps.current === 0;
         next.textContent = steps.current === steps.count - 1 ? 'Submit Response' : 'Next';
@@ -532,5 +557,5 @@ export function renderQuestion(container, detail, actions = {}) {
     root.querySelector('.stepper-body')?.addEventListener('input', paint);
     paint();
 
-    return { locked: false, steps, applyRow };
+    return { locked: false, steps, applyRow, captureRecovery, restoreRecovery };
 }

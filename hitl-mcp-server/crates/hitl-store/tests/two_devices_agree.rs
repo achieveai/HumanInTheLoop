@@ -76,6 +76,14 @@ fn dismiss(response_id: &str, subject: &str, from: &str) -> String {
     )
 }
 
+fn restore(response_id: &str, subject: &str, dismissal_id: &str, from: &str) -> String {
+    format!(
+        r#"{{"type":"restore_notification","messageId":"{response_id}",
+             "notificationId":"{subject}","dismissalId":"{dismissal_id}",
+             "restoredFrom":"{from}"}}"#
+    )
+}
+
 /// A device that ingested `log` in the order given.
 fn device(log: &[&Wire]) -> Store {
     let store = Store::open_in_memory().expect("a store opens");
@@ -266,6 +274,47 @@ fn two_devices_agree_on_who_dismissed_a_notification() {
             responder: Some("phone".to_string()),
             responded_at: Some(200),
             response_id: Some("resp-phone".to_string()),
+        },
+    );
+}
+
+#[test]
+fn two_devices_agree_that_a_targeted_restore_returns_a_notification_to_pending() {
+    agree_on(
+        vec![
+            wire("ntfy-1", 100, notification("n-1")),
+            wire(
+                "ntfy-restore",
+                150,
+                restore("restore-1", "n-1", "dismiss-phone", "laptop"),
+            ),
+            wire("ntfy-dismiss", 200, dismiss("dismiss-phone", "n-1", "phone")),
+        ],
+        "n-1",
+        &MessageState::default(),
+    );
+}
+
+#[test]
+fn two_devices_agree_that_an_untargeted_dismissal_still_owns_the_notification() {
+    agree_on(
+        vec![
+            wire("ntfy-1", 100, notification("n-1")),
+            wire("ntfy-2", 200, dismiss("dismiss-phone", "n-1", "phone")),
+            wire("ntfy-3", 210, dismiss("dismiss-laptop", "n-1", "laptop")),
+            wire(
+                "ntfy-4",
+                220,
+                restore("restore-1", "n-1", "dismiss-phone", "desktop"),
+            ),
+        ],
+        "n-1",
+        &MessageState {
+            status: hitl_store::Status::Dismissed,
+            verdict: None,
+            responder: Some("laptop".to_string()),
+            responded_at: Some(210),
+            response_id: Some("dismiss-laptop".to_string()),
         },
     );
 }

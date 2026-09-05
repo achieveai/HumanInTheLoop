@@ -73,12 +73,20 @@ impl InboxSink {
         queue: Queue,
         changed: OnChanged,
     ) -> Self {
+        let announced = store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last_seq()
+            .unwrap_or_else(|e| {
+                log::warn!("could not seed the Inbox redraw cursor: {e}");
+                0
+            });
         Self {
             store,
             changed,
             waiters,
             queue,
-            announced: AtomicI64::new(0),
+            announced: AtomicI64::new(announced),
         }
     }
 
@@ -274,6 +282,46 @@ mod tests {
 
         assert_eq!(h.store.lock().unwrap().count_events().unwrap(), 1);
         assert_eq!(h.redraws.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cached_events_already_in_the_store_are_not_announced_after_restart() {
+        let store: SharedStore = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let existing = event("ntfy-existing", 100);
+        let existing_body = question("q-existing");
+        store
+            .lock()
+            .unwrap()
+            .append(&existing, &existing_body)
+            .unwrap();
+
+        let redraws = Arc::new(AtomicI64::new(0));
+        let counter = redraws.clone();
+        let waiters = Arc::new(AckWaiters::default());
+        let (tx, _jobs) = tokio::sync::mpsc::unbounded_channel();
+        let pending = Arc::new(crate::capture::Pending::default());
+        let sink = InboxSink::new(
+            store,
+            waiters,
+            Queue::new(tx, pending),
+            Box::new(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+
+        sink.on_event(&existing, &existing_body);
+        assert_eq!(
+            redraws.load(Ordering::SeqCst),
+            0,
+            "restart replay is already visible"
+        );
+
+        sink.on_event(&event("ntfy-new", 200), &question("q-new"));
+        assert_eq!(
+            redraws.load(Ordering::SeqCst),
+            1,
+            "a genuinely new event still redraws"
+        );
     }
 
     #[test]

@@ -63,7 +63,9 @@ export function renderNotification(container, detail, actions = {}) {
     root.appendChild(bar);
     container.appendChild(root);
 
+    let currentRow = row;
     let settled = !isOpen(row);
+    let restoreInFlight = false;
     drawFooter();
 
     function drawFooter() {
@@ -73,11 +75,13 @@ export function renderNotification(container, detail, actions = {}) {
                 actions.onDismiss ? dismiss : null));
             return;
         }
-        // Already dismissed. The button is gone rather than disabled — there is
-        // nothing left to do — and the note says plainly that the message is
-        // kept, because a row that survives its own Dismiss otherwise reads as
-        // a bug.
         bar.appendChild(el('p', 'detail-retained', RETAINED));
+        if (currentRow.responseId) {
+            const button = actionButton('Mark unread', 'button-secondary',
+                actions.onRestore ? restore : null);
+            button.disabled ||= restoreInFlight;
+            bar.appendChild(button);
+        }
     }
 
     /**
@@ -101,17 +105,36 @@ export function renderNotification(container, detail, actions = {}) {
         }
     }
 
+    async function restore() {
+        if (!settled || restoreInFlight || !currentRow.responseId) return;
+        restoreInFlight = true;
+        error.hidden = true;
+        drawFooter();
+        try {
+            await actions.onRestore(currentRow);
+        } catch (err) {
+            restoreInFlight = false;
+            drawFooter();
+            error.textContent = `Could not mark this unread — nothing left this machine. ${err?.message ?? err}`;
+            error.hidden = false;
+        }
+    }
+
     /** The folded status moved while this pane was open (spec §9.3). */
     function applyRow(nextRow) {
+        currentRow = nextRow;
         root.dataset.status = nextRow.status;
         replaceHeader(root, { ...detail, row: nextRow }, KICKER);
-        if (isOpen(nextRow)) return;
-
-        settled = true;
+        settled = !isOpen(nextRow);
+        restoreInFlight = false;
         error.hidden = true;
         removeNotice(root, 'orphan');
+        removeNotice(root, 'answered-elsewhere');
+        removeNotice(root, 'closed-elsewhere');
         drawFooter();
-        showNotice(root, raceNotice(nextRow, actions.myResponseId?.(nextRow.messageId) ?? null));
+        if (settled) {
+            showNotice(root, raceNotice(nextRow, actions.myResponseId?.(nextRow.messageId) ?? null));
+        }
     }
 
     return { applyRow };

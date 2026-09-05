@@ -166,6 +166,40 @@ mod tests {
     }
 
     #[test]
+    fn restoring_the_winning_dismissal_clears_projected_attribution() {
+        let s = Store::open_in_memory().unwrap();
+        s.append(
+            &ntfy("n-1", 1),
+            r#"{"type":"notification","messageId":"m-1","title":"done"}"#,
+        )
+        .unwrap();
+        s.append(
+            &ntfy("n-2", 5),
+            r#"{"type":"dismiss_notification","messageId":"dismiss-1",
+                "notificationId":"m-1","dismissedFrom":"phone"}"#,
+        )
+        .unwrap();
+        s.append(
+            &ntfy("n-3", 6),
+            r#"{"type":"restore_notification","messageId":"restore-1",
+                "notificationId":"m-1","dismissalId":"dismiss-1","restoredFrom":"laptop"}"#,
+        )
+        .unwrap();
+
+        s.project_subject("m-1").unwrap();
+
+        let projection: (String, Option<String>, Option<i64>) = s
+            .conn
+            .query_row(
+                "SELECT status, responder, responded_at FROM messages WHERE message_id = 'm-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(projection, ("pending".to_string(), None, None));
+    }
+
+    #[test]
     fn a_response_whose_request_fell_out_of_the_cache_is_not_projected() {
         // ntfy's window is a sliding 12 h. A row with no request event behind
         // it would have no honest title, so it gets none at all.

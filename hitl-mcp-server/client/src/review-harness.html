@@ -6,6 +6,7 @@
     <title>HITL Plan Review — Test Harness</title>
     <link rel="stylesheet" href="review.css">
     <script src="vendor/markdown-it.min.js"></script>
+    <script src="vendor/diff.min.js"></script>
     <!-- Mock window.__TAURI__ so nothing here needs a running Rust client.
          Mirrors test-harness.html:10-30. -->
     <script>
@@ -112,6 +113,160 @@
             return msg;
         }
 
+        function eofNewlineOnlyFixture() {
+            const msg = planFixture(['# Title', 'Paragraph.'], []);
+            msg.body.content = '# Title\nParagraph.\n';
+            msg.body.diff = [
+                '--- plan.md\tprevious',
+                '+++ plan.md\tcurrent',
+                '@@ -1,2 +1,2 @@',
+                ' # Title',
+                '-Paragraph.',
+                '\\ No newline at end of file',
+                '+Paragraph.',
+            ].join('\n');
+            return msg;
+        }
+
+        function blankLineOnlyFixture() {
+            const msg = planFixture(['# Title', '', 'Paragraph.'], []);
+            msg.body.diff = [
+                '--- plan.md\tprevious',
+                '+++ plan.md\tcurrent',
+                '@@ -1,2 +1,3 @@',
+                ' # Title',
+                '+',
+                ' Paragraph.',
+            ].join('\n');
+            return msg;
+        }
+
+        function addedOnlyFixture() {
+            const lines = ['# Plan', '## New section only in the current plan', '## Existing section'];
+            return planFixture(lines, [
+                { type: ' ', text: lines[0] },
+                { type: '+', text: lines[1] },
+                { type: ' ', text: lines[2] },
+            ]);
+        }
+
+        // Task 10: complete Markdown blocks whose rendered selections must map
+        // back to their 1-based, inclusive raw-source line ranges. Repeated
+        // words and emoji make text-search / UTF-16-offset implementations
+        // visibly choose the wrong source block.
+        function mappedBlocksFixture() {
+            const lines = [
+                '# ATX heading',
+                '',
+                'Setext heading',
+                '==============',
+                '',
+                'Duplicate text 😀 starts this multiline paragraph',
+                'and duplicate text finishes it with a [safe link](#safe-target).',
+                '',
+                '> Quoted duplicate text',
+                '>',
+                '> - Nested duplicate text',
+                '>   - Deep emoji 😀 item',
+                '',
+                '| Name | Value |',
+                '| --- | --- |',
+                '| duplicate text | 😀 |',
+                '',
+                '```js',
+                "const emoji = '😀';",
+                '```',
+                '',
+                '## Safe target',
+                '',
+                '[Jump to target](#safe-target)',
+                '',
+                'Same 😀 duplicate.',
+                '',
+                'Same 😀 duplicate.',
+            ];
+            return planFixture(lines, lines.map(text => ({ type: ' ', text })));
+        }
+
+        function partialMappedBlocksFixture() {
+            const msg = mappedBlocksFixture();
+            msg.body.diff = [
+                '--- plan.md\tprevious',
+                '+++ plan.md\tcurrent',
+                '@@ -1,1 +1,1 @@',
+                ' # ATX heading',
+            ].join('\n');
+            return msg;
+        }
+
+        function sourceOnlyChangesFixture() {
+            const newLines = [
+                '# Silent source changes',
+                '',
+                '[same link](https://new.example/path)',
+                '',
+                '_same emphasis_',
+                '',
+                '* same list item',
+                '',
+                '| Name | Value |',
+                '| ---: | :--- |',
+                '| same | cells |',
+                '',
+                '<div class="new">same raw HTML</div>',
+                '',
+                '[same reference][target]',
+                '',
+                '[target]: https://new.example/reference',
+            ];
+            const ops = [
+                { type: ' ', text: '# Silent source changes' },
+                { type: ' ', text: '' },
+                { type: '-', text: '[same link](https://old.example/path)' },
+                { type: '+', text: newLines[2] },
+                { type: ' ', text: '' },
+                { type: '-', text: '*same emphasis*' },
+                { type: '+', text: newLines[4] },
+                { type: ' ', text: '' },
+                { type: '-', text: '- same list item' },
+                { type: '+', text: newLines[6] },
+                { type: ' ', text: '' },
+                { type: ' ', text: '| Name | Value |' },
+                { type: '-', text: '| :--- | ---: |' },
+                { type: '+', text: newLines[9] },
+                { type: ' ', text: '| same | cells |' },
+                { type: ' ', text: '' },
+                { type: '-', text: '<div class="old">same raw HTML</div>' },
+                { type: '+', text: newLines[12] },
+                { type: ' ', text: '' },
+                { type: ' ', text: '[same reference][target]' },
+                { type: ' ', text: '' },
+                { type: '-', text: '[target]: https://old.example/reference' },
+                { type: '+', text: newLines[16] },
+            ];
+            return planFixture(newLines, ops);
+        }
+
+        function longBlocksFixture() {
+            const newLines = [];
+            const ops = [];
+            for (let i = 1; i <= 24; i++) {
+                const current = `## Section ${i}`;
+                newLines.push(current, '', `Paragraph ${i}.`);
+                if (i === 13) {
+                    ops.push({ type: '-', text: '## Original section 13' }, { type: '+', text: current });
+                } else {
+                    ops.push({ type: ' ', text: current });
+                }
+                ops.push({ type: ' ', text: '' }, { type: ' ', text: `Paragraph ${i}.` });
+                if (i < 24) {
+                    newLines.push('');
+                    ops.push({ type: ' ', text: '' });
+                }
+            }
+            return planFixture(newLines, ops);
+        }
+
         // F-5/F-6/F-7: every UI-spoof rung in one plan.
         function securityFixture() {
             const lines = [
@@ -156,13 +311,41 @@
             return msg;
         }
 
+        function formattedPerformanceFixture(lineCount, allChanged = false) {
+            const newLines = [];
+            const ops = [];
+            for (let line = 1; line <= lineCount; line++) {
+                const current = line % 4 === 1 ? `## Section ${Math.ceil(line / 4)}`
+                    : line % 4 === 2 ? '' : `Plan prose on line ${line}.`;
+                newLines.push(current);
+                if (allChanged && current) {
+                    ops.push({ type: '-', text: `Previous prose on line ${line}.` });
+                    ops.push({ type: '+', text: current });
+                } else {
+                    ops.push({ type: ' ', text: current });
+                }
+            }
+            return planFixture(newLines, ops);
+        }
+
         const fixtures = {
             default: defaultFixture,
             'literal-backslash-n': literalBackslashNFixture,
             crlf: crlfFixture,
             'no-trailing-newline': noTrailingNewlineFixture,
+            'eof-newline-only': eofNewlineOnlyFixture,
+            'blank-line-only': blankLineOnlyFixture,
+            'added-only': addedOnlyFixture,
+            'mapped-blocks': mappedBlocksFixture,
+            'partial-mapped-blocks': partialMappedBlocksFixture,
+            'source-only-changes': sourceOnlyChangesFixture,
+            'long-blocks': longBlocksFixture,
             security: securityFixture,
             large: largeFixture,
+            'formatted-1k': () => formattedPerformanceFixture(1_000),
+            'formatted-10k': () => formattedPerformanceFixture(10_000),
+            'formatted-all-changed': () => formattedPerformanceFixture(1_000, true),
+            'formatted-all-changed-10k': () => formattedPerformanceFixture(10_000, true),
             'sender-badge': senderBadgeFixture,
         };
 
@@ -197,6 +380,11 @@
             window.__fixture = message;
 
             const controller = renderPlanReview(container, message, {
+                formattedDiffBounds: params.get('diffFallback') === '1'
+                    ? { maxEditLength: 0, timeout: 1 }
+                    : params.has('diffMax')
+                        ? { maxEditLength: Number(params.get('diffMax')), timeout: 50 }
+                        : undefined,
                 onSubmit: async (payload) => {
                     console.log('[TEST] onSubmit:', payload);
                     if (failSubmit) throw new Error('ntfy publish failed (simulated)');

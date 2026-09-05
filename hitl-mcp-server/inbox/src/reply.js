@@ -178,6 +178,71 @@ export function orphanNotice(row) {
     };
 }
 
+function keyedOutcomes(outcomes, keyOf) {
+    const keyed = new Map();
+    if (!Array.isArray(outcomes)) return keyed;
+    for (const outcome of outcomes) {
+        const key = keyOf(outcome);
+        if (!key) continue;
+        const bucket = keyed.get(key) ?? [];
+        bucket.push(outcome);
+        keyed.set(key, bucket);
+    }
+    return keyed;
+}
+
+function outcomeFailure(target, matches, successStatus) {
+    if (matches.length === 0) return { ...target, error: 'missing outcome' };
+    if (matches.length > 1) return { ...target, error: 'duplicate outcome' };
+    const [outcome] = matches;
+    if (outcome.status === 'failed') {
+        return { ...target, error: String(outcome.error || 'native command failed') };
+    }
+    if (outcome.status !== successStatus) {
+        return { ...target, error: `unknown outcome status: ${String(outcome.status)}` };
+    }
+    if (!outcome.responseId) return { ...target, error: 'missing response ID' };
+    return null;
+}
+
+function normalizeDismissOutcomes(notificationIds, outcomes) {
+    const keyed = keyedOutcomes(outcomes, outcome => outcome?.notificationId);
+    const successes = [];
+    const failures = [];
+    for (const notificationId of notificationIds) {
+        const matches = keyed.get(notificationId) ?? [];
+        const failure = outcomeFailure({ notificationId }, matches, 'dismissed');
+        if (failure) {
+            failures.push(failure);
+        } else {
+            successes.push({ notificationId, dismissalId: matches[0].responseId });
+        }
+    }
+    return { successes, failures };
+}
+
+function restoreKey(value) {
+    return value?.notificationId && value?.dismissalId
+        ? `${value.notificationId}\u0000${value.dismissalId}`
+        : null;
+}
+
+function normalizeRestoreOutcomes(restorations, outcomes) {
+    const keyed = keyedOutcomes(outcomes, restoreKey);
+    const successes = [];
+    const failures = [];
+    for (const restoration of restorations) {
+        const matches = keyed.get(restoreKey(restoration)) ?? [];
+        const failure = outcomeFailure(restoration, matches, 'restored');
+        if (failure) {
+            failures.push(failure);
+        } else {
+            successes.push({ ...restoration, responseId: matches[0].responseId });
+        }
+    }
+    return { successes, failures };
+}
+
 /**
  * The handlers pane 3 replies through.
  *
@@ -207,6 +272,18 @@ export function createReplyActions({ invoke }) {
             subAnswers: subAnswers ?? null,
         }).then(id => remember(row.messageId, id));
 
+    const dismissMany = notificationIds => invoke('dismiss_notifications', { notificationIds })
+        .then(outcomes => {
+            const result = normalizeDismissOutcomes(notificationIds, outcomes);
+            for (const success of result.successes) {
+                remember(success.notificationId, success.dismissalId);
+            }
+            return result;
+        });
+
+    const restoreMany = restorations => invoke('restore_notifications', { restorations })
+        .then(outcomes => normalizeRestoreOutcomes(restorations, outcomes));
+
     return {
         /** What this device published for `messageId`, or `null`. */
         myResponseId: messageId => mine.get(messageId) ?? null,
@@ -223,6 +300,19 @@ export function createReplyActions({ invoke }) {
         onDismiss: row =>
             invoke('dismiss_notification', { notificationId: row.messageId })
                 .then(id => remember(row.messageId, id)),
+
+        onDismissMany: dismissMany,
+
+        onRestoreMany: restoreMany,
+
+        onRestore: row => {
+            if (!row.responseId) return Promise.reject(new Error('This notification has no dismissal to restore.'));
+            return restoreMany([{ notificationId: row.messageId, dismissalId: row.responseId }])
+                .then(result => {
+                    if (result.successes.length === 1) return result.successes[0].responseId;
+                    throw new Error(result.failures[0]?.error ?? 'Could not mark this notification unread.');
+                });
+        },
 
         /**
          * Returns `{status, responseId, reason}` — `review.js` decides what each

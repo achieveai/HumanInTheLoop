@@ -103,12 +103,17 @@ function samplePlan(overrides: Record<string, unknown> = {}) {
   };
 }
 
+async function openSource(page: Page) {
+  await page.getByRole('tab', { name: 'Source' }).click();
+}
+
 test.describe('review.html shell', () => {
   test('C-10: the payload comes from take_window_payload, not the URL', async ({ page }) => {
     await stubTauri(page, { payload: samplePlan() });
     await page.goto('/review.html');
 
-    await expect(page.locator('#review-pane-diff')).toBeVisible();
+    await expect(page.locator('#review-pane-diff')).toBeHidden();
+    await expect(page.getByRole('tab', { name: 'Changes' })).toHaveAttribute('aria-selected', 'true');
     await expect(page.locator('.review-path')).toHaveText('docs/plan.md');
     expect(page.url()).not.toContain('Step one');
 
@@ -122,6 +127,7 @@ test.describe('review.html shell', () => {
     await stubTauri(page, { payload: samplePlan() });
     await page.goto('/review.html');
 
+    await openSource(page);
     await page.locator('.diff-row[data-side="new"][data-line="3"]').click();
     await page.locator('#comment-input').fill('this step is wrong');
     await page.locator('#comment-add').click();
@@ -167,6 +173,7 @@ test.describe('review.html shell', () => {
     await stubTauri(page, { payload: samplePlan(), failSubmit: true });
     await page.goto('/review.html');
 
+    await openSource(page);
     await page.locator('.diff-row[data-side="new"][data-line="4"]').click();
     await page.locator('#comment-input').fill('keep me');
     await page.locator('#comment-add').click();
@@ -181,6 +188,7 @@ test.describe('review.html shell', () => {
     await stubTauri(page, { payload: samplePlan() });
     await page.goto('/review.html');
 
+    await openSource(page);
     await page.locator('.diff-row[data-side="new"][data-line="3"]').click();
     await page.locator('#comment-input').fill('draft survives');
     await page.locator('#comment-add').click();
@@ -196,6 +204,7 @@ test.describe('review.html shell', () => {
     await stubTauri(page, { payload: samplePlan() });
     await page.goto('/review.html');
 
+    await openSource(page);
     await page.locator('.diff-row[data-side="new"][data-line="3"]').click();
     await page.locator('#comment-input').fill('unsent');
     await page.locator('#comment-add').click();
@@ -215,6 +224,7 @@ test.describe('review.html shell', () => {
     await stubTauri(page, { payload: samplePlan(), failDraftSave: true });
     await page.goto('/review.html');
 
+    await openSource(page);
     await page.locator('.diff-row[data-side="new"][data-line="3"]').click();
     await page.locator('#comment-input').fill('unsent');
     await page.locator('#comment-add').click();
@@ -244,7 +254,7 @@ test.describe('review.html shell', () => {
     });
     await page.goto('/review.html');
 
-    await page.locator('.md-image-placeholder').click();
+    await page.locator('#rendered-content .md-image-placeholder').click();
     const call = await page.evaluate(() =>
       (window as any).__calls.find((c: any) => c.cmd === 'open_external'));
     expect(call.args).toEqual({ url: 'https://attacker.example/pixel.png' });
@@ -265,7 +275,7 @@ test.describe('review.html shell', () => {
     });
     await page.goto('/review.html');
 
-    await page.locator('.md-image-placeholder').click();
+    await page.locator('#rendered-content .md-image-placeholder').click();
     // The load is blocked, so the URL surfaces as text — never silently nothing.
     await expect(page.locator('.md-image-blocked')).toContainText('https://attacker.example/pixel.png');
   });
@@ -329,13 +339,14 @@ test.describe('review.html shell', () => {
 
     await page.reload();
 
-    await expect(page.locator('#review-pane-diff')).toBeVisible();
+    await expect(page.locator('#review-pane-diff')).toBeHidden();
     await expect(page.locator('.review-path')).toHaveText('docs/plan.md');
     await expect(page.locator('.review-panel[data-state="error"]')).toHaveCount(0);
     // The second read is the whole point: it happened, and it returned content.
     expect(await page.evaluate(() => (window as any).__payloadReads())).toBe(2);
 
     // Still fully usable, not just rendered.
+    await openSource(page);
     await page.locator('.diff-row[data-side="new"][data-line="3"]').click();
     await page.locator('#comment-input').fill('works after a reload');
     await page.locator('#comment-add').click();
@@ -467,6 +478,7 @@ test.describe('Draft restore and clear', () => {
     await page.goto('/review.html');
 
     await page.locator('#overall-feedback').fill('half-finished thought');
+    await openSource(page);
     await page.locator('.diff-row[data-side="new"][data-line="3"]').click();
     await page.locator('#comment-input').fill('come back to this');
     await page.locator('#comment-add').click();
@@ -486,6 +498,7 @@ test.describe('Draft restore and clear', () => {
     // Same hash, so nothing was dropped and there is nothing to warn about.
     await expect(page.locator('#review-error')).toBeHidden();
     // And the anchor still points where it did.
+    await openSource(page);
     await expect(page.locator('.diff-row[data-side="new"][data-line="3"]'))
       .toHaveAttribute('aria-describedby', /comment-/);
   });

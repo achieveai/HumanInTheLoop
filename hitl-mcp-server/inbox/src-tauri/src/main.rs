@@ -94,10 +94,20 @@ fn with_events<T>(
     Ok(f(&events, now_secs()))
 }
 
+async fn with_events_async<T, F>(store: SharedStore, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&[Event], u64) -> T + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(move || with_events(&store, f))
+        .await
+        .map_err(|e| format!("the Inbox projection task did not run: {e}"))?
+}
+
 /// Pane 1 — the project → session tree (spec §6).
 #[tauri::command]
-fn list_sessions(store: tauri::State<'_, SharedStore>) -> Result<SessionTree, String> {
-    with_events(&store, view::build_tree)
+async fn list_sessions(store: tauri::State<'_, SharedStore>) -> Result<SessionTree, String> {
+    with_events_async(store.inner().clone(), view::build_tree).await
 }
 
 /// Pane 2 — the message list (spec §7).
@@ -107,14 +117,15 @@ fn list_sessions(store: tauri::State<'_, SharedStore>) -> Result<SessionTree, St
 /// one; it passes back what the tree gave it. `filter` of `null` means "you
 /// pick", and resolves to `needs_you` when anything in scope is pending.
 #[tauri::command]
-fn list_messages(
+async fn list_messages(
     store: tauri::State<'_, SharedStore>,
     session_key: Option<String>,
     filter: Option<String>,
 ) -> Result<MessageList, String> {
-    with_events(&store, |events, now| {
+    with_events_async(store.inner().clone(), move |events, now| {
         view::build_list(events, session_key.as_deref(), filter.as_deref(), now)
     })
+    .await
 }
 
 /// Pane 3 — one message, whole (spec §8).
@@ -124,13 +135,14 @@ fn list_messages(
 /// it. Folding the payload into every row would put a plan body behind every
 /// list repaint.
 #[tauri::command]
-fn get_message(
+async fn get_message(
     store: tauri::State<'_, SharedStore>,
     message_id: String,
 ) -> Result<Option<MessageDetail>, String> {
-    with_events(&store, |events, now| {
+    with_events_async(store.inner().clone(), move |events, now| {
         detail::build_detail(events, &message_id, now)
     })
+    .await
 }
 
 /// The plan body behind a `plan_review`, fetched from wherever it lives.
@@ -310,6 +322,8 @@ fn main() {
             get_body,
             reply::submit_answer,
             reply::dismiss_notification,
+            reply::dismiss_notifications,
+            reply::restore_notifications,
             reply::submit_plan_review,
             reply::save_review_draft,
             reply::load_review_draft,
@@ -404,5 +418,17 @@ mod tests {
             .map(|e| e.ntfy_id.clone())
             .collect();
         assert_eq!(ids, vec!["ntfy-1", "ntfy-2", "ntfy-3"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn view_projection_work_runs_off_the_command_calling_thread() {
+        let store: SharedStore = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let calling_thread = std::thread::current().id();
+
+        let projection_thread = with_events_async(store, |_, _| std::thread::current().id())
+            .await
+            .unwrap();
+
+        assert_ne!(projection_thread, calling_thread);
     }
 }

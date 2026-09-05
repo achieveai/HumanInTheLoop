@@ -8,7 +8,8 @@ use crate::payload::PayloadError;
 use crate::types::{
     AnswerMessage, AttachmentRef, CancelReviewMessage, ChunkMessage, DismissNotificationMessage,
     HitlConfig, MessageEnvelope, NotificationMessage, PlanReviewAckMessage, PlanReviewMessage,
-    PlanReviewResponseMessage, QuestionMessage, SenderIdentityMessage, SUPPORTED_PROTOCOL_VERSION,
+    PlanReviewResponseMessage, QuestionMessage, RestoreNotificationMessage, SenderIdentityMessage,
+    SUPPORTED_PROTOCOL_VERSION,
 };
 
 /// Try to decrypt a raw message string.
@@ -244,7 +245,7 @@ pub fn version_verdict(version: u32, msg_type: &str) -> VersionVerdict {
 
     match msg_type {
         "answer" | "plan_review_response" | "plan_review_ack" | "cancel_review"
-        | "dismiss_notification" | "chunk" => VersionVerdict::Ignore,
+        | "dismiss_notification" | "restore_notification" | "chunk" => VersionVerdict::Ignore,
         _ => VersionVerdict::ShowUpgradePanel,
     }
 }
@@ -370,6 +371,22 @@ pub async fn dispatch_message(
                     sink.on_dismiss_notification(&dismiss);
                 }
                 Err(e) => log::error!("dismiss_notification {} parse failed: {}", env.message_id, e),
+            }
+        }
+
+        "restore_notification" => {
+            if matches!(origin, Origin::Cache { .. }) {
+                return;
+            }
+            match serde_json::from_str::<RestoreNotificationMessage>(raw) {
+                Ok(restore) => {
+                    log::info!(
+                        "Received restore for notification {} dismissal {}: from {}",
+                        restore.notification_id, restore.dismissal_id, restore.restored_from
+                    );
+                    sink.on_restore_notification(&restore);
+                }
+                Err(e) => log::error!("restore_notification {} parse failed: {}", env.message_id, e),
             }
         }
 
@@ -677,6 +694,7 @@ mod tests {
             "plan_review_ack",
             "cancel_review",
             "dismiss_notification",
+            "restore_notification",
             "chunk",
         ] {
             assert_eq!(
@@ -755,6 +773,58 @@ mod dispatch_tests {
         dispatch_message(&sink, &cfg(), body, false, None, Origin::Live { seen: &mut seen }).await;
         dispatch_message(&sink, &cfg(), body, false, None, Origin::Live { seen: &mut seen }).await;
         assert_eq!(sink.calls().len(), 1, "SeenIds must suppress the replay");
+    }
+
+    #[tokio::test]
+    async fn a_restore_notification_reaches_the_sink_with_its_exact_dismissal() {
+        let sink = RecordingSink::default();
+        let body = r#"{"type":"restore_notification","messageId":"restore-1","timestamp":1,
+                       "notificationId":"n-1","dismissalId":"dismiss-1","restoredFrom":"phone"}"#;
+        let mut seen = SeenIds::default();
+
+        dispatch_message(&sink, &cfg(), body, false, None, Origin::Live { seen: &mut seen }).await;
+
+        assert_eq!(
+            sink.calls(),
+            vec!["RestoreNotification(\"n-1\", \"dismiss-1\")"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cached_restore_notification_has_no_ui_side_effect() {
+        let sink = RecordingSink::default();
+        let body = r#"{"type":"restore_notification","messageId":"restore-1","timestamp":1,
+                       "notificationId":"n-1","dismissalId":"dismiss-1","restoredFrom":"phone"}"#;
+        let answered = HashSet::new();
+        let mut seen = SeenIds::default();
+
+        dispatch_message(
+            &sink,
+            &cfg(),
+            body,
+            false,
+            None,
+            Origin::Cache { answered_ids: &answered, seen: &mut seen },
+        )
+        .await;
+
+        assert!(sink.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_too_new_restore_is_ignored_as_a_settlement() {
+        let sink = RecordingSink::default();
+        let v = SUPPORTED_PROTOCOL_VERSION + 1;
+        let body = format!(
+            r#"{{"type":"restore_notification","messageId":"restore-1","timestamp":1,
+                 "protocolVersion":{v},"notificationId":"n-1","dismissalId":"dismiss-1",
+                 "restoredFrom":"phone"}}"#
+        );
+        let mut seen = SeenIds::default();
+
+        dispatch_message(&sink, &cfg(), &body, false, None, Origin::Live { seen: &mut seen }).await;
+
+        assert!(sink.calls().is_empty(), "a settlement must not open an upgrade panel");
     }
 
     #[tokio::test]

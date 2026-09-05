@@ -1706,6 +1706,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hostname",
+ "httpdate",
  "log",
  "reqwest 0.12.28",
  "serde",

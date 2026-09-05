@@ -35,6 +35,7 @@ body {
 .pane {
     overflow-y: auto;
     min-width: 0;
+    min-height: 0;
 }
 
 .pane-agents {
@@ -193,11 +194,141 @@ body {
     opacity: 0.75;
 }
 
+.type-filter-bar {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 6px 8px;
+    border-bottom: 1px solid #e2e8f0;
+    flex-shrink: 0;
+}
+
+.type-filter-set {
+    display: flex;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+}
+
+.list-actions {
+    display: flex;
+    flex: 1 0 auto;
+    justify-content: flex-end;
+    margin-left: auto;
+    min-width: 0;
+}
+
+@media (max-width: 599px) {
+    .list-actions {
+        flex-basis: 100%;
+    }
+}
+
+.mark-all-read,
+.undo-mark-all-read,
+.dismiss-bulk-status {
+    background: transparent;
+    border: 0;
+    border-radius: 5px;
+    color: #4c51bf;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 8px;
+    white-space: nowrap;
+}
+
+.mark-all-read:hover,
+.undo-mark-all-read:hover,
+.dismiss-bulk-status:hover {
+    background: #edf2f7;
+}
+
+.mark-all-read[aria-disabled='true'],
+.undo-mark-all-read[aria-disabled='true'] {
+    cursor: progress;
+    opacity: 0.65;
+}
+
+.mark-all-read:focus-visible,
+.undo-mark-all-read:focus-visible,
+.dismiss-bulk-status:focus-visible {
+    outline: 2px solid #4c51bf;
+    outline-offset: 2px;
+}
+
+.bulk-status {
+    align-items: center;
+    background: #ebf8ff;
+    border-bottom: 1px solid #bee3f8;
+    color: #2b6cb0;
+    display: flex;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    font-size: 12px;
+    gap: 4px;
+    padding: 6px 8px;
+}
+
+.bulk-status-message {
+    flex: 1 1 180px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.bulk-status[hidden],
+.mark-all-read[hidden] {
+    display: none;
+}
+
+.visually-hidden {
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    height: 1px;
+    overflow: hidden;
+    position: absolute;
+    white-space: nowrap;
+    width: 1px;
+}
+
+.type-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid #cbd5e0;
+    background: white;
+    color: #4a5568;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.type-filter:hover:not(:disabled) {
+    background: #edf2f7;
+}
+
+.type-filter[aria-pressed='true'] {
+    background: #667eea;
+    border-color: #667eea;
+    color: white;
+}
+
+.type-filter:disabled {
+    cursor: not-allowed;
+    opacity: 0.7;
+}
+
 /* --- Pane 2: rows --- */
 
 .message-list {
     flex: 1;
     overflow-y: auto;
+    overflow-anchor: none;
 }
 
 .message-row {
@@ -206,6 +337,8 @@ body {
     padding: 10px 12px;
     border-bottom: 1px solid #edf2f7;
     cursor: pointer;
+    content-visibility: auto;
+    contain-intrinsic-size: auto 38px;
 }
 
 .message-row:hover {
@@ -355,6 +488,7 @@ body {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    overflow-anchor: none;
     padding: 20px 24px;
 }
 
@@ -523,6 +657,45 @@ body {
     font-size: 12px;
     margin-top: 12px;
     padding: 8px 10px;
+}
+
+/* One transport-failure surface for every reply renderer. */
+.action-error-dialog {
+    border: 0;
+    border-radius: 10px;
+    box-shadow: 0 18px 48px rgb(45 55 72 / 28%);
+    color: #2d3748;
+    max-width: min(420px, calc(100vw - 32px));
+    padding: 0;
+}
+
+.action-error-dialog::backdrop {
+    background: rgb(26 32 44 / 45%);
+}
+
+.action-error-dialog form {
+    display: grid;
+    gap: 14px;
+    padding: 22px;
+}
+
+.action-error-dialog h2 {
+    font-size: 18px;
+}
+
+.action-error-message {
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+
+.action-error-dialog .button {
+    background: #4c51bf;
+    border: 0;
+    border-radius: 6px;
+    color: white;
+    cursor: pointer;
+    justify-self: end;
+    padding: 8px 16px;
 }
 
 /* A publish is in flight (spec §9.3). Deliberately quieter than an error and
@@ -872,6 +1045,10 @@ body {
     display: none;
 }
 
+[data-layout='phone'] .inbox-bar #reading-pane-toggle {
+    display: none;
+}
+
 /* --- Tablet: list + detail, agents on demand --- */
 
 [data-layout='tablet'] .inbox {
@@ -1014,8 +1191,11 @@ body {
 }
 
 .pane-handle:hover,
-.pane-handle[data-dragging='true'] {
+.pane-handle[data-dragging='true'],
+.pane-handle:focus-visible {
     background: rgba(66, 153, 225, 0.25);
+    outline: 2px solid #2b6cb0;
+    outline-offset: -2px;
 }
 
 /* A handle appears only where there is a boundary to drag. Resizing is a wide
@@ -1025,4 +1205,85 @@ body {
 [data-layout='wide'][data-collapse='0'] #pane-handle-2,
 [data-layout='wide'][data-collapse='1'] #pane-handle-2 {
     display: block;
+}
+
+/* --- Reading pane below the list ---------------------------------------
+ *
+ * Orientation is a hand-set preference, independent of responsive layout
+ * and collapse. The existing panes keep their identities and scroll owners;
+ * only their grid placement and the second divider's axis change.
+ */
+
+[data-layout='wide'][data-reading-pane='bottom'][data-collapse='0'] .inbox {
+    grid-template-columns: var(--pane-1-width, 260px) minmax(340px, 1fr);
+    grid-template-rows: var(--pane-list-height, minmax(180px, 1fr)) minmax(220px, 1fr);
+}
+
+[data-layout='wide'][data-reading-pane='bottom'][data-collapse='0'] .pane-agents {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+}
+
+[data-layout='wide'][data-reading-pane='bottom'][data-collapse='0'] .pane-list {
+    grid-column: 2;
+    grid-row: 1;
+}
+
+[data-layout='wide'][data-reading-pane='bottom'][data-collapse='0'] .pane-detail {
+    grid-column: 2;
+    grid-row: 2;
+}
+
+[data-layout='wide'][data-reading-pane='bottom'][data-collapse='1'] .inbox,
+[data-layout='tablet'][data-reading-pane='bottom']:not([data-collapse='2']) .inbox {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: var(--pane-list-height, minmax(180px, 1fr)) minmax(220px, 1fr);
+}
+
+[data-layout='wide'][data-reading-pane='bottom'][data-collapse='1'] .pane-list,
+[data-layout='tablet'][data-reading-pane='bottom']:not([data-collapse='2']) .pane-list {
+    grid-column: 1;
+    grid-row: 1;
+}
+
+[data-layout='wide'][data-reading-pane='bottom'][data-collapse='1'] .pane-detail,
+[data-layout='tablet'][data-reading-pane='bottom']:not([data-collapse='2']) .pane-detail {
+    grid-column: 1;
+    grid-row: 2;
+}
+
+[data-layout='wide'][data-reading-pane='bottom'][data-collapse='2'] .inbox,
+[data-layout='tablet'][data-reading-pane='bottom'][data-collapse='2'] .inbox {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+}
+
+[data-layout='wide'][data-reading-pane='bottom'][data-collapse='2'] .pane-detail,
+[data-layout='tablet'][data-reading-pane='bottom'][data-collapse='2'] .pane-detail {
+    grid-column: 1;
+    grid-row: 1;
+}
+
+[data-reading-pane='bottom'] .pane-list {
+    border-bottom: 1px solid #e2e8f0;
+    border-right: 0;
+}
+
+[data-reading-pane='bottom'] #pane-handle-2 {
+    bottom: auto;
+    cursor: row-resize;
+    height: 10px;
+    right: 0;
+    transform: translateY(-5px);
+    width: auto;
+}
+
+[data-layout='wide'][data-reading-pane='bottom'][data-collapse='0'] #pane-handle-2 {
+    left: var(--pane-1-width, 260px);
+}
+
+[data-layout='wide'][data-reading-pane='bottom'][data-collapse='1'] #pane-handle-2,
+[data-layout='tablet'][data-reading-pane='bottom']:not([data-collapse='2']) #pane-handle-2 {
+    display: block;
+    left: 0;
 }

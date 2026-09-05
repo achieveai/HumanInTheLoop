@@ -62,7 +62,7 @@ pub fn subject_of(msg_type: &str, payload: &Value) -> Option<String> {
     let key = match msg_type {
         "answer" => "questionId",
         "plan_review_response" | "plan_review_ack" | "cancel_review" => "reviewId",
-        "dismiss_notification" => "notificationId",
+        "dismiss_notification" | "restore_notification" => "notificationId",
         "sender_identity" => "forMessageId",
         "question" | "notification" | "plan_review" => "messageId",
         // A type this build does not know still gets logged; it simply has no
@@ -384,6 +384,7 @@ mod tests {
             (r#"{"type":"plan_review_ack","reviewId":"r-1"}"#, Some("r-1")),
             (r#"{"type":"cancel_review","reviewId":"r-1"}"#, Some("r-1")),
             (r#"{"type":"dismiss_notification","notificationId":"n-1"}"#, Some("n-1")),
+            (r#"{"type":"restore_notification","notificationId":"n-1","dismissalId":"d-1"}"#, Some("n-1")),
             (r#"{"type":"sender_identity","forMessageId":"q-1"}"#, Some("q-1")),
             (r#"{"type":"question","messageId":"q-1"}"#, Some("q-1")),
             (r#"{"type":"notification","messageId":"n-1"}"#, Some("n-1")),

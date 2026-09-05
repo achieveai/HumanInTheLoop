@@ -68,15 +68,32 @@ fn request_event(events: &[Event]) -> Option<&Event> {
         .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review"))
 }
 
-/// The settling event that won, in ntfy order.
+/// The settlement selected by the already-folded row.
 ///
-/// Ordered by `(ntfy_time, ntfy_id)` — the same key `fold` uses, and never the
-/// payload's own `timestamp`, which is written by whichever machine composed
-/// the message.
-fn winning_settlement(events: &[Event]) -> Option<&Event> {
-    let mut ordered: Vec<&Event> = events.iter().filter(|e| settles(&e.msg_type)).collect();
-    ordered.sort_by(|a, b| (a.ntfy_time, &a.ntfy_id).cmp(&(b.ntfy_time, &b.ntfy_id)));
-    ordered.into_iter().next()
+/// Response-bearing settlements are correlated by their exact `messageId` so
+/// a tombstoned dismissal can never leak into detail. Server cancellations do
+/// not carry a response ID; preserve their existing detail by selecting the
+/// cancel only when the folded row reports a terminal review-cancel status.
+fn folded_settlement<'a>(events: &'a [Event], row: &MessageRow) -> Option<&'a Event> {
+    if let Some(response_id) = row.response_id.as_deref() {
+        return events
+            .iter()
+            .find(|event| event.message_id == response_id && settles(&event.msg_type));
+    }
+
+    if row.msg_type != "plan_review"
+        || !matches!(
+            row.status.as_str(),
+            "cancelled" | "superseded" | "agent_gone"
+        )
+    {
+        return None;
+    }
+
+    events
+        .iter()
+        .filter(|event| event.msg_type == "cancel_review")
+        .min_by(|a, b| (a.ntfy_time, &a.ntfy_id).cmp(&(b.ntfy_time, &b.ntfy_id)))
 }
 
 /// Every event about one subject.
@@ -104,11 +121,12 @@ pub fn build_detail(events: &[Event], message_id: &str, now: u64) -> Option<Mess
         .messages
         .into_iter()
         .find(|row| row.message_id == message_id)?;
+    let settlement = folded_settlement(&subject, &row).map(|event| event.json());
 
     Some(MessageDetail {
         row,
         request: request.json(),
-        settlement: winning_settlement(&subject).map(|e| e.json()),
+        settlement,
         sender: identity::sender_info(&subject).map(|(label, source)| SenderBadge { label, source }),
     })
 }
@@ -149,6 +167,14 @@ mod tests {
             r#"{"type":"question","messageId":"q-1","question":"Which backend?",
                 "context":"Picking storage","allowMultiple":false,"allowOther":true,
                 "options":[{"label":"SQLite","value":"sqlite"},{"label":"Files","value":"files"}]}"#,
+        )
+    }
+
+    fn notification() -> Event {
+        ev(
+            "ntfy-n1",
+            NOW - 3 * MINUTE,
+            r#"{"type":"notification","messageId":"n-1","title":"Done","body":"Finished"}"#,
         )
     }
 
@@ -236,6 +262,68 @@ mod tests {
             Some(NOW - 90),
             "the fold and the detail must name the same settling event"
         );
+    }
+
+    #[test]
+    fn notification_detail_uses_the_untombstoned_dismissal_named_by_the_fold() {
+        let events = [
+            notification(),
+            ev(
+                "ntfy-dismiss-a",
+                NOW - 2 * MINUTE,
+                r#"{"type":"dismiss_notification","messageId":"dismiss-a",
+                    "notificationId":"n-1","dismissedFrom":"phone"}"#,
+            ),
+            ev(
+                "ntfy-dismiss-b",
+                NOW - MINUTE,
+                r#"{"type":"dismiss_notification","messageId":"dismiss-b",
+                    "notificationId":"n-1","dismissedFrom":"laptop"}"#,
+            ),
+            ev(
+                "ntfy-restore-a",
+                NOW,
+                r#"{"type":"restore_notification","messageId":"restore-a",
+                    "notificationId":"n-1","dismissalId":"dismiss-a","restoredFrom":"desktop"}"#,
+            ),
+        ];
+
+        let d = detail(&events, "n-1");
+        assert_eq!(d.row.response_id.as_deref(), Some("dismiss-b"));
+        assert_eq!(
+            d.settlement.as_ref().and_then(|value| value["messageId"].as_str()),
+            Some("dismiss-b")
+        );
+        assert_eq!(
+            d.settlement.expect("dismissal B remains")["dismissedFrom"],
+            "laptop"
+        );
+    }
+
+    #[test]
+    fn restored_notification_detail_has_no_settlement() {
+        let events = [
+            notification(),
+            ev(
+                "ntfy-dismiss-a",
+                NOW - MINUTE,
+                r#"{"type":"dismiss_notification","messageId":"dismiss-a",
+                    "notificationId":"n-1","dismissedFrom":"phone"}"#,
+            ),
+            ev(
+                "ntfy-restore-a",
+                NOW,
+                r#"{"type":"restore_notification","messageId":"restore-a",
+                    "notificationId":"n-1","dismissalId":"dismiss-a","restoredFrom":"laptop"}"#,
+            ),
+        ];
+
+        let d = detail(&events, "n-1");
+        assert_eq!(d.row.status, "pending");
+        assert_eq!(d.row.responder, None);
+        assert_eq!(d.row.responded_at, None);
+        assert_eq!(d.row.response_id, None);
+        assert_eq!(d.settlement, None);
     }
 
     #[test]
