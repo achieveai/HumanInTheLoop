@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { MINUTE, NOW, bodyOk, detail, message } from './fixtures.js';
-import { mount } from './mount.js';
+import { mount, recorded } from './mount.js';
 
 // Pane 3, plan reviews (spec §8.3).
 //
@@ -94,6 +94,36 @@ test.describe('Pane 3 — a reviewable plan (spec §8.3)', () => {
     await expect(page.locator('.review-comments #comment-composer')).toBeVisible();
   });
 
+  test('the shared reviewer submits edited comments and omits deleted comments', async ({ page }) => {
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT), wire: true });
+    await page.getByRole('tab', { name: 'Source' }).click();
+
+    const rows = page.locator('.diff-row[data-side="new"][data-line]');
+    await rows.nth(2).click();
+    await page.locator('#comment-input').fill('edit me');
+    await page.locator('#comment-add').click();
+    await rows.nth(3).click();
+    await page.locator('#comment-input').fill('delete me');
+    await page.locator('#comment-add').click();
+
+    const editCard = page.locator('.comment-card-list').filter({ hasText: 'edit me' });
+    await editCard.getByRole('button', { name: 'Edit comment' }).click();
+    await editCard.locator('.comment-edit-input').fill('edited in Inbox');
+    await editCard.getByRole('button', { name: 'Save comment' }).click();
+    await page.locator('.comment-card-list').filter({ hasText: 'delete me' })
+      .getByRole('button', { name: 'Delete comment' }).click();
+    await page.locator('#btn-approve').click();
+
+    const submit = (await recorded(page)).find(action => action.action === 'submit-review');
+    expect(submit?.inlineComments).toEqual([{
+      path: 'docs/plans/inbox.md',
+      startLine: 3,
+      endLine: 3,
+      side: 'new',
+      comment: 'edited in Inbox',
+    }]);
+  });
+
   test('remounting a review leaves only the live selection listener', async ({ page }) => {
     await mount(page, 'review', review(), { body: bodyOk(CONTENT) });
 
@@ -145,12 +175,25 @@ test.describe('Pane 3 — a reviewable plan (spec §8.3)', () => {
       verdict: 'approved',
       responder: 'Kay9 desktop',
       respondedAt: NOW - MINUTE,
-    }), { body: bodyOk(CONTENT) });
+    }), {
+      body: bodyOk(CONTENT),
+      draft: {
+        reviewId: 'p-1',
+        planId: '',
+        snapshotHash: 'abc123',
+        overallFeedback: '',
+        inlineComments: [{
+          path: 'docs/plans/inbox.md', startLine: 3, endLine: 3, side: 'new', comment: 'read only',
+        }],
+      },
+    });
 
     await expect(page.locator('.detail-root')).toHaveAttribute('data-read-only', 'true');
     await page.getByRole('tab', { name: 'Source' }).click();
     await expect(page.locator('.diff-row[data-line]')).toHaveCount(6);
     await expect(page.locator('[data-verdict="approved"]')).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Edit comment' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Delete comment' })).toHaveCount(0);
     await expect(page.locator('.review-banner-superseded')).toContainText('Kay9 desktop');
   });
 

@@ -19,6 +19,29 @@ async function addComment(page: Page, start: number, end: number, text: string, 
   await page.locator('#comment-add').click();
 }
 
+async function deferReviewSubmit(page: Page) {
+  await page.evaluate(async () => {
+    const { renderPlanReview } = await import('./review.js');
+    const win = window as any;
+    let resolveSubmit: (result: unknown) => void;
+    let rejectSubmit: (error: Error) => void;
+    const pending = new Promise((resolve, reject) => {
+      resolveSubmit = resolve;
+      rejectSubmit = reject;
+    });
+    win.__resolveDeferredSubmit = (result: unknown) => resolveSubmit(result);
+    win.__rejectDeferredSubmit = (message: string) => rejectSubmit(new Error(message));
+    win.__lastSubmit = undefined;
+    win.__review = renderPlanReview(document.querySelector('#review-container')!, win.__fixture, {
+      onSubmit: (payload: unknown) => {
+        win.__lastSubmit = payload;
+        return pending;
+      },
+      onDraftChange: (draft: unknown) => { win.__lastDraft = draft; },
+    });
+  });
+}
+
 // ─── Layout ──────────────────────────────────────────────────────────────────
 
 test.describe('Review window layout', () => {
@@ -363,7 +386,7 @@ test.describe('Range selection and comments', () => {
     await addComment(page, 42, 47, 'first');
     await expect(page.locator('.comment-card-list')).toHaveCount(1);
 
-    await page.locator('.comment-card-list .comment-remove').click();
+    await page.locator('.comment-card-list').getByRole('button', { name: 'Delete comment' }).click();
     await expect(page.locator('.comment-card-list')).toHaveCount(0);
     await expect(page.locator('.comment-card-inline')).toHaveCount(0);
 
@@ -402,6 +425,163 @@ test.describe('Range selection and comments', () => {
     await page.locator('#comment-add').click();
     await expect(page.locator('#review-error')).toBeVisible();
     await expect(page.locator('.comment-card-list')).toHaveCount(0);
+    await expect(page.locator('#comment-composer')).toBeVisible();
+    await expect(row(page, 42)).toHaveClass(/is-selected/);
+  });
+
+  test('a successful Source Add closes the composer and clears its highlight', async ({ page }) => {
+    await row(page, 42).click();
+    await page.locator('#comment-input').fill('source comment');
+    await page.locator('#comment-add').click();
+
+    await expect(page.locator('#comment-composer')).toHaveCount(0);
+    await expect(page.locator('.diff-row.is-selected')).toHaveCount(0);
+  });
+
+  test('Edit Save updates only the text and preserves the submitted anchor', async ({ page }) => {
+    await addComment(page, 42, 47, 'original wording');
+    const card = page.locator('.comment-card-list');
+
+    await card.getByRole('button', { name: 'Edit comment' }).click();
+    await expect(card.locator('.comment-edit-input')).toHaveValue('original wording');
+    await card.locator('.comment-edit-input').fill('clearer wording');
+    await card.getByRole('button', { name: 'Save comment' }).click();
+    await expect(card.locator('.comment-card-body')).toHaveText('clearer wording');
+
+    await page.locator('#btn-approve').click();
+    const payload = await page.evaluate(() => (window as any).__lastSubmit);
+    expect(payload.inlineComments).toEqual([{
+      path: 'docs/plan-v1.md',
+      startLine: 42,
+      endLine: 47,
+      side: 'new',
+      comment: 'clearer wording',
+    }]);
+  });
+
+  test('saving either visible copy of an edited comment keeps the latest draft text', async ({ page }) => {
+    await addComment(page, 42, 42, 'original wording');
+    const listed = page.locator('.comment-card-list');
+
+    await listed.getByRole('button', { name: 'Edit comment' }).click();
+    await listed.locator('.comment-edit-input').fill('latest wording');
+    await page.locator('.comment-card-inline').getByRole('button', { name: 'Save comment' }).click();
+
+    await expect(listed.locator('.comment-card-body')).toHaveText('latest wording');
+    await page.locator('#btn-approve').click();
+    const payload = await page.evaluate(() => (window as any).__lastSubmit);
+    expect(payload.inlineComments[0].comment).toBe('latest wording');
+  });
+
+  test('completion actions refuse an unsaved comment edit without sending stale text', async ({ page }) => {
+    await addComment(page, 42, 42, 'original wording');
+    const editor = page.locator('.comment-card-list').getByLabel('Edit comment text');
+
+    await page.locator('.comment-card-list').getByRole('button', { name: 'Edit comment' }).click();
+    await editor.fill('latest unsaved wording');
+    await page.locator('#btn-approve').click();
+
+    await expect(page.locator('#review-error')).toContainText('Save or Cancel');
+    await expect(page.locator('[data-edit-input]:focus')).toHaveValue('latest unsaved wording');
+    await expect(editor).toHaveValue('latest unsaved wording');
+    expect(await page.evaluate(() => (window as any).__lastSubmit)).toBeUndefined();
+
+    await page.locator('#btn-skip').click();
+    await expect(page.locator('#review-error')).toContainText('Save or Cancel');
+    expect(await page.evaluate(() => (window as any).__lastSkip)).toBeUndefined();
+  });
+
+  test('starting another comment edit cannot replace an unsaved edit buffer', async ({ page }) => {
+    await addComment(page, 12, 12, 'first comment');
+    await addComment(page, 42, 42, 'second comment');
+    const cards = page.locator('.comment-card-list');
+
+    await cards.nth(0).getByRole('button', { name: 'Edit comment' }).click();
+    await cards.nth(0).getByLabel('Edit comment text').fill('first unsaved wording');
+    await cards.nth(1).getByRole('button', { name: 'Edit comment' }).click();
+
+    await expect(page.locator('#review-error')).toContainText('Save or Cancel');
+    await expect(cards.nth(0).getByLabel('Edit comment text')).toHaveValue('first unsaved wording');
+    await expect(page.locator('[data-edit-input]:focus')).toHaveValue('first unsaved wording');
+    await expect(cards.nth(1).getByLabel('Edit comment text')).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__lastDraft.inlineComments[0].comment))
+      .toBe('first unsaved wording');
+  });
+
+  test('an unsaved comment edit survives draft recovery and a remote terminal state', async ({ page }) => {
+    await addComment(page, 42, 42, 'original wording');
+    const listed = page.locator('.comment-card-list');
+
+    await listed.getByRole('button', { name: 'Edit comment' }).click();
+    await listed.getByLabel('Edit comment text').fill('latest unsaved wording');
+
+    const recovery = await page.evaluate(() => (window as any).__review.captureRecovery());
+    expect(recovery.draft.inlineComments[0].comment).toBe('latest unsaved wording');
+    expect(await page.evaluate(() => (window as any).__lastDraft.inlineComments[0].comment))
+      .toBe('latest unsaved wording');
+
+    await page.evaluate(async recoveryState => {
+      const { disposeReview, renderPlanReview } = await import('./review.js');
+      const win = window as any;
+      const container = document.querySelector('#review-container')!;
+      disposeReview(container);
+      win.__review = renderPlanReview(container, win.__fixture, {
+        onDraftChange: (draft: unknown) => { win.__lastDraft = draft; },
+      });
+      win.__review.restoreRecovery(recoveryState);
+    }, recovery);
+    await expect(page.locator('.comment-card-list .comment-card-body'))
+      .toHaveText('latest unsaved wording');
+
+    await page.locator('.comment-card-list').getByRole('button', { name: 'Edit comment' }).click();
+    await page.locator('.comment-card-list').getByLabel('Edit comment text')
+      .fill('terminal-state wording');
+    await page.evaluate(() => (window as any).__review.setSuperseded('another device'));
+
+    await expect(page.locator('.comment-card-list .comment-card-body'))
+      .toHaveText('terminal-state wording');
+    expect(await page.evaluate(() => (window as any).__review.getDraft().inlineComments[0].comment))
+      .toBe('terminal-state wording');
+  });
+
+  test('Edit Cancel keeps the original comment unchanged', async ({ page }) => {
+    await addComment(page, 42, 42, 'keep this wording');
+    const card = page.locator('.comment-card-list');
+
+    await card.getByRole('button', { name: 'Edit comment' }).click();
+    await card.locator('.comment-edit-input').fill('discard this wording');
+    await card.getByRole('button', { name: 'Cancel editing comment' }).click();
+
+    await expect(card.locator('.comment-card-body')).toHaveText('keep this wording');
+    const recovery = await page.evaluate(() => (window as any).__review.captureRecovery());
+    expect(recovery.draft.inlineComments[0].comment).toBe('keep this wording');
+    expect(await page.evaluate(() => (window as any).__lastDraft.inlineComments[0].comment))
+      .toBe('keep this wording');
+  });
+
+  test('blank edited text shows an error and keeps the editor open', async ({ page }) => {
+    await addComment(page, 42, 42, 'not blank');
+    const card = page.locator('.comment-card-list');
+
+    await card.getByRole('button', { name: 'Edit comment' }).click();
+    await card.locator('.comment-edit-input').fill('   ');
+    await card.getByRole('button', { name: 'Save comment' }).click();
+
+    await expect(page.locator('#review-error')).toContainText('Comment text cannot be empty');
+    await expect(card.locator('.comment-edit-input')).toBeVisible();
+    await expect(card.locator('.comment-edit-input')).toHaveValue('   ');
+  });
+
+  test('Delete removes the comment immediately and excludes it from submission', async ({ page }) => {
+    await addComment(page, 42, 42, 'remove me');
+
+    await page.locator('.comment-card-list').getByRole('button', { name: 'Delete comment' }).click();
+
+    await expect(page.locator('.comment-card-list')).toHaveCount(0);
+    await expect(page.locator('.comment-card-inline')).toHaveCount(0);
+    await page.locator('#btn-approve').click();
+    const payload = await page.evaluate(() => (window as any).__lastSubmit);
+    expect(payload.inlineComments).toEqual([]);
   });
 
   test('I-1: shift+arrow keyboard selection produces the same anchor as shift-click', async ({ page }) => {
@@ -537,6 +717,8 @@ test.describe('Range selection and comments', () => {
     await expect(page.locator('.review-comments #comment-composer')).toBeVisible();
     await page.locator('#comment-input').fill('outside the diff hunk');
     await page.locator('#comment-add').click();
+    await expect(page.locator('#comment-composer')).toHaveCount(0);
+    await expect(page.locator('#rendered-content .is-selected')).toHaveCount(0);
     await page.locator('#btn-approve').click();
     const payload = await page.evaluate(() => (window as any).__lastSubmit);
     expect(payload.inlineComments[0]).toMatchObject({
@@ -566,7 +748,7 @@ test.describe('Range selection and comments', () => {
       (window as any).__composerBeforeRemoval = document.querySelector('#comment-composer');
     });
 
-    await page.getByRole('button', { name: 'Remove comment' }).evaluate((button: HTMLButtonElement) => button.click());
+    await page.getByRole('button', { name: 'Delete comment' }).evaluate((button: HTMLButtonElement) => button.click());
 
     await expect(page.locator('#comment-input')).toHaveValue('half-typed exact draft');
     expect(await page.evaluate(() =>
@@ -578,6 +760,34 @@ test.describe('Range selection and comments', () => {
       direction: input.selectionDirection,
     }))).toEqual({ active: true, start: 5, end: 10, direction: 'backward' });
     await expect(page.locator('#comment-add')).toBeEnabled();
+  });
+
+  test('editing and deleting a listed comment preserve an unrelated Source composer draft', async ({ page }) => {
+    await addComment(page, 12, 12, 'listed comment');
+    await row(page, 42).click();
+    await page.locator('#comment-input').fill('unfinished source draft');
+    await page.locator('#comment-input').evaluate((input: HTMLTextAreaElement) => {
+      input.focus();
+      input.setSelectionRange(3, 11, 'forward');
+      (window as any).__sourceComposerBeforeMutation = document.querySelector('#comment-composer');
+    });
+
+    const card = page.locator('.comment-card-list');
+    await card.getByRole('button', { name: 'Edit comment' }).click();
+    await expect(page.locator('#comment-input')).toHaveValue('unfinished source draft');
+    await card.locator('.comment-edit-input').fill('edited listed comment');
+    await card.getByRole('button', { name: 'Save comment' }).click();
+    await expect(page.locator('#comment-input')).toHaveValue('unfinished source draft');
+    await card.getByRole('button', { name: 'Delete comment' }).click();
+
+    await expect(page.locator('#comment-input')).toHaveValue('unfinished source draft');
+    expect(await page.evaluate(() =>
+      (window as any).__sourceComposerBeforeMutation === document.querySelector('#comment-composer'))).toBe(true);
+    expect(await page.locator('#comment-input').evaluate((input: HTMLTextAreaElement) => ({
+      start: input.selectionStart,
+      end: input.selectionEnd,
+      direction: input.selectionDirection,
+    }))).toEqual({ start: 3, end: 11, direction: 'forward' });
   });
 
   test('selectionchange in an unrelated textarea skips mapped-leaf repaint work', async ({ page }) => {
@@ -763,6 +973,71 @@ test.describe('Verdict and validation', () => {
 // ─── Submit failure (C-6 / P3) ───────────────────────────────────────────────
 
 test.describe('Submit failure keeps the review intact', () => {
+  test('pending submit locks every available review field and restores it after no acknowledgement', async ({ page }) => {
+    await page.goto(url());
+    await deferReviewSubmit(page);
+    await addComment(page, 42, 42, 'edit me');
+    await addComment(page, 47, 47, 'delete guard');
+    await row(page, 12).click();
+    await page.locator('#comment-input').fill('unfinished composer draft');
+    const editCard = page.locator('.comment-card-list').filter({ hasText: 'edit me' });
+    const deleteCard = page.locator('.comment-card-list').filter({ hasText: 'delete guard' });
+    await page.locator('#overall-feedback').fill('unfinished overall feedback');
+
+    await page.locator('#btn-approve').click();
+    await expect.poll(() => page.evaluate(() => Boolean((window as any).__lastSubmit))).toBe(true);
+
+    await expect(page.locator('#overall-feedback')).toBeDisabled();
+    await expect(page.locator('#comment-input')).toBeDisabled();
+    await expect(page.locator('#comment-add')).toBeDisabled();
+    await expect(page.locator('#comment-cancel')).toBeDisabled();
+    await expect(editCard.getByRole('button', { name: 'Edit comment' })).toBeDisabled();
+    await expect(editCard.getByRole('button', { name: 'Delete comment' })).toBeDisabled();
+    await expect(deleteCard.getByRole('button', { name: 'Edit comment' })).toBeDisabled();
+    await expect(deleteCard.getByRole('button', { name: 'Delete comment' })).toBeDisabled();
+
+    await row(page, 47).click();
+    await expect(page.locator('#comment-composer .composer-anchor')).toHaveText('Commenting on line 12');
+    await page.locator('#comment-add').dispatchEvent('click');
+    await deleteCard.getByRole('button', { name: 'Delete comment' }).dispatchEvent('click');
+    await expect(page.locator('.comment-card-list')).toHaveCount(2);
+
+    await page.evaluate(() => (window as any).__resolveDeferredSubmit({
+      status: 'unacknowledged', responseId: 'resp-test', reason: 'still waiting',
+    }));
+    await expect(page.locator('#review-error')).toContainText('has not confirmed');
+    await expect(page.locator('#overall-feedback')).toBeEnabled();
+    await expect(page.locator('#overall-feedback')).toHaveValue('unfinished overall feedback');
+    await expect(page.locator('#comment-input')).toBeEnabled();
+    await expect(page.locator('#comment-input')).toHaveValue('unfinished composer draft');
+    await expect(editCard.getByRole('button', { name: 'Edit comment' })).toBeEnabled();
+    await expect(editCard.getByRole('button', { name: 'Delete comment' })).toBeEnabled();
+    await expect(deleteCard.getByRole('button', { name: 'Delete comment' })).toBeEnabled();
+  });
+
+  test('a rejected pending submit restores the composer and feedback controls', async ({ page }) => {
+    await page.goto(url());
+    await deferReviewSubmit(page);
+    await page.getByRole('tab', { name: 'Source' }).click();
+    await row(page, 42).click();
+    await page.locator('#comment-input').fill('retry this composer draft');
+    await page.locator('#overall-feedback').fill('retry this overall feedback');
+
+    await page.locator('#btn-approve').click();
+    await expect.poll(() => page.evaluate(() => Boolean((window as any).__lastSubmit))).toBe(true);
+    await expect(page.locator('#comment-input')).toBeDisabled();
+    await expect(page.locator('#overall-feedback')).toBeDisabled();
+    await page.evaluate(() => (window as any).__rejectDeferredSubmit('simulated publish failure'));
+
+    await expect(page.locator('#review-error')).toContainText('simulated publish failure');
+    await expect(page.locator('#comment-input')).toBeEnabled();
+    await expect(page.locator('#comment-input')).toHaveValue('retry this composer draft');
+    await expect(page.locator('#comment-add')).toBeEnabled();
+    await expect(page.locator('#comment-cancel')).toBeEnabled();
+    await expect(page.locator('#overall-feedback')).toBeEnabled();
+    await expect(page.locator('#overall-feedback')).toHaveValue('retry this overall feedback');
+  });
+
   test('C-6: a failed submit shows an error, keeps the window open, preserves comments', async ({ page }) => {
     await page.goto(url('?fail=1'));
     await addComment(page, 42, 47, 'do not lose me');
@@ -791,6 +1066,29 @@ test.describe('Submit failure keeps the review intact', () => {
 // ─── Post-first-paint states ─────────────────────────────────────────────────
 
 test.describe('Review states', () => {
+  test('a draft from another snapshot restores prose but drops stale inline anchors', async ({ page }) => {
+    await page.goto(url());
+
+    await page.evaluate(() => (window as any).__review.restoreDraft({
+      snapshotHash: 'sha256:a-different-plan',
+      overallFeedback: 'Keep this unanchored feedback.',
+      inlineComments: [{
+        path: 'docs/plan-v1.md',
+        startLine: 42,
+        endLine: 42,
+        side: 'new',
+        comment: 'This anchor belongs to the previous snapshot.',
+      }],
+    }));
+
+    await expect(page.locator('#overall-feedback')).toHaveValue('Keep this unanchored feedback.');
+    await expect(page.locator('.comment-card-list')).toHaveCount(0);
+    await expect(page.locator('#review-error')).toContainText('inline comments were not');
+    await page.locator('#btn-approve').click();
+    const payload = await page.evaluate(() => (window as any).__lastSubmit);
+    expect(payload.inlineComments).toEqual([]);
+  });
+
   test('D-5/D-6: superseded shows the winning device and never destroys the draft', async ({ page }) => {
     await page.goto(url());
     await addComment(page, 42, 47, 'my draft comment');
@@ -801,6 +1099,8 @@ test.describe('Review states', () => {
     // Window stays on the review, draft intact, verdict controls disabled.
     await expect(page.locator('.comment-card-list .comment-card-body')).toHaveText('my draft comment');
     await expect(page.locator('#btn-approve')).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Edit comment' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Delete comment' })).toHaveCount(0);
     await expect(page.locator('.success-title')).toHaveCount(0);
   });
 
@@ -1041,7 +1341,7 @@ test.describe('Naive re-render cost on a 100 KB plan', () => {
     const initial = await page.evaluate(() => (window as any).__reviewPerf);
     await addComment(page, 500, 520, 'a comment in the middle of a large plan');
     const afterAdd = await page.evaluate(() => (window as any).__reviewPerf);
-    await page.locator('.comment-card-list .comment-remove').click();
+    await page.locator('.comment-card-list').getByRole('button', { name: 'Delete comment' }).click();
     const afterRemove = await page.evaluate(() => (window as any).__reviewPerf);
 
     console.log(`[W3.6] contentBytes=${size} rows=${initial.rowCount} `

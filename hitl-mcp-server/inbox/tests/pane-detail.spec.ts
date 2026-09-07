@@ -25,7 +25,11 @@ async function open(page: Page, fixture: Fixture) {
 }
 
 async function commands(page: Page): Promise<string[]> {
-  return page.evaluate(() => (window as any).__INVOCATIONS.map((i: any) => i.cmd));
+  // Connection setup is shell lifecycle, not a pane/body read. Keep these
+  // assertions scoped to the projection commands whose ordering they specify.
+  return page.evaluate(() => (window as any).__INVOCATIONS
+    .map((i: any) => i.cmd)
+    .filter((command: string) => command !== 'get_connection_settings'));
 }
 
 async function deferReply(page: Page, command: string) {

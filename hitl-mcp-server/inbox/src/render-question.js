@@ -421,6 +421,7 @@ export function renderQuestion(container, detail, actions = {}) {
     }
 
     let steps = null;
+    let repaintSteps = () => {};
 
     function captureRecovery() {
         return {
@@ -443,6 +444,7 @@ export function renderQuestion(container, detail, actions = {}) {
             if (input) input.value = item.value;
         }
         steps?.go(recovery?.step ?? 0);
+        repaintSteps();
     }
 
     /**
@@ -540,6 +542,7 @@ export function renderQuestion(container, detail, actions = {}) {
             tab.classList.toggle('answered', i !== steps.current && answeredStep(i));
         }
     };
+    repaintSteps = paint;
 
     function answeredStep(index) {
         const step = root.querySelector(`.sub-question[data-index="${index}"]`);

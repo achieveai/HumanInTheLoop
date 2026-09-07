@@ -1,74 +1,89 @@
-# Human-in-the-Loop MCP Server
+# Human-in-the-Loop MCP
 
-This repository contains the Human-in-the-Loop MCP Server implementation for enabling AI agents to request human input through interactive dialogs.
+Let an AI agent ask questions, send notifications, and request line-by-line plan reviews. Respond from a running HITL desktop client or the Inbox connected to the same topic.
 
-## 🛠️ What Agents Can Do
+## Choose the component you need
 
-| Tool | Purpose |
-|---|---|
-| `AskUserQuestion` | Ask a question (or up to 4 at once) and block until a human answers on any of their devices |
-| `ReviewPlan` | Send a markdown plan for **line-anchored review** — the human comments on specific line ranges and returns a verdict; re-running it shows a diff against what they reviewed last time |
-| `Notify` | Push a status update to every device without blocking |
-| `setup` | Create the config and launch the tray client on this machine |
+| Component | What it does |
+| --- | --- |
+| **MCP server** | Exposes `AskUserQuestion`, `ReviewPlan`, `Notify`, and `setup` to your agent. |
+| **HITL Client** | Tray app that shows incoming questions and reviews as popup windows. |
+| **HITL Inbox** | Persistent window for browsing notifications, answering questions, and reviewing plans. |
+| **Archivist** | Optional headless recorder. Keeps history and attachment bodies available to a local Inbox. |
 
-Blocking calls emit progress heartbeats every 15 seconds, but **how long they may block is decided by your MCP host**: hosts that do not opt into `resetTimeoutOnProgress` cancel the request after the SDK default of 60 seconds. See [Blocking and host timeouts](./hitl-mcp-server/README.md#blocking-and-host-timeouts).
+Messages travel through [ntfy](https://ntfy.sh). Devices must use the same topic URL, topic ID, and encryption key. The server auto-launches the **tray client**, not Inbox.
 
-## 📦 Package Information
+## Start using HITL
 
-The main package is available on npm as:
-```
-@achieveai/hitl-mcp-server
-```
+Install a supported [Node.js LTS](https://nodejs.org/en/download), then run:
 
-## 📚 Documentation
-
-For complete documentation, installation instructions, and usage examples, please see:
-
-**[hitl-mcp-server/README.md](./hitl-mcp-server/README.md)**
-
-## 🚀 Quick Start
-
-```bash
-# Install globally
+```sh
 npm install -g @achieveai/hitl-mcp-server
-
-# Or run directly with npx (no installation required)
-npx @achieveai/hitl-mcp-server
+hitl init
+hitl client
 ```
 
-## 🔧 Development
+Keep the generated encryption key private. Do not paste `hitl init` output or your configuration into an issue.
 
-To work on this project locally:
+Add this entry to your MCP host's configuration, then restart that host:
 
-```bash
-# Clone the repository
+```json
+{
+  "mcpServers": {
+    "hitl": {
+      "command": "hitl-mcp-server",
+      "args": []
+    }
+  }
+}
+```
+
+Ask your agent to send a test notification or question. `hitl test` also sends a real test question to the configured topic.
+
+See [setup and configuration](hitl-mcp-server/README.md#setup-and-configuration) for explicit `npx` commands, multiple machines, and running without automatic tray-client launch.
+
+## Use Inbox
+
+Build Inbox from this checkout, or download an **Inbox-named** asset when one is offered on [GitHub Releases](https://github.com/achieveai/HumanInTheLoop/releases). Tray-client downloads are not Inbox.
+
+Inbox uses the same configuration as the tray client. Open `hitl-inbox.exe` on Windows, or install its MSI. See the [Inbox guide](hitl-mcp-server/README.md#using-inbox).
+
+This README describes the current source tree. Published packages can lag behind it. Android support is in development; an installable APK is not available from this checkout yet.
+
+## Build from source
+
+Install Git, Node.js 24 LTS, Rust stable, and the [Tauri platform prerequisites](https://v2.tauri.app/start/prerequisites/). Windows desktop builds require MSVC C++ Build Tools and WebView2.
+
+```sh
 git clone https://github.com/achieveai/HumanInTheLoop.git
 cd HumanInTheLoop/hitl-mcp-server
-
-# Install dependencies
-npm install
-
-# Build the project
-npm run build
-
-# Run tests
-npm test
+npm ci
+npm run build:server
 ```
 
-## 📝 License
+Build the tray client from `hitl-mcp-server`:
 
-GPL-3.0 - See [LICENSE](./hitl-mcp-server/LICENSE) file for details.
+```sh
+npm run build:client
+```
 
-## 🤝 Contributing
+Build Inbox on Windows:
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+```sh
+cd inbox
+npx --no-install tauri build --bundles msi --ci
+```
 
-## 🔗 Links
+With no target-directory override, the executable is `hitl-mcp-server/target/release/hitl-inbox.exe`. Its MSI is under `target/release/bundle/msi/`.
 
-- [NPM Package](https://www.npmjs.com/package/@achieveai/hitl-mcp-server)
-- [GitHub Repository](https://github.com/achieveai/HumanInTheLoop)
-- [Issue Tracker](https://github.com/achieveai/HumanInTheLoop/issues)
+**Important:** `npm run build` builds the server and tray client only. Inbox and the archivist require separate commands.
 
----
+## Guides
 
-Built with ❤️ by [MCQdb LLC](https://achieve.ai)
+- [Detailed setup, usage, configuration, and security](hitl-mcp-server/README.md)
+- [Build commands and output paths](hitl-mcp-server/README.md#building-from-source)
+- [Tests](hitl-mcp-server/README.md#testing)
+- [Publishing and release artifacts](hitl-mcp-server/README.md#publishing-and-release-artifacts)
+- [Troubleshooting](hitl-mcp-server/README.md#troubleshooting)
+- [Issues](https://github.com/achieveai/HumanInTheLoop/issues)
+- [License: GPL-3.0](hitl-mcp-server/LICENSE)

@@ -24,6 +24,7 @@
         <button id="pane-cycle" aria-label="Collapse panes" title="Collapse panes (Ctrl+B)">◧</button>
         <button id="reading-pane-toggle" aria-label="Place reading pane below message list"
                 title="Place reading pane below message list">▥</button>
+        <button id="connection-settings" aria-label="Connection settings" title="Connection settings">⚙</button>
         <span class="inbox-bar-title">Inbox</span>
     </div>
     <div class="inbox-scrim" id="inbox-scrim"></div>
@@ -67,6 +68,24 @@
             <h2 id="action-error-title">Could not send</h2>
             <p class="action-error-message" role="alert"></p>
             <button class="button button-primary" type="submit">Close</button>
+        </form>
+    </dialog>
+
+    <dialog class="connection-dialog" id="connection-dialog" aria-labelledby="connection-title">
+        <form>
+            <h2 id="connection-title">Connect Inbox</h2>
+            <p class="connection-intro">Enter the topic and encryption key from your HITL configuration.</p>
+            <label for="connection-topic">Topic ID</label>
+            <input id="connection-topic" name="topicId" autocomplete="off" required>
+            <label for="connection-key">Encryption key</label>
+            <input id="connection-key" name="encryptionKey" type="password"
+                   autocomplete="off" spellcheck="false" required>
+            <p class="connection-error" role="alert" aria-live="assertive"></p>
+            <div class="connection-actions">
+                <button class="button button-secondary connection-cancel" type="button"
+                        onclick="this.closest('dialog').close()">Cancel</button>
+                <button class="button button-primary" type="submit">Save connection</button>
+            </div>
         </form>
     </dialog>
 

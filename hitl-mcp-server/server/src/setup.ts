@@ -8,7 +8,7 @@ import { detectAutoBackgroundStatus, buildAutoBackgroundRemediationText } from '
 /** Result of a single setup step. */
 export interface SetupStepResult {
   step: string;
-  status: 'ok' | 'created' | 'launched' | 'already_running' | 'not_found' | 'error' | 'warning';
+  status: 'ok' | 'created' | 'launched' | 'already_running' | 'not_found' | 'error' | 'warning' | 'skipped';
   message: string;
 }
 
@@ -197,7 +197,10 @@ function buildNotFoundMessage(serverDir: string): string {
  *
  * @param serverDir - The directory of the running server JS (used to resolve relative binary paths)
  */
-export async function performSetup(serverDir: string): Promise<SetupResult> {
+export async function performSetup(
+  serverDir: string,
+  options: { autoLaunchClient?: boolean } = {}
+): Promise<SetupResult> {
   const steps: SetupStepResult[] = [];
   let overallSuccess = true;
 
@@ -235,6 +238,15 @@ export async function performSetup(serverDir: string): Promise<SetupResult> {
         })`
       : buildAutoBackgroundRemediationText(),
   });
+
+  if (options.autoLaunchClient === false) {
+    steps.push({
+      step: 'client',
+      status: 'skipped',
+      message: 'Local HITL client checks and auto-launch are disabled',
+    });
+    return { success: overallSuccess, steps, summary: formatSummary(steps) };
+  }
 
   // Step 3: Check if client is already running
   const binaryName = process.platform === 'win32' ? 'hitl-client.exe' : 'hitl-client';

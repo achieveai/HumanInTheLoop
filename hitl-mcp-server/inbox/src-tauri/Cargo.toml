@@ -8,6 +8,10 @@ description = "The LLM Inbox — every agent's messages in one place"
 authors = ["HITL"]
 edition = "2021"
 
+[lib]
+name = "hitl_inbox_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

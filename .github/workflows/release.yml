@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - 'inbox-v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -15,6 +16,7 @@ permissions:
 
 jobs:
   build-client:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     strategy:
       fail-fast: false
       matrix:
@@ -117,8 +119,93 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
 
+  build-inbox:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/inbox-v')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # Inbox is intentionally not an npm workspace. The root lockfile still
+      # installs the shared Tauri CLI through the client workspace.
+      - name: Install frontend dependencies
+        working-directory: hitl-mcp-server
+        run: npm ci
+
+      - name: Validate Inbox tag version
+        if: startsWith(github.ref, 'refs/tags/inbox-v')
+        shell: pwsh
+        run: |
+          $tagVersion = "${{ github.ref_name }}".Substring("inbox-v".Length)
+          $packageVersion = (Get-Content -Raw "hitl-mcp-server/inbox/package.json" | ConvertFrom-Json).version
+          if ($tagVersion -ne $packageVersion) {
+            throw "Inbox tag version '$tagVersion' does not match package version '$packageVersion'."
+          }
+
+      # The existing Tauri beforeBuildCommand runs `npm run sync`, which copies
+      # the shared review UI into Inbox before compiling the native application.
+      - name: Build Inbox MSI
+        working-directory: hitl-mcp-server/inbox
+        run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles msi
+
+      - name: Prepare Inbox release assets
+        shell: pwsh
+        run: |
+          $sourceRoot = "hitl-mcp-server/target/x86_64-pc-windows-msvc/release"
+          $msiFiles = @(Get-ChildItem -LiteralPath "$sourceRoot/bundle/msi" -Filter "*.msi" -File)
+          $binary = "$sourceRoot/hitl-inbox.exe"
+
+          if ($msiFiles.Count -ne 1) {
+            throw "Expected exactly one Inbox MSI, found $($msiFiles.Count)."
+          }
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf) -or (Get-Item -LiteralPath $binary).Length -eq 0) {
+            throw "Inbox executable is missing or empty: $binary"
+          }
+
+          New-Item -ItemType Directory -Path artifacts -Force | Out-Null
+          $msiAsset = "artifacts/hitl-inbox-windows-x64.msi"
+          $exeAsset = "artifacts/hitl-inbox-windows-x64.exe"
+          $zipAsset = "artifacts/hitl-inbox-windows-x64.zip"
+          $checksumAsset = "artifacts/hitl-inbox-windows-x64.sha256"
+
+          Copy-Item -LiteralPath $msiFiles[0].FullName -Destination $msiAsset
+          Copy-Item -LiteralPath $binary -Destination $exeAsset
+          Compress-Archive -LiteralPath $exeAsset -DestinationPath $zipAsset -Force
+
+          $releaseAssets = @($msiAsset, $exeAsset, $zipAsset)
+          foreach ($asset in $releaseAssets) {
+            if (-not (Test-Path -LiteralPath $asset -PathType Leaf) -or (Get-Item -LiteralPath $asset).Length -eq 0) {
+              throw "Inbox release asset is missing or empty: $asset"
+            }
+          }
+
+          $checksums = foreach ($asset in $releaseAssets) {
+            $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($asset))"
+          }
+          $checksums | Set-Content -LiteralPath $checksumAsset -Encoding ascii
+          if (-not (Test-Path -LiteralPath $checksumAsset -PathType Leaf) -or (Get-Item -LiteralPath $checksumAsset).Length -eq 0) {
+            throw "Inbox checksum file is missing or empty: $checksumAsset"
+          }
+
+      - name: Upload Inbox artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hitl-inbox-windows-x64
+          path: artifacts/hitl-inbox-windows-x64.*
+          if-no-files-found: error
+
   publish-release:
-    needs: build-client
+    needs: [build-client, build-inbox]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -140,6 +227,37 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-inbox-release:
+    needs: build-inbox
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/inbox-v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Inbox artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: hitl-inbox-windows-x64
+          path: release-assets
+
+      - name: List Inbox release assets
+        run: ls -lR release-assets/
+
+      - name: Create Inbox GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: release-assets/*
+          body: |
+            Windows x64 Inbox build. These artifacts are unsigned.
+            The portable ZIP contains only the raw executable. It requires Microsoft Edge WebView2 Runtime and the user's configuration under `.hitl`.
+            Android is not included in this release.
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

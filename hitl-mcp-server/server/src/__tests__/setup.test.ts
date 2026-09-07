@@ -203,6 +203,24 @@ describe('setup', () => {
 
   // ---- performSetup ----
   describe('performSetup', () => {
+    it('skips every local client check while still creating config when launch is disabled', async () => {
+      mockExistsSync.mockReturnValue(false);
+
+      const result = await performSetup('/mock/server/dist', { autoLaunchClient: false });
+
+      expect(mockGenerateDefaultConfig).toHaveBeenCalled();
+      expect(mockSaveConfig).toHaveBeenCalledWith({ topicId: 'hitl-test-uuid' });
+      expect(result.success).toBe(true);
+      expect(result.steps.find((s) => s.step === 'client')).toEqual({
+        step: 'client',
+        status: 'skipped',
+        message: 'Local HITL client checks and auto-launch are disabled',
+      });
+      expect(mockExecSync).not.toHaveBeenCalled();
+      expect(mockAccessSync).not.toHaveBeenCalled();
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
     it('reports config ok and client already running', async () => {
       // Config exists
       mockExistsSync.mockImplementation((p: string) =>

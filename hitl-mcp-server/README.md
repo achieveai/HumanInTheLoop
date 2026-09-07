@@ -1,83 +1,164 @@
-# HITL MCP — Human-in-the-Loop Across All Your Machines
+# HITL MCP: setup, usage, and development
 
-A cross-machine notification system that lets AI agents (via MCP) ask humans for input. Questions pop up as **native chromeless dialogs** on **all your devices** simultaneously — answer from any one, and the rest dismiss automatically. Agents can also send a whole implementation plan for **line-anchored review**, and get back comments pinned to specific lines.
+HITL connects AI agents to people through questions, notifications, and reviews of Markdown plans.
 
-## How It Works
+This guide describes the **current checkout**, not a guarantee that every feature is in the latest npm package or GitHub Release. Inbox Android support is unfinished; no APK is ready here yet.
 
-```
-┌─────────────┐      ┌────────────────────┐      ┌───────────────────────┐
-│  LLM Agent  │─────▶│     MCP Server     │─────▶│     ntfy.sh topic     │
-│  (Claude…)  │      │ (AskUserQuestion / │      │  (pub/sub messaging)  │
-│             │      │     ReviewPlan)    │      └───────┬───────────────┘
-└─────────────┘      └────────────────────┘              │
-                           ▲                             ▼
-                           │ answer              ┌───────────────────────┐
-                     ┌─────┴────────┐            │  Tauri Client (tray)  │
-                     │  ntfy.sh     │◀───────────│  on ALL your machines │
-                     │  (answer)    │            └───────────────────────┘
-                     └──────────────┘
-```
+## Components
 
-1. An LLM calls `AskUserQuestion` (a choice) or `ReviewPlan` (a markdown document to comment on)
-2. The MCP server auto-detects the git repo and publishes to your ntfy.sh topic
-3. **All** your Tauri client apps receive it and pop up a native window with a doorbell sound
-4. You answer on **any** device — the answer flows back through ntfy.sh to the MCP server
-5. All other windows dismiss automatically
+| Component | Run it when you need… | Entry point |
+| --- | --- | --- |
+| MCP server | An agent to call HITL tools | `hitl-mcp-server` or `node server/dist/mcp-server.js` |
+| Tray client | Popup questions, notifications, and plan reviews | `hitl client` or built `hitl-client` |
+| Inbox | A persistent list and reading pane | Built `hitl-inbox` or its installer |
+| Archivist | Durable local history beyond ntfy's cache | Built `hitl-archivist` |
 
-## Quick Start
+The MCP server publishes to ntfy. Running clients on that topic receive requests and publish responses. A response from one device settles the request on the others.
 
-### 1. Build the server
+Inbox subscribes directly to ntfy. It does not require the tray client. The archivist is optional; without it, Inbox has its existing local database and what ntfy still retains.
 
-```bash
-cd server && npm install && npm run build
+## Setup and configuration
+
+### Install the published package
+
+Use a supported Node.js LTS release. Node.js 24 is the recommended development baseline; the package's older minimum engine declaration is not a recommendation to use an end-of-life Node release.
+
+```sh
+npm install -g @achieveai/hitl-mcp-server
+hitl init
+hitl client
 ```
 
-### 2. Add the MCP server to your AI tool
+`hitl init` creates a topic and a random encryption key. Its output includes that key. Keep the output private.
 
-Add to your `.mcp.json` or MCP client config:
+The published npm package bundles the **tray client** for Windows x64, Linux x64, macOS ARM64, and macOS x64 when built by the release workflow. It does not currently install or launch Inbox.
+
+### Register the MCP server
+
+For a global installation, merge this into your MCP host's server configuration:
+
+```json
+{
+  "mcpServers": {
+    "hitl": {
+      "command": "hitl-mcp-server",
+      "args": []
+    }
+  }
+}
+```
+
+Without a global install, use an explicit package and executable:
+
+```json
+{
+  "mcpServers": {
+    "hitl": {
+      "command": "npx",
+      "args": ["-y", "--package", "@achieveai/hitl-mcp-server", "hitl-mcp-server"]
+    }
+  }
+}
+```
+
+For a local source build, use `node` and the absolute path to `server/dist/mcp-server.js` instead. Use forward slashes or escape backslashes in Windows JSON paths.
+
+Run `hitl init` before starting the MCP server: its entry point loads the configuration before it can expose any tools. Restart your MCP host after changing its configuration. You can then ask the agent to call `setup` to check/backfill the configuration and normally launch the tray client, or send a test question.
+
+If the host cannot find a global executable, give it the full executable path or use the explicit `npx` form. Hosts differ in how they handle Windows command shims.
+
+### Use Inbox without automatic popup-client launch
+
+The current source supports:
+
+```sh
+hitl-mcp-server --no-auto-launch-client
+```
+
+For a locally built server:
 
 ```json
 {
   "mcpServers": {
     "hitl": {
       "command": "node",
-      "args": ["/path/to/hitl-mcp-server/server/dist/mcp-server.js"]
+      "args": ["/absolute/path/hitl-mcp-server/server/dist/mcp-server.js", "--no-auto-launch-client"]
     }
   }
 }
 ```
 
-### 3. Run setup (via your AI agent)
+This skips local tray-client checks and launch for setup, questions, notifications, and plan reviews. Requests still publish normally. A running Inbox or another receiving device is needed to answer them.
 
-Ask your AI agent to call the `setup` tool — it will:
-- Create `~/.hitl/config.json` with a unique topic ID and a fresh `encryptionKey` (if it doesn't exist)
-- Find the HITL client binary on your machine
-- Launch it in the system tray (if not already running)
+The flag does not close an already-running tray client, launch Inbox, or change request timeouts. `hitl client` remains available for a manual launch. Use a build that contains this flag; older published versions may not support it.
 
-### 4. Initialize config manually (alternative)
+### Connect additional machines
 
-```bash
-npx hitl init
-```
+The default state folder is:
 
-This creates `~/.hitl/config.json`:
+- Windows: `%USERPROFILE%\.hitl`
+- macOS/Linux: `~/.hitl`
+
+Copy `config.json` securely to the same location for the user on each receiving machine. Keep the same `ntfyUrl`, `topicId`, and `encryptionKey`. Give each machine its own `deviceName`.
+
+Example structure only—let `hitl init` generate real values:
 
 ```json
 {
-  "topicId": "hitl-a1b2c3d4-...",
+  "topicId": "hitl-<generated-uuid>",
   "ntfyUrl": "https://ntfy.sh",
   "deviceName": "MY-LAPTOP",
   "soundEnabled": true,
-  "encryptionKey": "64 hex characters"
+  "encryptionKey": "<64 hexadecimal characters generated by hitl init>",
+  "identityEnabled": true
 }
 ```
 
-### 5. Set up additional machines
+`HITL_HOME` overrides the desktop state folder. Set it consistently for the server, Inbox, tray client, and archivist. An empty override is invalid. Configuration changes generally require restarting the affected processes.
 
-Copy the **same** `topicId` **and** `encryptionKey` to `~/.hitl/config.json` on every machine where you want to receive notifications. Each machine needs:
-- The same `topicId` (shared secret)
-- The same `encryptionKey`, or it will see the traffic but not be able to read it
-- The HITL client app running in the system tray — start it with `hitl client`
+Do not change only the topic and expect another machine's encryption key to match.
+
+## Using Inbox
+
+Launch Inbox separately; `hitl client` launches the popup/tray app.
+
+- Choose a project or agent in the left pane.
+- Use **All**, **Needs you**, or **Answered** to narrow the list.
+- Combine **Notifications**, **Questions**, and **Review plans** type filters.
+- Read a message in the reading pane. Answer questions or mark notifications as read.
+- Use the mark-all-read action for notifications. Undo is available for bulk read changes.
+- Change the pane layout or put the reading pane beside/below the list.
+
+For reviews, select text in the formatted plan and choose **Comment on selection**, or select lines in **Source**. Comments retain raw-file line numbers, not visual wrapped-line numbers.
+
+Adding a comment clears and closes its box. Edit or delete a comment before submitting the review. Edit offers Save/Cancel and preserves its original line range. Controls lock while submission is pending; failures keep the review available.
+
+Use Changes, Before & after, or Source for different views of a revision. Finish with Approve, Request changes, Reject, or Skip. An unacknowledged response is not confirmed delivery; the UI retains your work.
+
+A Windows MSI installs Inbox. A standalone executable still requires WebView2 and the user's configuration. Never distribute your config, topic key, databases, or signing credentials with the app.
+
+## Optional archivist
+
+Run the archivist on the **same machine as Inbox**, with the same configuration:
+
+```sh
+# From hitl-mcp-server
+cargo run --release -p hitl-archivist
+```
+
+It records received events and captures review bodies before remote attachments expire. It cannot recover data that expired before it recorded it.
+
+The local backfill API binds only to `127.0.0.1:8737`. It has no HTTP authentication. Do not expose, tunnel, or proxy it onto a network.
+
+| Setting | Purpose |
+| --- | --- |
+| `HITL_HOME` | Common desktop state directory |
+| `HITL_INBOX_DB` | Override the desktop Inbox database path |
+| `HITL_ARCHIVIST_DB` | Override the archivist database path |
+| `HITL_ARCHIVIST_PORT` | Backfill port; set identically for Inbox and archivist |
+| `HITL_LOG` | Log level, such as `info` or `debug` |
+
+Defaults are `inbox.db` and `archive.db` under the state directory. Treat databases and backups as sensitive.
 
 ## MCP Tools
 
@@ -115,7 +196,7 @@ Sends a question to all connected devices. The human responds from any one. **Bl
 
 ### `ReviewPlan`
 
-Gets **line-anchored** human review of an implementation plan you have written to a markdown file. The plan opens as a two-pane review window on every subscribed device; the human selects line ranges, attaches comments to them, and returns a verdict. **Blocks** until they submit.
+Gets **line-anchored** human review of a Markdown plan. A running desktop client or Inbox on the topic displays the review; the human selects line ranges, attaches comments, and returns a verdict. **Blocks** until they submit. Android app delivery is not available yet.
 
 Use this instead of pasting a plan into `AskUserQuestion` whenever you want feedback on specific lines rather than a yes/no.
 
@@ -131,7 +212,7 @@ Use this instead of pasting a plan into `AskUserQuestion` whenever you want feed
 {
   "success": true,
   "timestamp": 1710000000000,
-  "respondedFrom": "MY-PHONE",
+  "respondedFrom": "MY-LAPTOP",
   "verdict": "changes_requested",
   "overallFeedback": "The migration order is wrong.",
   "inlineComments": [
@@ -179,7 +260,7 @@ Sends a notification to all devices and **returns immediately** — it does not 
 
 ### `setup`
 
-Auto-configures the HITL system. Takes no parameters. Checks config, finds the client binary, and launches it.
+Takes no parameters. Once the MCP server is running, checks/backfills its configuration and normally finds and launches the tray client. With `--no-auto-launch-client`, the client step is skipped. Run `hitl init` first if configuration is missing; the server cannot start far enough to expose `setup` without it.
 
 ## Blocking and host timeouts
 
@@ -195,106 +276,244 @@ So:
 
 Cancellation is honoured either way: when the host cancels a request, the server drops the wait and releases the ntfy subscription immediately, and on shutdown it publishes a cancellation so any open review window on your devices closes instead of waiting for an agent that has exited.
 
-## CLI Commands
+## CLI commands
 
-```bash
-hitl init                    # Create ~/.hitl/config.json with a new topic
-hitl config show             # Print current config
-hitl config set-topic <id>   # Set topic ID (sync across machines)
-hitl test                    # Send a test question to verify connectivity
-hitl client                  # Launch the HITL desktop client app
-hitl help                    # Show usage
+| Command | Effect |
+| --- | --- |
+| `hitl init` | Create config; retain valid existing config and backfill a missing encryption key |
+| `hitl config show` | Print the config, **including the encryption key** |
+| `hitl config set-topic <id>` | Change only the topic ID |
+| `hitl test` | Send a real test question to the configured topic |
+| `hitl client` | Launch the tray client, not Inbox |
+| `hitl claude-code install` | Register HITL in Claude Code's user scope and adjust its global backgrounding setting |
+| `hitl help` | Show CLI help |
+
+For local builds, replace `hitl` with `node server/dist/cli.js` from `hitl-mcp-server`.
+
+If an existing config is malformed or unreadable, `hitl init` may replace it with a new topic and key; a `.bak` copy is attempted, not guaranteed. Back up and repair a broken config rather than rerunning init blindly, or other machines may no longer connect to the same topic.
+
+## Building from source
+
+### Prerequisites
+
+- Git and Node.js 24 LTS with npm.
+- Rust stable for native components.
+- [Tauri platform dependencies](https://v2.tauri.app/start/prerequisites/).
+- Windows: MSVC C++ Build Tools, Windows SDK, and WebView2.
+- Linux: WebKitGTK 4.1, AppIndicator, SVG and other Tauri build dependencies; the tray client also needs ALSA development headers.
+- macOS: Xcode command-line tools.
+
+Build native installers on their target operating system. See [Tauri's Windows installer guide](https://v2.tauri.app/distribute/windows-installer/) for WiX/MSI prerequisites.
+
+### Install dependencies once
+
+```sh
+git clone https://github.com/achieveai/HumanInTheLoop.git
+cd HumanInTheLoop/hitl-mcp-server
+npm ci
 ```
 
-## Client App Features
+The following sections state their working directory explicitly.
 
-- **System tray** — lives in your tray, ready for questions
-  - The menu shows **live connection status** and how long ago the last message arrived
-  - **Cancel Pending Review** closes an open review and releases the blocked agent
-  - **Open Log** opens the client log in your OS text handler
-- **Chromeless dialogs** — frameless, phone-shaped popup with custom drag bar
-- **Two-pane review window** — the plan on one side, the diff and your comments on the other
-- **Doorbell sound** — plays a notification sound when a question arrives
-  - 40% volume on local console, 25% on remote desktop sessions
-- **Multi-device** — all devices get the question, first response wins
-- **Always on top** — dialogs appear above other windows
+### MCP server
 
-### Diagnosing the client
+From `hitl-mcp-server`:
 
-The client writes to **`~/.hitl/client.log`**, rotating to `client.log.1` past 5 MB (one generation kept). Set `HITL_LOG` to `trace`, `debug`, `info`, `warn`, or `error` to change the level; the default is `info`.
-
-This file is the only way to see what the client is doing. It is built with `#![windows_subsystem = "windows"]` so that launching it does not flash a console window, which means **stderr is discarded on Windows** — without the log there is nothing to read.
-
-## Architecture
-
+```sh
+npm run build:server
+node server/dist/cli.js help
 ```
-hitl-mcp-server/
-├── server/          # MCP Server (Node.js/TypeScript)
-│   └── src/
-│       ├── mcp-server.ts      # MCP entry point + tool handlers
-│       ├── setup.ts           # Setup tool logic
-│       ├── ntfy-transport.ts  # ntfy.sh pub/sub, reconnect, attachments
-│       ├── payload.ts         # gzip + encrypt, inline-or-attachment
-│       ├── crypto.ts          # AES-256-GCM envelope
-│       ├── chunking.ts        # Split oversized question messages
-│       ├── plan-file.ts       # Validated markdown plan reader
-│       ├── snapshot-store.ts  # Content-addressed plan revisions
-│       ├── plan-diff.ts       # Full-document unified diff
-│       ├── plan-review.ts     # Verdict + inline-comment rules
-│       ├── git-context.ts     # Git repo detection + HEAD baseline
-│       ├── config.ts          # Config management
-│       └── cli.ts             # CLI commands
-├── client/          # Tauri Client App
-│   ├── src-tauri/   # Rust backend
-│   │   └── src/
-│   │       ├── main.rs          # App entry + ExitRequested handler
-│   │       ├── ntfy.rs          # ntfy subscription + message handling
-│   │       ├── payload.rs       # Payload decode + attachment fetch
-│   │       ├── payload_store.rs # Received plan bodies
-│   │       ├── drafts.rs        # In-progress review draft persistence
-│   │       ├── opener.rs        # Cross-platform "open file/URL" helper
-│   │       ├── crypto.rs        # AES-256-GCM envelope
-│   │       ├── chunking.rs      # Chunk reassembly
-│   │       ├── logging.rs       # ~/.hitl/client.log + rotation
-│   │       ├── sound.rs         # Notification sound (rodio, RDP-aware)
-│   │       ├── tray.rs          # System tray icon + menu
-│   │       ├── window_utils.rs  # Window placement + focus behaviour
-│   │       ├── config.rs        # Config reader
-│   │       └── types.rs         # Message types
-│   └── src/         # Web frontend (webview)
-│       ├── index.html
-│       ├── styles.css       # Chromeless layout, pinned footer
-│       ├── dialog.js        # Dialog rendering, collapsible context
-│       ├── app.js           # App entry, event handling
-│       ├── notifications.*  # Notification window
-│       ├── review.*         # Two-pane plan review window
-│       ├── review-app.js    # Review window entry point
-│       ├── review-harness.html   # Standalone harness for review UI
-│       ├── test-harness.html     # Standalone harness for dialog UI
-│       ├── test-notifications.html # Standalone harness for notifications UI
-│       └── vendor/          # Bundled third-party frontend assets
-└── sounds/          # Notification audio files
+
+Output: `server/dist/`. Start `server/dist/mcp-server.js` through an MCP host; it is a stdio server, not a web server.
+
+### Tray client
+
+From `hitl-mcp-server`:
+
+```sh
+npm run build:client
 ```
+
+For development, from `hitl-mcp-server/client`:
+
+```sh
+npm run dev
+```
+
+### Inbox
+
+From `hitl-mcp-server/inbox`:
+
+```sh
+# Development window
+npm run dev
+```
+
+For a Windows release executable and MSI:
+
+```sh
+npx --no-install tauri build --bundles msi --ci
+```
+
+For only a release executable, without installers:
+
+```sh
+npx --no-install tauri build --no-bundle --ci
+```
+
+For native platform-default bundles:
+
+```sh
+npm run build
+```
+
+Inbox shares its review UI with `client/src`. The pre-build hook runs `npm run sync`; edit the client originals, not the generated Inbox copies. A bare Cargo build skips this frontend sync, so use Tauri for distribution builds.
+
+### Archivist
+
+From `hitl-mcp-server`:
+
+```sh
+cargo build --release -p hitl-archivist
+```
+
+Output: `target/release/hitl-archivist` (`.exe` on Windows).
+
+### Find build outputs
+
+The Rust workspace root is `hitl-mcp-server`, not each app's `src-tauri` directory.
+
+| Build | Default output |
+| --- | --- |
+| Desktop release executable | `hitl-mcp-server/target/release/hitl-inbox.exe` or `hitl-client.exe` on Windows |
+| Windows MSI | `hitl-mcp-server/target/release/bundle/msi/*.msi` |
+| Explicit `--target <triple>` build | `hitl-mcp-server/target/<triple>/release/` |
+| `CARGO_TARGET_DIR` override | The override replaces `hitl-mcp-server/target` |
+
+On macOS/Linux, executable names do not have `.exe`. Bundles use platform-specific subfolders.
+
+Close the app before overwriting its executable on Windows. If replacement fails with Access denied, check whether that exact binary is still running. Keep a backup before replacing a working build.
+
+### Android status
+
+Android-aware shared code, responsive UI, and setup groundwork exist. A generated Android host, APK build/signing pipeline, and app-on-emulator validation are still pending. An emulator installation alone does not validate the Inbox app. Do not treat generic Tauri Android commands as a working project APK build yet.
+
+## Testing
+
+Run each suite explicitly. Inbox is not an npm workspace.
+
+From `hitl-mcp-server`:
+
+```sh
+npm test --workspace server
+cargo test --workspace
+cargo check -p hitl-transport --locked
+npx --no-install playwright install chromium
+```
+
+From `hitl-mcp-server/client`:
+
+```sh
+npx --no-install playwright test
+```
+
+From `hitl-mcp-server/inbox`:
+
+```sh
+npx --no-install playwright test
+```
+
+On Linux CI, use `playwright install --with-deps chromium` to install browser system dependencies too.
+
+`npm run build` and `npm test` at the npm root cover server/client workspaces only. They do not replace Inbox UI tests or the Rust tests.
+
+UI suites use local harnesses with mocked native boundaries. Also smoke-test the real desktop build. Test harnesses must not be mistaken for live delivery checks.
+
+## Publishing and release artifacts
+
+### What the existing workflow does
+
+[release.yml](../.github/workflows/release.yml) builds the tray client for Windows x64, Linux x64, and both macOS architectures, plus Windows x64 Inbox.
+
+- A pushed `v*` tag builds tray and Inbox assets and publishes a GitHub Release after both builds succeed.
+- A pushed `inbox-v*` tag builds and publishes **only Windows Inbox**. It does not build the tray client or publish npm. The version after `inbox-v` must match `inbox/package.json`.
+- The npm job bundles all four tray binaries with the TypeScript server.
+- npm publication runs only when `NPM_TOKEN` is configured. Otherwise, it is skipped.
+- Manual workflow dispatch builds downloadable workflow artifacts; it does not publish a release under the current tag-only conditions.
+- The manual `tag` input currently does not change that behavior.
+- The archivist and Android APK are not built by this release workflow.
+
+Pushing a version tag is a **publication action**, not just a local build.
+
+### Windows Inbox distribution
+
+Use [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases) for Inbox installers and executables. Keep the npm package focused on the MCP server and its bundled tray client.
+
+Each Inbox build produces:
+
+- `hitl-inbox-windows-x64.msi`
+- `hitl-inbox-windows-x64.exe`
+- `hitl-inbox-windows-x64.zip` — the executable only
+- `hitl-inbox-windows-x64.sha256` — hashes of the MSI, EXE, and ZIP
+
+The workflow fails if required artifacts are missing or empty. Manual builds expose them under the `hitl-inbox-windows-x64` Actions artifact. Tagged builds also attach them to a public GitHub Release. Inbox-only releases do not replace the project's latest full release.
+
+The artifacts are currently unsigned. The portable ZIP needs Microsoft Edge WebView2 Runtime and the user's configuration under `.hitl`; it is not a self-contained runtime or configuration backup. Never distribute your own config or encryption key with it.
+
+To check a download in PowerShell, run `Get-FileHash .\hitl-inbox-windows-x64.zip -Algorithm SHA256` and compare the hash with the matching line in the downloaded `.sha256` file. A checksum does not make an unsigned installer trusted. Hosting a release does not add in-app updates.
+
+[Tauri's release pipeline guide](https://v2.tauri.app/distribute/pipelines/github/) and [Windows signing guide](https://v2.tauri.app/distribute/sign/windows/) describe the supported mechanisms.
+
+For an Inbox-only release, finish the checklist below, then create and push a new `inbox-v<version>` tag at the verified commit. The tag starts publication automatically; do not create a competing release manually. Review the workflow result and downloadable assets before announcing it.
+
+### Maintainer checklist
+
+1. Choose the exact source commit and a new version. Keep package manifests, Cargo manifests, Tauri configs, and lockfiles consistent.
+2. Run server, Rust, client UI, and Inbox UI tests. The server's version-sync test checks manifest consistency.
+3. Build target-platform binaries and installers. Test installation and a real request/reply flow.
+4. Check artifact names, hashes, signing status, and absence of user config, databases, keys, or other private files.
+5. For a full/npm release, inspect the npm package contents. `npm publish` runs the server build, but does not create or bundle missing tray binaries. Skip this step for an Inbox-only release.
+6. Publish only with maintainer authorization. Review the tag-triggered workflow's effects first.
+7. Verify the downloadable assets and installation instructions after release.
 
 ## Security
 
-- **Topic ID is the secret** — a long random UUID that acts as an authentication token
-- Anyone with the topic ID can see that messages are flowing on the topic
-- **Message bodies are encrypted** with the `encryptionKey` from your config (AES-256-GCM), so the topic alone does not reveal question text, plan contents, or your review comments. Every machine sharing a topic must share the key. Encryption is conditional on the key being present: `setup` and `hitl init` always generate one, but a config missing `encryptionKey` (hand-edited, or from before encryption was added) loads without error and sends message bodies to ntfy.sh in plaintext, silently.
-- Plan bodies too large to inline are uploaded as ntfy attachments — encrypted the same way, and sent under a random filename so the real path never appears in ntfy's plaintext metadata
-- For sensitive environments, self-host ntfy or use [ntfy access tokens](https://docs.ntfy.sh/publish/#access-tokens)
-- Config and plan snapshots are stored in the user home directory (`~/.hitl/`)
+- Use a generated encryption key on every device. Bodies are encrypted with AES-256-GCM when the key is configured.
+- Legacy configs without a key are accepted and can send plaintext. Do not rely on the topic name to protect message contents.
+- The topic URL and traffic metadata are not hidden by body encryption.
+- The current transports have no ntfy username/password or access-token configuration. An authentication-required ntfy server needs additional integration; copying an ntfy token into this config will not enable it.
+- Config files contain the key in plaintext. Local databases, captured bodies, drafts, and backups can contain decrypted data. Protect the state directory and use appropriate filesystem/device protection.
+- Archivist backfill is unauthenticated and loopback-only. Keep it local.
+- Never include personal configuration or signing secrets in installers, npm packages, release assets, screenshots, or bug reports.
 
-## Building from Source
+## Troubleshooting
 
-```bash
-# Install dependencies
-npm install
+| Symptom | Check |
+| --- | --- |
+| No question appears | A receiving tray client or Inbox must be running; confirm topic URL, ID, and key match |
+| Only popups open | `hitl client` launches the tray app; start Inbox separately |
+| Calls stop after about a minute | MCP host timeout/progress handling; see [Blocking and host timeouts](#blocking-and-host-timeouts) |
+| Old plan body unavailable | Remote attachment expired and no archivist/local capture retained it |
+| Another machine cannot decrypt | Compare keys securely; do not paste them into logs or issues |
+| Build cannot replace EXE | Close the process running that exact executable |
+| Blank/stale shared review UI | Run Inbox's sync/build hook; do not edit generated shared copies |
+| UI tests fail to connect | Check test ports 3848/3849 and avoid simultaneous runs of the same suite |
+| MSI triggers a Windows warning | Confirm source and signing status; local builds are unsigned unless signing is configured |
 
-# Build everything (server + client)
-npm run build
+The tray client writes `client.log` in the state folder and rotates one backup after 5 MB. Inbox and archivist use `HITL_LOG`/stderr logging; a release Windows GUI executable has no normal console, so use a development run when collecting diagnostics.
 
-# Build individual components
-npm run build:server
-npm run build:client   # Requires Rust toolchain for Tauri
+## Repository layout
+
+```text
+hitl-mcp-server/
+  server/                 TypeScript MCP server and CLI
+  client/                 Tauri tray app and shared review frontend
+  inbox/                  Tauri Inbox app
+  crates/hitl-transport/  Shared Rust config, crypto, wire types, and ntfy transport
+  crates/hitl-store/      SQLite event storage
+  crates/hitl-archivist/  Headless recorder and local backfill API
+  scripts/                Shared UI synchronization
+.github/workflows/        Test and release automation (repository root)
 ```
+
+License: [GPL-3.0](LICENSE).

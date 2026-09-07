@@ -814,6 +814,8 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     let comments = [];
     /** @type {{side:string, anchor:number, focus:number}|null} */
     let selection = null;
+    let editingCommentId = null;
+    let editingCommentDraft = '';
     let submitting = false;
     // Set when persisting the draft has actually failed, so the D-3 banner does
     // not promise a save that did not happen.
@@ -1281,9 +1283,28 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     function inlineCommentHtml(c) {
         return `<div class="comment-card comment-card-inline" id="comment-${c.id}" data-comment-id="${c.id}">
             <div class="comment-card-anchor">${escapeHtml(anchorLabel(c))}</div>
-            <div class="comment-card-body">${escapeHtml(c.comment)}</div>
-            <button class="comment-remove" data-remove="${c.id}" aria-label="Remove comment">Remove</button>
+            ${commentBodyHtml(c)}
         </div>`;
+    }
+
+    function commentBodyHtml(c) {
+        if (editingCommentId === c.id && !resolved) {
+            return `<textarea class="comment-edit-input" rows="3" data-edit-input="${c.id}"
+                    aria-label="Edit comment text">${escapeHtml(editingCommentDraft)}</textarea>
+                <div class="comment-card-actions">
+                    <button class="comment-control" data-cancel-edit="${c.id}"
+                        aria-label="Cancel editing comment">Cancel</button>
+                    <button class="comment-control comment-save" data-save-edit="${c.id}"
+                        aria-label="Save comment">Save</button>
+                </div>`;
+        }
+        const controls = resolved ? '' : `<div class="comment-card-actions">
+                <button class="comment-control comment-edit" data-edit="${c.id}"
+                    aria-label="Edit comment">Edit</button>
+                <button class="comment-control comment-delete comment-remove" data-remove="${c.id}"
+                    aria-label="Delete comment" title="Remove comment">Delete</button>
+            </div>`;
+        return `<div class="comment-card-body">${escapeHtml(c.comment)}</div>${controls}`;
     }
 
     function anchorLabel(c) {
@@ -1312,47 +1333,53 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     }
 
     function renderCommentList() {
-        // A rendered-selection composer lives inside the comment list. Keep the
-        // exact form node across list updates so removing another comment cannot
-        // erase its textarea value, selection, focus, or source anchor.
-        const liveComposer = commentListEl.querySelector(':scope > #comment-composer');
-        const focused = liveComposer?.contains(document.activeElement) ? document.activeElement : null;
-        const focusSelection = focused instanceof HTMLTextAreaElement || focused instanceof HTMLInputElement
-            ? { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection }
-            : null;
-        const restoreComposerFocus = () => {
-            if (!focused) return;
-            focused.focus();
-            if (focusSelection) focused.setSelectionRange(
-                focusSelection.start, focusSelection.end, focusSelection.direction);
-        };
-        liveComposer?.remove();
         commentCountEl.textContent = String(comments.length);
         if (comments.length === 0) {
             commentListEl.innerHTML = '<p class="comment-empty">No inline comments yet. '
                 + 'Select text in the rendered plan, or click lines in Source, then add a comment.</p>';
-            if (liveComposer) commentListEl.prepend(liveComposer);
-            restoreComposerFocus();
             return;
         }
         commentListEl.innerHTML = sortComments(comments).map(c => `
             <div class="comment-card comment-card-list" id="comment-list-${c.id}" data-comment-id="${c.id}">
                 <button class="comment-card-anchor comment-jump" data-jump="${c.id}">${escapeHtml(anchorLabel(c))}</button>
-                <div class="comment-card-body">${escapeHtml(c.comment)}</div>
-                <button class="comment-remove" data-remove="${c.id}" aria-label="Remove comment">Remove</button>
+                ${commentBodyHtml(c)}
             </div>
         `).join('');
-        if (liveComposer) commentListEl.prepend(liveComposer);
-        restoreComposerFocus();
     }
 
-    function rerenderComments() {
+    function detachComposer() {
+        const composer = container.querySelector('#comment-composer');
+        if (!composer) return null;
+        const focused = composer.contains(document.activeElement) ? document.activeElement : null;
+        const focusSelection = focused instanceof HTMLTextAreaElement || focused instanceof HTMLInputElement
+            ? { start: focused.selectionStart, end: focused.selectionEnd, direction: focused.selectionDirection }
+            : null;
+        composer.remove();
+        return { composer, focused, focusSelection };
+    }
+
+    function restoreComposer(state) {
+        if (!state || !selection || resolved) return;
+        renderComposer({ existing: state.composer });
+        if (!state.focused) return;
+        state.focused.focus();
+        if (state.focusSelection) state.focused.setSelectionRange(
+            state.focusSelection.start, state.focusSelection.end, state.focusSelection.direction);
+    }
+
+    function rerenderComments(opts = {}) {
         const t0 = performance.now();
+        const composerState = detachComposer();
         if (sourceRendered) renderDiff();
         renderCommentList();
+        restoreComposer(composerState);
         mappedController?.paintComments(comments);
         perf.lastCommentUpdateMs = performance.now() - t0;
-        notifyDraft();
+        if (opts.notify !== false) notifyDraft();
+        if (opts.focusEdit) {
+            const cardClass = opts.focusEdit.inline ? '.comment-card-inline' : '.comment-card-list';
+            container.querySelector(`${cardClass}[data-comment-id="${opts.focusEdit.id}"] .comment-edit-input`)?.focus();
+        }
     }
 
     const t0 = performance.now();
@@ -1387,6 +1414,7 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     }
 
     function setSelection(side, line, extend) {
+        if (resolved || submitting) return;
         if (!selection || selection.side !== side || selection.origin !== 'source' || !extend) {
             selection = { side, anchor: line, focus: line, origin: 'source' };
         } else {
@@ -1396,6 +1424,7 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     }
 
     function clearSelection() {
+        if (submitting && !resolved) return;
         selection = null;
         paintSelection();
     }
@@ -1408,8 +1437,9 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
      * would steal focus mid shift+arrow and silently truncate the range (I-1).
      */
     function renderComposer(opts = {}) {
-        const existing = container.querySelector('#comment-composer');
+        const existing = opts.existing || container.querySelector('#comment-composer');
         if (!selection || resolved) { existing?.remove(); return; }
+        if (submitting && !existing) return;
         const anchor = selectionAnchorObject();
         const renderedOrigin = selection.origin === 'rendered';
         const lastRow = diffRowsEl.querySelector(
@@ -1439,6 +1469,7 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         }
         composer.querySelector('.composer-anchor').textContent = `Commenting on ${anchorLabel(anchor)}`;
         composer.classList.toggle('comment-composer-rendered', renderedOrigin);
+        composer.querySelectorAll('textarea, button').forEach(control => { control.disabled = submitting; });
         if (renderedOrigin) {
             if (composer.parentElement !== commentListEl || composer !== commentListEl.firstElementChild) {
                 commentListEl.prepend(composer);
@@ -1450,27 +1481,104 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     }
 
     function addComment() {
+        if (resolved || submitting) return;
         const input = container.querySelector('#comment-input');
         const text = (input?.value || '').trim();
         const anchor = selectionAnchorObject();
         if (!anchor) return;
         if (!text) { showError('Comment text cannot be empty.'); input?.focus(); return; }
         comments.push({ id: nextCommentId(), ...anchor, comment: text });
-        selection = null;
         clearError();
+        clearSelection();
         rerenderComments();
     }
 
     function removeComment(id) {
+        if (resolved || submitting) return;
         comments = comments.filter(c => c.id !== id);
+        if (editingCommentId === id) {
+            editingCommentId = null;
+            editingCommentDraft = '';
+        }
         rerenderComments();
+    }
+
+    function beginEdit(id, inline) {
+        const comment = comments.find(c => c.id === id);
+        if (resolved || submitting || !comment) return;
+        if (editingCommentId && editingCommentId !== id
+            && requireSavedCommentEdit('editing another comment')) return;
+        editingCommentId = id;
+        editingCommentDraft = comment.comment;
+        clearError();
+        rerenderComments({ notify: false, focusEdit: { id, inline } });
+    }
+
+    function cancelEdit(id) {
+        if (resolved || submitting || editingCommentId !== id) return;
+        editingCommentId = null;
+        editingCommentDraft = '';
+        clearError();
+        rerenderComments();
+    }
+
+    function saveEdit(id, card) {
+        if (resolved || submitting || editingCommentId !== id) return;
+        const input = card?.querySelector(`[data-edit-input="${id}"]`);
+        const text = editingCommentDraft.trim();
+        if (!text) {
+            showError('Comment text cannot be empty.');
+            input?.focus();
+            return;
+        }
+        const comment = comments.find(c => c.id === id);
+        if (!comment) return;
+        comment.comment = text;
+        editingCommentId = null;
+        editingCommentDraft = '';
+        clearError();
+        rerenderComments();
+    }
+
+    function handleCommentEditInput(event) {
+        const input = event.target.closest('[data-edit-input]');
+        if (!input || input.dataset.editInput !== editingCommentId) return;
+        editingCommentDraft = input.value;
+        container.querySelectorAll(`[data-edit-input="${editingCommentId}"]`).forEach(peer => {
+            if (peer !== input) peer.value = editingCommentDraft;
+        });
+        notifyDraft();
+    }
+
+    function handleCommentControl(event) {
+        const edit = event.target.closest('[data-edit]');
+        if (edit) {
+            beginEdit(edit.dataset.edit, Boolean(edit.closest('.comment-card-inline')));
+            return true;
+        }
+        const save = event.target.closest('[data-save-edit]');
+        if (save) {
+            saveEdit(save.dataset.saveEdit, save.closest('.comment-card'));
+            return true;
+        }
+        const cancel = event.target.closest('[data-cancel-edit]');
+        if (cancel) {
+            cancelEdit(cancel.dataset.cancelEdit);
+            return true;
+        }
+        const remove = event.target.closest('[data-remove]');
+        if (remove) {
+            removeComment(remove.dataset.remove);
+            return true;
+        }
+        return false;
     }
 
     mappedController = createMappedDocumentController(
         formattedRootEl,
         renderedSelectionAction,
         anchor => {
-            if (resolved) return;
+            if (resolved || submitting) return;
             selection = {
                 side: anchor.side,
                 anchor: anchor.startLine,
@@ -1490,19 +1598,18 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     mappedController.paintComments(comments);
 
     diffRowsEl.addEventListener('click', (e) => {
-        const removeBtn = e.target.closest('[data-remove]');
-        if (removeBtn) { removeComment(removeBtn.dataset.remove); return; }
+        if (handleCommentControl(e)) return;
         if (e.target.closest('.comment-composer')) return;
         const row = e.target.closest('.diff-row[data-line]');
-        if (!row || resolved) return;
+        if (!row || resolved || submitting) return;
         mappedController.clearCandidate();
         setSelection(row.dataset.side, parseInt(row.dataset.line, 10), e.shiftKey);
         row.focus();
     });
+    diffRowsEl.addEventListener('input', handleCommentEditInput);
 
     commentListEl.addEventListener('click', (e) => {
-        const removeBtn = e.target.closest('[data-remove]');
-        if (removeBtn) { removeComment(removeBtn.dataset.remove); return; }
+        if (handleCommentControl(e)) return;
         const jump = e.target.closest('[data-jump]');
         if (jump) {
             const comment = comments.find(item => item.id === jump.dataset.jump);
@@ -1543,11 +1650,12 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
             }
         }
     });
+    commentListEl.addEventListener('input', handleCommentEditInput);
 
     // I-1: full keyboard range selection. Arrow keys move, Shift+arrow extends,
     // Enter opens the composer — the same anchor a click + shift-click produces.
     diffRowsEl.addEventListener('keydown', (e) => {
-        if (resolved) return;
+        if (resolved || submitting) return;
         if (e.target.closest('.comment-composer')) return;
         const current = e.target.closest('.diff-row[data-line]')
             || diffRowsEl.querySelector('.diff-row[data-line].is-selected')
@@ -1710,13 +1818,20 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         el.textContent = text;
     }
 
+    function draftComments() {
+        return sortComments(comments).map(({ id, ...rest }) => ({
+            ...rest,
+            comment: id === editingCommentId ? editingCommentDraft : rest.comment,
+        }));
+    }
+
     function currentDraft() {
         return {
             reviewId,
             planId: msg.planId || '',
             snapshotHash,
             overallFeedback: feedbackEl.value || '',
-            inlineComments: sortComments(comments).map(({ id, ...rest }) => rest),
+            inlineComments: draftComments(),
         };
     }
     function notifyDraft() {
@@ -1724,7 +1839,10 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     }
     feedbackEl.addEventListener('input', notifyDraft);
     function setControlsDisabled(disabled) {
-        container.querySelectorAll('.review-actions .button').forEach(b => { b.disabled = disabled; });
+        container.querySelectorAll('.review-actions .button, .comment-control, .comment-edit-input, '
+            + '#overall-feedback, #comment-composer textarea, #comment-composer button')
+            .forEach(control => { control.disabled = disabled; });
+        mappedController?.setResolved(disabled || resolved);
     }
 
     // ── submit ───────────────────────────────────────────────────────────────
@@ -1738,6 +1856,14 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     //   lost           → published, but the agent will never read it. Re-offer.
     //   unacknowledged → published, unconfirmed. Keep everything, say so plainly.
     // A rejection means the publish itself failed and nothing was sent at all.
+    function requireSavedCommentEdit(action = 'submitting this review') {
+        if (!editingCommentId) return false;
+        showError(`Save or Cancel your comment edit before ${action}.`);
+        const inputs = Array.from(container.querySelectorAll(`[data-edit-input="${editingCommentId}"]`));
+        (inputs.find(input => input.getClientRects().length > 0) || inputs[0])?.focus();
+        return true;
+    }
+
     function applySubmitResult(result, verdict) {
         // Fail safe: only a literal 'received' is success. An unknown status —
         // a newer client, a shape change, a missing field — is treated as
@@ -1768,6 +1894,7 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
 
     async function submit(verdict) {
         if (submitting || resolved) return;
+        if (requireSavedCommentEdit()) return;
         const payload = {
             reviewId,
             snapshotHash,
@@ -1798,6 +1925,7 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     });
     container.querySelector('#btn-skip').addEventListener('click', async () => {
         if (submitting || resolved) return;
+        if (requireSavedCommentEdit()) return;
         submitting = true;
         setControlsDisabled(true);
         showNotice('Sending…', 'pending');
@@ -1845,21 +1973,30 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
 
         /** Another device reviewed first (D-5/D-6). Never closes, never destroys the draft. */
         setSuperseded(device) {
+            const edited = comments.find(comment => comment.id === editingCommentId);
+            if (edited) edited.comment = editingCommentDraft;
             resolved = true;
+            editingCommentId = null;
+            editingCommentDraft = '';
             mappedController.setResolved(true);
             setControlsDisabled(true);
             renderComposer();
+            rerenderComments({ notify: false });
             showBanner('superseded',
                 `Already reviewed on ${device || 'another device'}. Your comments are kept here but will not be sent.`);
         },
 
         /** The agent exited (D-3). Comments stay on screen and go to the draft. */
         setCancelled(reason) {
+            const edited = comments.find(comment => comment.id === editingCommentId);
+            if (edited) edited.comment = editingCommentDraft;
             resolved = true;
+            editingCommentId = null;
+            editingCommentDraft = '';
             mappedController.setResolved(true);
             setControlsDisabled(true);
             renderComposer();
-            notifyDraft();
+            rerenderComments();
             // `reason` is a free string on the wire, so this reads it rather
             // than switching on it exhaustively. The wording follows whether the
             // draft was actually persisted — claiming a save that failed is how
@@ -1881,14 +2018,18 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         restoreDraft(draft) {
             if (!draft) return;
             feedbackEl.value = draft.overallFeedback || '';
-            comments = (draft.inlineComments || []).map(c => ({ id: nextCommentId(), ...c }));
+            const snapshotChanged = Boolean(draft.snapshotHash && snapshotHash
+                && draft.snapshotHash !== snapshotHash);
+            comments = snapshotChanged
+                ? []
+                : (draft.inlineComments || []).map(c => ({ id: nextCommentId(), ...c }));
             rerenderComments();
             // On a snapshot-hash mismatch the saved inline comments are dropped
             // deliberately: line anchors against changed content would attach
             // the reviewer's words to different text. Prose survives because it
             // is not anchored. Say so — comments disappearing with no
             // explanation reads as a bug and costs trust in the whole draft.
-            if (draft.snapshotHash && snapshotHash && draft.snapshotHash !== snapshotHash) {
+            if (snapshotChanged) {
                 showNotice('The plan changed since you last worked on this review. Your overall '
                     + 'feedback was restored, but your inline comments were not — their line '
                     + 'anchors no longer point at the same text.', 'warning');

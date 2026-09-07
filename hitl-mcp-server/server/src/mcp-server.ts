@@ -87,12 +87,17 @@ export class HumanInTheLoopServer {
   private server: Server;
   private transport: NtfyTransport;
   private config: HitlConfig;
+  private autoLaunchClient: boolean;
   /** reviewIds still waiting on a human, so a graceful exit can release them (D-3). */
   private outstandingReviews = new Set<string>();
 
   /** `config` is injectable so a test can construct a server without a real ~/.hitl. */
-  constructor(config: HitlConfig = loadConfig()) {
+  constructor(
+    config: HitlConfig = loadConfig(),
+    options: { autoLaunchClient?: boolean } = {}
+  ) {
     this.config = config;
+    this.autoLaunchClient = options.autoLaunchClient ?? true;
 
     this.server = new Server(
       { name: SERVER_NAME, version: SERVER_VERSION },
@@ -339,7 +344,9 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
       // Handle setup tool
       if (request.params.name === SETUP_TOOL_NAME) {
         try {
-          const result = await performSetup(SERVER_DIR);
+          const result = await performSetup(SERVER_DIR, {
+            autoLaunchClient: this.autoLaunchClient,
+          });
           return {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           };
@@ -870,6 +877,8 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
    * window to explain why (A-10).
    */
   private requireClient(): void {
+    if (!this.autoLaunchClient) return;
+
     const result = ensureClientRunning(SERVER_DIR);
     if (!result.ok) {
       throw new McpError(
@@ -959,6 +968,10 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
   }
 }
 
+export function parseServerOptions(args: string[]): { autoLaunchClient: boolean } {
+  return { autoLaunchClient: !args.includes('--no-auto-launch-client') };
+}
+
 /**
  * True when this file is what node was asked to run, rather than something
  * another module imported.
@@ -979,7 +992,7 @@ function isDirectlyExecuted(): boolean {
 }
 
 if (isDirectlyExecuted()) {
-  const server = new HumanInTheLoopServer();
+  const server = new HumanInTheLoopServer(loadConfig(), parseServerOptions(process.argv.slice(2)));
   server.run().catch((error) => {
     console.error('Server error:', error);
     process.exit(1);

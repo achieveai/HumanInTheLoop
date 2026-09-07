@@ -41,6 +41,10 @@
                     window.__INVOCATIONS.push({ cmd, args: args ?? null });
                     const fixture = window.__INBOX_FIXTURE ?? {};
 
+                    if (cmd === 'get_connection_settings') {
+                        return Promise.resolve({ mobile: false, configured: true, topicId: null });
+                    }
+
                     if (cmd === 'list_sessions') {
                         return Promise.resolve(fixture.sessions ?? emptyTree());
                     }

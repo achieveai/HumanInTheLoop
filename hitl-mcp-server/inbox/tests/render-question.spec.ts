@@ -239,6 +239,21 @@ test.describe('Pane 3 — a batch question (spec §8.2)', () => {
     await expect(page.locator('.stepper-tab', { hasText: 'Storage' })).toHaveClass(/answered/);
     await expect(page.locator('.stepper-tab', { hasText: 'Rollout' })).not.toHaveClass(/answered/);
   });
+
+  test('restoring a recovered batch repaints its navigation and answered steps', async ({ page }) => {
+    await mount(page, 'question', BATCHED, { wire: true });
+    await page.locator('.sub-question[data-index="0"] .option', { hasText: 'SQLite' }).click();
+    await page.locator('.stepper-tab', { hasText: 'Rollout' }).click();
+    const recovery = await page.evaluate(() => (window as any).__CONTROLLER.captureRecovery());
+
+    await mount(page, 'question', BATCHED, { wire: true });
+    await page.evaluate(value => (window as any).__CONTROLLER.restoreRecovery(value), recovery);
+
+    await expect(page.locator('.sub-question[data-index="2"]')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Previous' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Submit Response' })).toBeVisible();
+    await expect(page.locator('.stepper-tab', { hasText: 'Storage' })).toHaveClass(/answered/);
+  });
 });
 
 test.describe('Pane 3 — an answered question (spec §8.2)', () => {

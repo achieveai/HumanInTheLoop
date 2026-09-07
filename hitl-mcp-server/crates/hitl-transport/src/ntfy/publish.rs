@@ -243,12 +243,14 @@ async fn publish_prepared(
                         + 1,
                 );
                 let delay = server_delay.unwrap_or(fallback).saturating_add(jitter);
+                let remaining = RETRY_BUDGET.saturating_sub(started.elapsed());
                 if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                     // Every peer sees server feedback, even when this request
-                    // has no retry budget left to wait out the cooldown.
-                    limiter.apply_rate_limit(delay);
+                    // has no retry budget left to wait out the cooldown. Bound
+                    // untrusted Retry-After values before adding them to an
+                    // Instant, which cannot represent arbitrarily large spans.
+                    limiter.apply_rate_limit(delay.min(remaining));
                 }
-                let remaining = RETRY_BUDGET.saturating_sub(started.elapsed());
                 if attempt + 1 == MAX_PUBLISH_ATTEMPTS || delay > remaining {
                     return Err(format!("ntfy publish failed after retries: {status}").into());
                 }
@@ -524,6 +526,42 @@ mod tests {
         bulk.await.unwrap();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_retry_waiter_does_not_block_later_single_or_bulk_work() {
+        let limiter = Arc::new(PublishLimiter::with_limits(1, Duration::from_secs(5)));
+        limiter.acquire(PublishPriority::Bulk).await;
+
+        let retry = tokio::spawn({
+            let limiter = limiter.clone();
+            async move { limiter.acquire(PublishPriority::Retry).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!retry.is_finished(), "retry was not queued");
+        retry.abort();
+        assert!(retry.await.unwrap_err().is_cancelled());
+
+        let bulk = tokio::spawn({
+            let limiter = limiter.clone();
+            async move { limiter.acquire(PublishPriority::Bulk).await }
+        });
+        let single = tokio::spawn({
+            let limiter = limiter.clone();
+            async move { limiter.acquire(PublishPriority::Single).await }
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+        assert!(single.is_finished(), "cancelled retry still blocked single work");
+        assert!(!bulk.is_finished(), "bulk work bypassed single-send priority");
+        single.await.unwrap();
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+        assert!(bulk.is_finished(), "cancelled retry still blocked bulk work");
+        bulk.await.unwrap();
+    }
+
     fn response_server(statuses: Vec<&'static str>) -> (String, Arc<Mutex<Vec<Vec<u8>>>>) {
         response_server_with_retry(
             statuses
@@ -671,5 +709,31 @@ mod tests {
         let state = limiter.state.lock().unwrap();
         assert_eq!(state.tokens, 0);
         assert!(state.cooldown_until > tokio::time::Instant::now());
+    }
+
+    #[tokio::test]
+    async fn enormous_retry_after_is_bounded_instead_of_panicking_the_publish_task() {
+        let (base, bodies) = response_server_with_retry(vec![(
+            "429 Too Many Requests",
+            Some("18446744073709551615"),
+        )]);
+        let config = HitlConfig {
+            ntfy_url: base,
+            topic_id: "topic".into(),
+            ..HitlConfig::default()
+        };
+        let client = http_client(Some(Duration::from_secs(2)), None);
+
+        let error = publish_message_with_client(&client, &config, "{}", false)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("after retries"));
+        assert_eq!(bodies.lock().unwrap().len(), 1);
+        let limiter = limiter_for(&format!("{}/topic", config.ntfy_url));
+        let state = limiter.state.lock().unwrap();
+        let now = tokio::time::Instant::now();
+        assert!(state.cooldown_until > now);
+        assert!(state.cooldown_until <= now + RETRY_BUDGET);
     }
 }

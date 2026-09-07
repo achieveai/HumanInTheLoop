@@ -648,19 +648,40 @@ button.comment-card-anchor {
 
 .comment-card-body { white-space: pre-wrap; color: #2d3748; line-height: 1.45; }
 
-.comment-remove {
+.comment-card-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 5px;
+    margin-top: 6px;
+}
+
+.comment-control {
     margin-top: 6px;
     background: none;
     border: 1px solid #e2e8f0;
     border-radius: 5px;
-    padding: 2px 8px;
+    padding: 2px 7px;
     font-size: 11px;
     color: #718096;
     cursor: pointer;
     font-family: inherit;
 }
 
-.comment-remove:hover { background: #fff5f5; color: #c53030; border-color: #feb2b2; }
+.comment-card-actions .comment-control { margin-top: 0; }
+.comment-control:hover { background: #edf2f7; color: #2d3748; border-color: #cbd5e0; }
+.comment-delete:hover { background: #fff5f5; color: #c53030; border-color: #feb2b2; }
+.comment-control:disabled { opacity: 0.55; cursor: default; }
+
+.comment-edit-input {
+    width: 100%;
+    min-height: 58px;
+    padding: 6px 8px;
+    border: 1px solid #90cdf4;
+    border-radius: 5px;
+    font: inherit;
+    line-height: 1.4;
+    resize: vertical;
+}
 
 .comment-composer {
     margin: 6px 12px 10px 62px;

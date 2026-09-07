@@ -16,6 +16,7 @@ import {
     TYPES,
 } from './pane-list.js';
 import { createReplyActions } from './reply.js';
+import { createConnectionSettings } from './settings.js';
 
 /** Emitted by the Rust side when a genuinely new event lands. */
 const CHANGED_EVENT = 'inbox-changed';
@@ -811,14 +812,25 @@ async function main() {
             actionErrorDialog: document.getElementById('action-error-dialog'),
         },
     });
+    let started = false;
+    const startInbox = async () => {
+        if (started) return;
+        started = true;
+        await inbox.refresh();
 
-    await inbox.refresh();
-
-    // The view is a function of the log, so there is nothing finer-grained to
-    // listen for: one event lands, both panes are re-derived.
-    await tauri.event.listen(CHANGED_EVENT, () => {
-        inbox.refreshAfterChange().catch(console.error);
+        // The view is a function of the log, so there is nothing finer-grained
+        // to listen for: one event lands, both panes are re-derived.
+        await tauri.event.listen(CHANGED_EVENT, () => {
+            inbox.refreshAfterChange().catch(console.error);
+        });
+    };
+    const connection = createConnectionSettings({
+        invoke,
+        dialog: document.getElementById('connection-dialog'),
+        openButton: document.getElementById('connection-settings'),
+        onConfigured: () => startInbox().catch(console.error),
     });
+    await connection.initialize();
 }
 
 main().catch(console.error);
