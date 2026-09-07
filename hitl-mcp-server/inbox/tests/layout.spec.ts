@@ -290,9 +290,13 @@ test.describe('§4 — large-list resize containment', () => {
     expect(Math.abs(beforeRefresh.scrollHeight - cold.scrollHeight) / cold.scrollHeight)
       .toBeLessThanOrEqual(0.01);
 
-    const refreshedRows = rows.map((row, index) => index === rows.length - 1
-      ? { ...row, title: 'Final mixed-height row refreshed' }
-      : row);
+    const refreshedRows = rows.map((row, index) => {
+      if (index === rows.length - 1) return { ...row, title: 'Final mixed-height row refreshed' };
+      if (index >= rows.length - 12 && !row.contextSnippet) {
+        return { ...row, contextSnippet: `Context added during refresh for row ${index}` };
+      }
+      return row;
+    });
     const refreshedFinal = refreshedRows.at(-1)!;
     await page.evaluate(({ projection, refreshedDetail }) => {
       const fixture = (window as any).__INBOX_FIXTURE;
@@ -416,6 +420,52 @@ test.describe('§4 — large-list resize containment', () => {
     expect(await page.evaluate(() => (document.querySelector('#message-list') as HTMLElement).scrollTop))
       .toBe(beforeOrientation.scrollTop);
     expect(errors).toEqual([]);
+  });
+
+  test('a deferred refresh correction never overrides a newer user scroll', async ({ page }) => {
+    const rows = Array.from({ length: 80 }, (_, index) => message({
+      messageId: `scroll-${index}`,
+      title: `Scrollable row ${index}`,
+    }));
+    const finalRow = rows.at(-1)!;
+    await open(page, WIDE, {
+      messages: list({ messages: rows }),
+      details: { [finalRow.messageId]: detail(finalRow) },
+    });
+    const last = page.locator('.message-row').last();
+    await last.evaluate(row => row.scrollIntoView({ block: 'end' }));
+    await last.click();
+
+    const result = await page.evaluate(async selectedId => {
+      const { renderMessageList } = await import('./pane-list.js');
+      const container = document.querySelector('#message-list') as HTMLElement;
+      const projection = (window as any).__INBOX_FIXTURE.messages;
+      const queued: FrameRequestCallback[] = [];
+      const original = window.requestAnimationFrame;
+      window.requestAnimationFrame = callback => {
+        queued.push(callback);
+        return queued.length;
+      };
+      try {
+        renderMessageList(container, projection, { selectedId });
+        const afterRender = container.scrollTop;
+        container.scrollTop = afterRender - 60;
+        const afterUserScroll = container.scrollTop;
+        queued.shift()?.(performance.now());
+        return {
+          afterRender,
+          afterUserScroll,
+          afterDeferredRestore: container.scrollTop,
+          remainingFrames: queued.length,
+        };
+      } finally {
+        window.requestAnimationFrame = original;
+      }
+    }, finalRow.messageId);
+
+    expect(result.afterUserScroll).toBeLessThan(result.afterRender);
+    expect(result.afterDeferredRestore).toBe(result.afterUserScroll);
+    expect(result.remainingFrames).toBe(0);
   });
 });
 

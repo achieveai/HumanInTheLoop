@@ -11,6 +11,7 @@
 const MINUTE = 60;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+const scrollRestoreTokens = new WeakMap();
 
 /** The pinned filters of spec §7.3, in the order they are shown. */
 export const FILTERS = [
@@ -191,8 +192,51 @@ function messageRow(message, { selectedId, onSelect } = {}) {
     return row;
 }
 
+function visibleSelectedAnchor(container) {
+    const selected = container.querySelector('.message-row.is-selected');
+    if (!selected) return null;
+    const containerRect = container.getBoundingClientRect();
+    const rowRect = selected.getBoundingClientRect();
+    if (rowRect.bottom <= containerRect.top || rowRect.top >= containerRect.bottom) return null;
+    return {
+        messageId: selected.dataset.messageId,
+        top: rowRect.top - containerRect.top,
+    };
+}
+
+function restoreSelectedAnchor(container, anchor) {
+    const selected = container.querySelector('.message-row.is-selected');
+    if (!selected || selected.dataset.messageId !== anchor.messageId) return;
+    const currentTop = selected.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    const delta = currentTop - anchor.top;
+    if (Number.isFinite(delta) && Math.abs(delta) > 0.5) container.scrollTop += delta;
+}
+
+function restoreSelectedAnchorAfterLayout(container, anchor, restoreToken, expectedScrollTop, frames) {
+    requestAnimationFrame(() => {
+        const currentToken = scrollRestoreTokens.get(container);
+        if (!container.isConnected
+            || currentToken !== restoreToken
+            || Math.abs(container.scrollTop - expectedScrollTop) > 0.5) {
+            if (currentToken === restoreToken) scrollRestoreTokens.delete(container);
+            return;
+        }
+        restoreSelectedAnchor(container, anchor);
+        if (frames > 1) {
+            restoreSelectedAnchorAfterLayout(
+                container, anchor, restoreToken, container.scrollTop, frames - 1,
+            );
+        } else {
+            scrollRestoreTokens.delete(container);
+        }
+    });
+}
+
 /** Render the list. Server-ordered newest first; nothing is re-sorted here. */
 export function renderMessageList(container, list, options = {}) {
+    const anchor = visibleSelectedAnchor(container);
+    const restoreToken = {};
+    scrollRestoreTokens.set(container, restoreToken);
     const fragment = document.createDocumentFragment();
 
     if (!list.messages.length) {
@@ -203,6 +247,10 @@ export function renderMessageList(container, list, options = {}) {
         }
     }
     container.replaceChildren(fragment);
+    if (!anchor) return;
+
+    restoreSelectedAnchor(container, anchor);
+    restoreSelectedAnchorAfterLayout(container, anchor, restoreToken, container.scrollTop, 2);
 }
 
 function emptyText(list) {
