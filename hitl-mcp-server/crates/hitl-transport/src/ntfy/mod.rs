@@ -49,6 +49,8 @@ pub trait NtfySink: Send + Sync {
     fn on_question(&self, msg: &QuestionMessage, was_encrypted: bool);
     fn on_answer(&self, msg: &AnswerMessage);
     fn on_notification(&self, msg: &NotificationMessage, was_encrypted: bool);
+    /// Additive callback; recorders already receive the verbatim event.
+    fn on_work_update(&self, _msg: &crate::types::WorkUpdateMessage, _was_encrypted: bool) {}
     fn on_dismiss_notification(&self, msg: &DismissNotificationMessage);
     /// A targeted undo of one notification dismissal.
     ///
@@ -94,6 +96,7 @@ pub(crate) mod test_sink {
         Question(String),
         Answer(String),
         Notification(String),
+        WorkUpdate(String, u64, bool),
         DismissNotification(String),
         RestoreNotification(String, String),
         PlanReview(String),
@@ -135,6 +138,9 @@ pub(crate) mod test_sink {
         }
         fn on_answer(&self, m: &AnswerMessage) {
             self.push(Call::Answer(m.question_id.clone()));
+        }
+        fn on_work_update(&self, m: &crate::types::WorkUpdateMessage, _: bool) {
+            self.push(Call::WorkUpdate(m.work_id.clone(), m.revision, m.alert));
         }
         fn on_notification(&self, m: &NotificationMessage, _: bool) {
             self.push(Call::Notification(m.message_id.clone()));

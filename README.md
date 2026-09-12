@@ -6,7 +6,7 @@ Let an AI agent ask questions, send notifications, and request line-by-line plan
 
 | Component | What it does |
 | --- | --- |
-| **MCP server** | Exposes `AskUserQuestion`, `ReviewPlan`, `Notify`, and `setup` to your agent. |
+| **MCP server** | Exposes `AskUserQuestion`, `ReviewPlan`, `Notify`, `UpdateWork`, `ReadWork`, and `setup` to your agent. |
 | **HITL Client** | Tray app that shows incoming questions and reviews as popup windows. |
 | **HITL Inbox** | Persistent window for browsing notifications, answering questions, and reviewing plans. |
 | **Archivist** | Optional headless recorder. Keeps history and attachment bodies available to a local Inbox. |

@@ -652,7 +652,7 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         // everything the reader has typed (spec §9.3).
         const selected = messages.find(m => m.messageId === state.selectedId);
         if (selectAdjacent(messages, previousVisible)) return;
-        if (selected && selected.status !== state.selectedStatus) {
+        if (selected && (selected.status !== state.selectedStatus || (selected.msgType === 'notification' && selected.badges?.revision))) {
             state.selectedStatus = selected.status;
             run(detailPane.update(selected));
         }

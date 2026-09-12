@@ -32,7 +32,7 @@ fn blocks_an_agent(msg_type: &str) -> bool {
 fn glyph_for(msg_type: &str) -> &'static str {
     match msg_type {
         "question" => "?",
-        "notification" => "!",
+        "notification" | "work_update" => "!",
         "plan_review" => "▤",
         _ => "·",
     }
@@ -44,7 +44,8 @@ fn glyph_for(msg_type: &str) -> &'static str {
 /// outlive the question it settles. Such a subject gets no row, because there
 /// is nothing truthful to put in one.
 fn request_event(events: &[Event]) -> Option<&Event> {
-    events.iter().find(|e| blocks_an_agent(&e.msg_type) || e.msg_type == "notification")
+    hitl_store::events::latest_work_event(events).or_else(|| events.iter()
+        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review")))
 }
 
 /// The one line that identifies a message (spec §7.1).
@@ -65,7 +66,7 @@ fn title_of(request: &Event) -> String {
                 _ => request.field("question"),
             }
         }
-        "notification" => request.field("title"),
+        "notification" | "work_update" => request.field("title"),
         _ => request.field("displayPath"),
     };
     title.unwrap_or_else(|| "(untitled)".to_string())
@@ -128,7 +129,7 @@ fn badges_of(request: &Event) -> Badges {
         revision: json
             .get("revision")
             .and_then(|v| v.as_u64())
-            .filter(|r| *r > 1),
+            .filter(|r| *r > 1 || request.msg_type == "work_update"),
         attachment: json
             .get("body")
             .and_then(|b| b.get("kind"))
@@ -217,8 +218,8 @@ fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
 
     Some(Subject {
         row: MessageRow {
-            message_id: request.message_id.clone(),
-            msg_type: request.msg_type.clone(),
+            message_id: request.subject_id.clone().unwrap_or_else(|| request.message_id.clone()),
+            msg_type: if request.msg_type == "work_update" { "notification".into() } else { request.msg_type.clone() },
             glyph: glyph_for(&request.msg_type),
             title: title_of(request),
             status: state.status.as_str().to_string(),

@@ -21,7 +21,7 @@ use rusqlite::{Connection, Result};
 /// **Append only. Never edit a step that has shipped** — an existing database
 /// has already run it and will never run it again, so a change here reaches
 /// only new installs and silently forks the schema in two.
-const MIGRATIONS: &[&str] = &[DDL_V1, DDL_V2, DDL_V3];
+const MIGRATIONS: &[&str] = &[DDL_V1, DDL_V2, DDL_V3, DDL_V4];
 
 /// Derived from [`MIGRATIONS`] rather than maintained by hand, because the one
 /// way this scheme breaks is a step added without the version bumped to match.
@@ -282,7 +282,7 @@ mod tests {
             non_string, None,
             "subject extraction accepts only string IDs"
         );
-        assert_eq!(version, 3);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -378,13 +378,30 @@ mod tests {
     }
 
     #[test]
+    fn v4_backfills_work_subject_without_parsing_bad_json() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(DDL_V1).unwrap();
+        conn.execute_batch(DDL_V2).unwrap();
+        conn.execute_batch(DDL_V3).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        for (id, payload) in [("valid", r#"{"workId":"work"}"#), ("invalid", "{"), ("number", r#"{"workId":4}"#)] {
+            conn.execute("INSERT INTO events (ntfy_id,ntfy_time,message_id,type,payload) VALUES (?1,1,?1,'work_update',?2)", (id,payload)).unwrap();
+        }
+        migrate(&conn).unwrap();
+        let subject: String = conn.query_row("SELECT subject_id FROM events WHERE ntfy_id='valid'", [], |r| r.get(0)).unwrap();
+        assert_eq!(subject, "work");
+        let count: i64 = conn.query_row("SELECT count(*) FROM events WHERE subject_id IS NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
     fn the_version_counts_the_steps() {
         // The bump this scheme is most likely to be forgotten on: adding a step
         // without moving the version leaves existing databases un-migrated.
         assert_eq!(SCHEMA_VERSION, MIGRATIONS.len() as i64);
         assert_eq!(
-            SCHEMA_VERSION, 3,
-            "v3 backfills restore_notification subjects"
+            SCHEMA_VERSION, 4,
+            "v4 backfills work_update subjects"
         );
     }
 
@@ -439,3 +456,12 @@ mod tests {
         assert_eq!(events, 1);
     }
 }
+
+/// Repair subjects of work snapshots recorded by older clients.
+const DDL_V4: &str = r#"
+UPDATE events SET subject_id = CASE WHEN json_valid(payload) THEN
+ CASE WHEN json_type(payload, '$.workId') = 'text'
+ AND length(json_extract(payload, '$.workId')) > 0
+ THEN json_extract(payload, '$.workId') ELSE NULL END
+ ELSE NULL END WHERE type = 'work_update';
+"#;

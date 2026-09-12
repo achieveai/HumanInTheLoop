@@ -45,6 +45,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  * renderers use, so the two apps render a plan the same way.
  */
 const ASSETS = [
+    'work-document.js',
+    'work-document.css',
     'review.js',
     'review.css',
     'vendor/markdown-it.min.js',

@@ -1,7 +1,12 @@
+import { renderWorkDocument, workExpansion } from './work-document.js';
 const { getCurrentWindow } = window.__TAURI__.window;
 const { listen } = window.__TAURI__.event;
 const { invoke } = window.__TAURI__.core;
 
+const workRevisions = new Map();
+const pendingWorkDismissals = new Set();
+const notificationKey = item => item.type === 'work_update' ? item.workId : item.messageId;
+const findCard = id => [...listEl.querySelectorAll('.notification-card')].find(card => card.dataset.id === id);
 const notifications = []; // Array of notification objects
 const listEl = document.getElementById('notifications-list');
 const emptyEl = document.getElementById('empty-state');
@@ -70,19 +75,21 @@ function renderSenderBadgeHtml(sender) {
     return `<span class="badge badge-sender" title="${label}">${label}</span>`;
 }
 
-function addNotificationCard(notification) {
+function addNotificationCard(notification, previousCard = null) {
+    const expanded = previousCard ? workExpansion(previousCard) : new Set();
+    const id = notificationKey(notification);
     emptyEl.style.display = 'none';
 
     const card = document.createElement('div');
     card.className = 'notification-card';
-    card.dataset.id = notification.messageId;
+    card.dataset.id = id;
 
     let contextHtml = '';
-    if (notification.context) {
+    if (notification.type !== 'work_update' && notification.context) {
         contextHtml = `<div class="notification-context md-content">${renderMarkdown(notification.context)}</div>`;
     }
 
-    const bodyHtml = renderMarkdown(notification.body);
+    const bodyHtml = notification.type === 'work_update' ? '' : renderMarkdown(notification.body);
     const senderBadgeHtml = renderSenderBadgeHtml(notification.sender);
 
     card.innerHTML = `
@@ -94,16 +101,18 @@ function addNotificationCard(notification) {
         <div class="notification-body md-content">${bodyHtml}</div>
         ${contextHtml}
         <div class="notification-dismiss">
-            <button class="dismiss-btn" data-id="${escapeHtml(notification.messageId)}">Dismiss</button>
+            <button class="dismiss-btn" data-id="${escapeHtml(id)}">Dismiss</button>
         </div>
     `;
 
-    // Prepend so newest is on top
-    listEl.insertBefore(card, listEl.firstChild);
+    if (notification.type === 'work_update') renderWorkDocument(card.querySelector('.notification-body'), notification.document, expanded, notification.body);
+    // Revisions stay in place; new notifications appear first.
+    if (previousCard) previousCard.replaceWith(card);
+    else listEl.insertBefore(card, listEl.firstChild);
 
     // Wire up dismiss button
     card.querySelector('.dismiss-btn').addEventListener('click', () => {
-        dismissNotification(notification.messageId, card);
+        dismissNotification(id, card);
     });
 
     renderNotifications();
@@ -114,17 +123,31 @@ async function dismissNotification(messageId, cardEl) {
     cardEl.classList.add('dismissing');
 
     // Check if this notification was received encrypted
-    const notification = notifications.find(n => n.messageId === messageId);
+    const notification = notifications.find(n => notificationKey(n) === messageId);
     const encrypted = notification?._wasEncrypted || false;
+    const isWork = notification?.type === 'work_update';
+    if (isWork) {
+        if (pendingWorkDismissals.has(messageId)) return;
+        pendingWorkDismissals.add(messageId);
+        cardEl.querySelector('.dismiss-btn').disabled = true;
+    }
 
     try {
         await invoke('dismiss_notification', { notificationId: messageId, encrypted });
     } catch (err) {
         console.error('Failed to dismiss notification:', err);
+        if (isWork) {
+            pendingWorkDismissals.delete(messageId);
+            const latest = notifications.find(item => notificationKey(item) === messageId);
+            const currentCard = findCard(messageId);
+            if (latest && currentCard) addNotificationCard(latest, currentCard);
+            return;
+        }
     }
+    pendingWorkDismissals.delete(messageId);
 
     // Remove from array
-    const idx = notifications.findIndex(n => n.messageId === messageId);
+    const idx = notifications.findIndex(n => notificationKey(n) === messageId);
     if (idx !== -1) notifications.splice(idx, 1);
 
     // Remove card after animation
@@ -141,7 +164,7 @@ async function dismissNotification(messageId, cardEl) {
  * here, or after it was dismissed.
  */
 export function applySenderIdentity(forMessageId, sender) {
-    const card = listEl.querySelector(`[data-id="${forMessageId}"]`);
+    const card = findCard(forMessageId);
     if (!card) return;
     const badgeHtml = renderSenderBadgeHtml(sender);
     if (!badgeHtml) return;
@@ -156,12 +179,12 @@ export function applySenderIdentity(forMessageId, sender) {
 }
 
 function removeNotificationById(messageId) {
-    const idx = notifications.findIndex(n => n.messageId === messageId);
+    const idx = notifications.findIndex(n => notificationKey(n) === messageId);
     if (idx === -1) return;
 
     notifications.splice(idx, 1);
 
-    const card = listEl.querySelector(`[data-id="${messageId}"]`);
+    const card = findCard(messageId);
     if (card) {
         card.classList.add('dismissing');
         setTimeout(() => {
@@ -173,6 +196,30 @@ function removeNotificationById(messageId) {
     }
 }
 
+/** Remember quiet revisions too, so delayed alerts cannot reopen older work. */
+function receiveNotification(notification) {
+    const id = notificationKey(notification);
+    const index = notifications.findIndex(item => notificationKey(item) === id);
+    if (notification.type === 'work_update') {
+        const doc = notification.document;
+        if (!id || !Number.isSafeInteger(notification.revision) || notification.revision < 1
+            || doc?.workId !== id || doc?.revision !== notification.revision || !Array.isArray(doc?.tasks)) return;
+        if (notification.revision <= (workRevisions.get(id) || 0)) return;
+        workRevisions.set(id, notification.revision);
+        if (index < 0 && notification.alert !== true) return;
+        const card = findCard(id);
+        if (index >= 0) notifications[index] = notification;
+        else notifications.push(notification);
+        // Keep the dismissing DOM stable; retain the newest data for rollback.
+        if (pendingWorkDismissals.has(id)) return;
+        addNotificationCard(notification, card);
+        return;
+    }
+    if (index >= 0) return;
+    notifications.push(notification);
+    addNotificationCard(notification);
+}
+
 // Parse initial notification from URL params
 function loadInitialNotification() {
     const params = new URLSearchParams(window.location.search);
@@ -180,8 +227,7 @@ function loadInitialNotification() {
     if (notificationParam) {
         try {
             const notification = JSON.parse(notificationParam);
-            notifications.push(notification);
-            addNotificationCard(notification);
+            receiveNotification(notification);
         } catch (err) {
             console.error('Failed to parse initial notification:', err);
         }
@@ -197,11 +243,7 @@ async function setupListeners() {
                 ? JSON.parse(event.payload)
                 : event.payload;
             
-            // Avoid duplicates
-            if (notifications.some(n => n.messageId === notification.messageId)) return;
-
-            notifications.push(notification);
-            addNotificationCard(notification);
+            receiveNotification(notification);
         } catch (err) {
             console.error('Failed to handle add-notification:', err);
         }
@@ -228,6 +270,6 @@ setupListeners();
 // Show window after content is fully painted (prevents flash)
 requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-        invoke('show_no_activate');
+        if (notifications.length) invoke('show_no_activate');
     });
 });

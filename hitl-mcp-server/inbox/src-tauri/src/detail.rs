@@ -63,9 +63,8 @@ fn settles(msg_type: &str) -> bool {
 
 /// The request event a subject is about.
 fn request_event(events: &[Event]) -> Option<&Event> {
-    events
-        .iter()
-        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review"))
+    hitl_store::events::latest_work_event(events).or_else(|| events.iter()
+        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review")))
 }
 
 /// The settlement selected by the already-folded row.
@@ -158,6 +157,42 @@ mod tests {
             msg_type,
             payload: payload.to_string(),
         }
+    }
+
+
+    fn work(id: &str, revision: u64) -> Event {
+        let json = serde_json::json!({"type":"work_update","messageId":id,"timestamp":1,"workId":"work","revision":revision,"title":"Build","body":"Progress","alert":false,"document":{"workId":"work","title":"Build","goal":"Goal","rootTaskId":"root","revision":revision,"updatedAt":1,"changes":[],"tasks":[{"taskId":"root","parentTaskId":null,"revision":1,"owner":"lead","reportedBy":"lead","status":"completed","completed":[],"learnings":[],"current":null,"remaining":[],"blockers":[],"reportedAt":1}]}});
+        ev(id, NOW - MINUTE, &json.to_string())
+    }
+
+    #[test]
+    fn work_replay_selects_highest_valid_revision_for_list_and_detail() {
+        let mut malformed = work("bad", 99);
+        let mut json = malformed.json();
+        json["document"]["revision"] = serde_json::json!(98);
+        malformed.payload = json.to_string();
+        let events = vec![work("older", 1), work("b", 3), malformed, work("a", 3)];
+        for order in [events.clone(), events.into_iter().rev().collect()] {
+            let detail = build_detail(&order, "work", NOW).unwrap();
+            assert_eq!(detail.row.message_id, "work");
+            assert_eq!(detail.row.msg_type, "notification");
+            assert_eq!(detail.row.badges.revision, Some(3));
+            assert_eq!(detail.request["messageId"], "b");
+            assert_eq!(detail.request["type"], "work_update");
+            assert_eq!(view::build_list(&order, None, Some("all"), NOW).messages.len(), 1);
+        }
+    }
+
+    #[test]
+    fn work_completion_does_not_dismiss_and_updates_do_not_restore() {
+        let mut events = vec![work("first", 1)];
+        assert_eq!(build_detail(&events, "work", NOW).unwrap().row.status, "pending");
+        events.push(ev("dismiss", NOW, r#"{"type":"dismiss_notification","messageId":"dismiss","notificationId":"work","dismissedFrom":"test"}"#));
+        events.push(work("newer", 2));
+        let detail = build_detail(&events, "work", NOW).unwrap();
+        assert_eq!(detail.row.status, "dismissed");
+        assert_eq!(detail.row.badges.revision, Some(2));
+        assert_eq!(detail.settlement.unwrap()["messageId"], "dismiss");
     }
 
     fn question() -> Event {

@@ -19,16 +19,15 @@ use crate::{Result, Store};
 /// response can outlive the request it answers. Such a subject is not
 /// projected, because there is nothing truthful to show in a row for it.
 fn request_event(events: &[Event]) -> Option<&Event> {
-    events
-        .iter()
-        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review"))
+    crate::events::latest_work_event(events).or_else(|| events.iter()
+        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review")))
 }
 
 /// The one line that identifies a message in the list (spec §7.1).
 fn title_of(request: &Event) -> String {
     let key = match request.msg_type.as_str() {
         "question" => "question",
-        "notification" => "title",
+        "notification" | "work_update" => "title",
         _ => "displayPath",
     };
     request.field(key).unwrap_or_default()
@@ -64,7 +63,7 @@ impl Store {
                repo_branch = excluded.repo_branch",
             params![
                 subject_id,
-                request.msg_type,
+                if request.msg_type == "work_update" { "notification" } else { &request.msg_type },
                 request.ntfy_time as i64,
                 state.status.as_str(),
                 state.verdict.map(|v| v.as_str()),

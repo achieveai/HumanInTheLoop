@@ -28,6 +28,9 @@
             core: {
                 invoke: (cmd, args) => {
                     console.log('[TAURI MOCK] invoke:', cmd, args);
+                    if (cmd === 'dismiss_notification' && window.__DEFER_DISMISS) {
+                        return new Promise((resolve, reject) => { window.__resolveDismiss = resolve; window.__rejectDismiss = reject; });
+                    }
                     return Promise.resolve();
                 },
             },

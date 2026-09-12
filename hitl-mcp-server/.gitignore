@@ -58,3 +58,5 @@ playwright-report/
 # Temporary files
 tmp/
 temp/
+/inbox/src/work-document.js
+/inbox/src/work-document.css
