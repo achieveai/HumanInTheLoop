@@ -1,3 +1,5 @@
+import './diagrams.js';
+
 // Dialog rendering and interaction logic for the HITL Tauri client.
 
 /**

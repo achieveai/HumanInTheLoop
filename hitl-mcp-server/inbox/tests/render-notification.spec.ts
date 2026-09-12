@@ -38,6 +38,12 @@ const DISMISSED = detail(
 );
 
 test.describe('Pane 3 — notifications (spec §8.1)', () => {
+  test('notification diagrams use the shared viewer', async ({ page }) => {
+    await mount(page, 'notification', { ...OPEN, request: {
+      ...REQUEST, body: '```mermaid\nsequenceDiagram\nAlice->>Bob: Hello\n```',
+    } });
+    await expect(page.locator('.diagram-viewer img')).toBeVisible();
+  });
   test('shows the title, the body as markdown, the sender and the context', async ({ page }) => {
     await mount(page, 'notification', OPEN);
 

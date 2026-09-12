@@ -11,6 +11,7 @@
 // place markdown is rendered goes through markdown-it with `html: false`, which
 // drops raw HTML outright.
 
+import './diagrams.js';
 import { formatAbsolute, statusPill } from './pane-list.js';
 
 /** Create an element, optionally with a class and text. */

@@ -1,0 +1,18 @@
+.diagram-engine { position: fixed; left: -12000px; top: 0; width: 1200px; height: 900px; border: 0; pointer-events: none; }
+.diagram-viewer { min-width: 0; margin: 12px 0; border: 1px solid #aeb9ca; border-radius: 8px; overflow: hidden; background: #fff; color: #17243b; }
+.diagram-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px; background: #eef2f7; color: #17243b; }
+.diagram-toolbar button { border: 1px solid #aeb9ca; border-radius: 4px; padding: 6px 10px; min-height: 36px; background: #fff; color: #17243b; cursor: pointer; font: inherit; }
+.diagram-toolbar button:focus-visible, .diagram-viewer summary:focus-visible, .diagram-viewport:focus-visible { outline: 3px solid #2563eb; outline-offset: -3px; }
+.diagram-toolbar output { min-width: 4em; text-align: center; font: 13px system-ui; }
+.diagram-viewport { overflow: auto; max-height: 520px; padding: 12px; background: white; }
+.diagram-viewport img { display: block; max-width: 100%; height: auto; margin: 0; }
+.diagram-viewer details { border-top: 1px solid #dce2eb; }
+.diagram-viewer summary { cursor: pointer; padding: 8px 12px; font: 13px system-ui; }
+.diagram-viewer details pre { margin: 0; padding: 12px; overflow: auto; max-height: 350px; white-space: pre; }
+.diagram-status, .diagram-error { margin: 0; padding: 12px; font: 14px system-ui; }
+.diagram-error { color: #992d1b; }
+.diagram-dialog { width: 94vw; max-width: none; height: 90vh; max-height: none; padding: 0; border: 1px solid #aeb9ca; border-radius: 10px; background: white; }
+.diagram-dialog[open] { display: flex; flex-direction: column; }
+.diagram-dialog::backdrop { background: rgb(10 20 40 / 65%); }
+.diagram-dialog .diagram-viewport { flex: 1; min-height: 0; max-height: none; }
+@media (max-width: 600px) { .diagram-toolbar button { min-height: 44px; } .diagram-dialog { width: 98vw; height: 96vh; } }
