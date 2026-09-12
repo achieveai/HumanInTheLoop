@@ -260,7 +260,7 @@ Sends a notification to all devices and **returns immediately** — it does not 
 
 ### `UpdateWork` and `ReadWork`
 
-Use these tools for one evolving progress document per goal. Agents update their own tasks; the Inbox shows the full team document. Expand child tasks to see completed outcomes, learnings, current work and its purpose, remaining work, blockers, and report times.
+Use these tools for multi-step work, milestones, and team reporting. Reuse one `workId` per goal to keep one evolving progress document in the Inbox. Prefer this to repeated one-off `Notify` calls for the same work. Agents update their own tasks; the Inbox shows the full team document. Expand child tasks to see completed outcomes, learnings, current work and its purpose, remaining work, blockers, and report times.
 
 Start a document with a root task:
 
@@ -293,9 +293,13 @@ Start a document with a root task:
 
 Call `ReadWork` with `{"workId":"sign-in-reliability"}` to read the latest recorded state. To add a child, use a new `taskId`, the parent's ID as `parentTaskId`, and `expectedRevision: 0`. To update a task, send its complete task fields and its latest task revision as `expectedRevision`. The document revision and task revision are separate.
 
+Read before resuming work or handling a revision conflict. Retain your task's still-relevant outcomes and learnings: each task report replaces its previous report, and arrays replace previous arrays. Sending `[]` clears a list; `current: null` clears current work. Other tasks remain in the document. After a conflict, reconcile against the latest task revision and submit a new logical update with a new `updateId`.
+
 Use a new `updateId` for each logical change. Retry the **same input and updateId** after an uncertain response. A saved update and a published update are separate outcomes; inspect the result before claiming delivery. Concurrent sibling updates preserve each other's work. Stale edits to the same task are rejected.
 
 Routine updates default to quiet. Set `alert: true` for a meaningful milestone, blocker, decision, or completion. Quiet updates refresh the document without opening a tray popup. Dismissing a notification does not complete the work. Changes are labeled relative to the previous update; the tool does not infer when the user last read the document.
+
+The Inbox has a separate **Work** filter. Each work item shows the root's explicit lifecycle, owner, completed/total task counts, and blocked task count. Counts include the root and all descendants; they are task counts, not a percentage of effort. The list and open detail use the newest valid full snapshot, retaining one row per `workId` even when older updates arrive later.
 
 An agent can use `ReadWork` to gather child reports, ask its sub-agents for fresh reports through its host's messaging tools, and provide a concise `summary` with its next update. HITL does not contact arbitrary sub-agents itself.
 

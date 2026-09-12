@@ -155,11 +155,43 @@ fn content_hash_of(request: &Event) -> Option<String> {
         .map(str::to_string)
 }
 
-/// One row of pane 2 — a header, and nothing else. No body, no controls: those
-/// are pane 3's job (spec §7).
+/// Work lifecycle and task counts from the latest full snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkMetadata {
+    pub snapshot_message_id: String,
+    pub status: String,
+    pub owner: String,
+    pub total_tasks: usize,
+    pub completed_tasks: usize,
+    pub blocked_tasks: usize,
+}
+
+/// The selected request is already validated by `latest_work_event`.
+/// Root lifecycle remains independent of both child counts and Inbox dismissal.
+fn work_metadata(request: &Event) -> Option<WorkMetadata> {
+    if request.msg_type != "work_update" { return None; }
+    let json = request.json();
+    let document = json.get("document")?;
+    let tasks = document.get("tasks")?.as_array()?;
+    let root_id = document.get("rootTaskId")?.as_str()?;
+    let root = tasks.iter().find(|task| task.get("taskId").and_then(|v| v.as_str()) == Some(root_id))?;
+    Some(WorkMetadata {
+        snapshot_message_id: request.message_id.clone(),
+        status: root.get("status")?.as_str()?.to_string(),
+        owner: root.get("owner")?.as_str()?.to_string(),
+        total_tasks: tasks.len(),
+        completed_tasks: tasks.iter().filter(|task| task["status"] == "completed").count(),
+        blocked_tasks: tasks.iter().filter(|task| task["status"] == "blocked").count(),
+    })
+}
+
+/// One row of pane 2 — headers only; pane 3 owns bodies and controls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageRow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work: Option<WorkMetadata>,
     pub message_id: String,
     /// `question` | `notification` | `plan_review`.
     pub msg_type: String,
@@ -218,6 +250,7 @@ fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
 
     Some(Subject {
         row: MessageRow {
+            work: work_metadata(request),
             message_id: request.subject_id.clone().unwrap_or_else(|| request.message_id.clone()),
             msg_type: if request.msg_type == "work_update" { "notification".into() } else { request.msg_type.clone() },
             glyph: glyph_for(&request.msg_type),

@@ -19,6 +19,39 @@ use tauri::{AppHandle, Manager, State};
 #[derive(Default)]
 pub struct PayloadStore(pub Mutex<HashMap<String, String>>);
 
+/// Events received while the notifications webview is registering listeners.
+/// Switching to live delivery and draining the queue share the same lock.
+pub struct NotificationStartup(pub Mutex<Option<Vec<serde_json::Value>>>);
+
+impl Default for NotificationStartup {
+    fn default() -> Self { Self(Mutex::new(Some(Vec::new()))) }
+}
+
+impl NotificationStartup {
+    pub fn queue(&self, event: &str, payload: &serde_json::Value) -> bool {
+        let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(events) = pending.as_mut() {
+            events.push(serde_json::json!({"event": event, "payload": payload}));
+            true
+        } else { false }
+    }
+
+    pub fn ready(&self) -> Vec<serde_json::Value> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()
+    }
+
+    pub fn reset(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
+    }
+}
+
+/// The frontend registers its live listener before draining startup events.
+#[tauri::command]
+pub fn notifications_ready(window: tauri::WebviewWindow, state: State<NotificationStartup>) -> Result<Vec<serde_json::Value>, String> {
+    if window.label() != "notifications" { return Err("Only the notifications window can receive its queue".into()); }
+    Ok(state.ready())
+}
+
 impl PayloadStore {
     /// Stage a JSON payload for the window with this label.
     pub fn insert(&self, label: &str, json: String) {
@@ -74,6 +107,26 @@ pub fn take_window_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_startup_drains_updates_in_order_then_switches_to_live() {
+        let startup = NotificationStartup::default();
+        let first = serde_json::json!({"revision": 1});
+        let latest = serde_json::json!({"revision": 2});
+        assert!(startup.queue("add-notification", &first));
+        assert!(startup.queue("add-notification", &latest));
+        assert!(startup.queue("remove-notification", &serde_json::json!("work")));
+        assert_eq!(startup.ready(), vec![
+            serde_json::json!({"event":"add-notification", "payload":first}),
+            serde_json::json!({"event":"add-notification", "payload":latest}),
+            serde_json::json!({"event":"remove-notification", "payload":"work"}),
+        ]);
+        assert!(!startup.queue("add-notification", &latest));
+        assert!(startup.ready().is_empty());
+        startup.reset();
+        assert!(startup.queue("add-notification", &latest));
+        assert_eq!(startup.ready(), vec![serde_json::json!({"event":"add-notification", "payload":latest})]);
+    }
 
     #[test]
     fn a_reload_can_read_the_same_payload_again() {

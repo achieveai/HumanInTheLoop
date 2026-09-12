@@ -28,6 +28,10 @@
             core: {
                 invoke: (cmd, args) => {
                     console.log('[TAURI MOCK] invoke:', cmd, args);
+                    if (cmd === 'notifications_ready') {
+                        if (window.__DURING_READY) window.__listeners['add-notification']({ payload: window.__DURING_READY });
+                        return Promise.resolve(window.__PENDING_NOTIFICATIONS || []);
+                    }
                     if (cmd === 'dismiss_notification' && window.__DEFER_DISMISS) {
                         return new Promise((resolve, reject) => { window.__resolveDismiss = resolve; window.__rejectDismiss = reject; });
                     }

@@ -24,6 +24,7 @@ export interface Badges {
 }
 
 export interface MessageRow {
+  work?: { snapshotMessageId?: string; status: string; owner: string; totalTasks: number; completedTasks: number; blockedTasks: number };
   messageId: string;
   msgType: string;
   glyph: string;

@@ -1,6 +1,41 @@
 import { test, expect } from '@playwright/test';
 function work(revision = 1, alert = true) { return { type: 'work_update', body: 'Editor summary: tests are green', messageId: `event-${revision}`, workId: 'work-1', revision, alert, title: 'Progress', timestamp: Date.now(), document: { workId: 'work-1', title: 'Progress', goal: '<img src=x> Ship it', rootTaskId: 'root', revision, updatedAt: Date.now(), changes: [`Change ${revision}`], tasks: [{ taskId: 'root', parentTaskId: null, revision, owner: 'Agent', status: 'completed', completed: ['Done'], learnings: [], current: null, remaining: [], blockers: [], reportedAt: Date.now() }] } }; }
 async function send(page: any, payload: any) { await page.evaluate((payload: any) => (window as any).__listeners['add-notification']({ payload }), payload); }
+
+test('hydrates updates received before the window registered listeners', async ({ page }) => {
+ await page.addInitScript(payloads => { (window as any).__PENDING_NOTIFICATIONS = payloads.map(payload => ({ event: 'add-notification', payload })); }, [work(2, false), work(3, false)]);
+ await page.goto(`/notifications-harness.html?notification=${encodeURIComponent(JSON.stringify(work()))}`);
+ await expect(page.locator('.notification-card')).toHaveCount(1);
+ await expect(page.locator('.work-document')).toContainText('Change 3');
+ await send(page, work(2));
+ await expect(page.locator('.work-document')).toContainText('Change 3');
+});
+
+test('live quiet update cannot overtake its queued opening alert during hydration', async ({ page }) => {
+ await page.addInitScript(({ queued, live }) => {
+  (window as any).__PENDING_NOTIFICATIONS = [{ event: 'add-notification', payload: queued }];
+  (window as any).__DURING_READY = live;
+ }, { queued: work(1), live: work(2, false) });
+ await page.goto('/notifications-harness.html');
+ await expect(page.locator('.notification-card')).toHaveCount(1);
+ await expect(page.locator('.work-document')).toContainText('Change 2');
+});
+
+test('startup dismissal stays dismissed after queued updates and malformed events do not stop live delivery', async ({ page }) => {
+ await page.addInitScript(payload => {
+  (window as any).__PENDING_NOTIFICATIONS = [
+   { event: 'add-notification', payload },
+   { event: 'remove-notification', payload: payload.workId },
+   { event: 'add-notification', payload: null },
+  ];
+ }, work(2));
+ await page.goto(`/notifications-harness.html?notification=${encodeURIComponent(JSON.stringify(work()))}`);
+ await expect(page.locator('.notification-card')).toHaveCount(0);
+ await send(page, work(3, false));
+ await expect(page.locator('.notification-card')).toHaveCount(0);
+ await send(page, work(4));
+ await expect(page.locator('.work-document')).toContainText('Change 4');
+});
 test('coalesce revisions, dismiss by workId, never revive on quiet or stale alert', async ({ page }) => {
  await page.goto(`/notifications-harness.html?notification=${encodeURIComponent(JSON.stringify(work()))}`);
  await expect(page.locator('.work-document')).toContainText('Change 1');

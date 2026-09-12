@@ -1264,6 +1264,9 @@ test.describe('Pane 3 — optimistic rollback and settlement races', () => {
 
       await expect(page.locator('.message-row[data-message-id="p-1"]')).toHaveCount(1);
       await expect(page.locator('#action-error-dialog')).toBeHidden();
+      // Restored reviews retain their expanded reading pane. Return to the
+      // list before reopening it, just as a user would.
+      await page.getByRole('button', { name: 'Back to Inbox', exact: true }).click();
       await page.locator('.message-row[data-message-id="p-1"]').click();
       await expect(page.locator('#overall-feedback')).toHaveValue(`Draft kept after ${result.status}.`);
       await expect(page.locator('#review-error')).toContainText(result.status === 'lost'

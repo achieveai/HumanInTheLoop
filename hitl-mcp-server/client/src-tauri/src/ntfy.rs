@@ -142,6 +142,7 @@ impl NtfySink for TauriSink {
 
     fn on_dismiss_notification(&self, dismiss: &DismissNotificationMessage) {
         if let Some(win) = self.app.get_webview_window("notifications") {
+            if self.app.state::<payload_store::NotificationStartup>().queue("remove-notification", &serde_json::json!(dismiss.notification_id)) { return; }
             if let Err(e) = win.emit("remove-notification", &dismiss.notification_id) {
                 log::error!("Failed to emit remove-notification: {}", e);
             }
@@ -590,6 +591,7 @@ fn show_notification_payload(app: &AppHandle, config: &HitlConfig, payload: serd
     let label = "notifications";
 
     if let Some(win) = app.get_webview_window(label) {
+        if app.state::<payload_store::NotificationStartup>().queue("add-notification", &payload) { return; }
         if let Err(e) = win.emit("add-notification", &notification_json) {
             log::error!("Failed to emit add-notification: {}", e);
         }

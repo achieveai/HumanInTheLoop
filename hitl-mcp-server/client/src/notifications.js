@@ -239,21 +239,30 @@ function loadInitialNotification() {
 
 // Listen for new notifications from Rust backend
 async function setupListeners() {
-    await listen('add-notification', (event) => {
+    // Buffer live events while IPC drains earlier events so a quiet update
+    // cannot overtake the alert that first creates its card.
+    let startupComplete = false;
+    const arriving = [];
+    // One bad payload must not abort the drain or strand subsequent live events.
+    const dispatch = entry => {
         try {
-            const notification = typeof event.payload === 'string'
-                ? JSON.parse(event.payload)
-                : event.payload;
-            
-            receiveNotification(notification);
-        } catch (err) {
-            console.error('Failed to handle add-notification:', err);
-        }
+            if (entry.event === 'remove-notification') removeNotificationById(entry.payload);
+            else if (entry.event === 'add-notification') {
+                receiveNotification(typeof entry.payload === 'string' ? JSON.parse(entry.payload) : entry.payload);
+            }
+        } catch (err) { console.error('Failed to handle notification event:', err); }
+    };
+    const receive = (event, payload) => {
+        const entry = { event, payload };
+        if (startupComplete) dispatch(entry);
+        else arriving.push(entry);
+    };
+    await listen('add-notification', (event) => {
+        receive('add-notification', event.payload);
     });
 
     await listen('remove-notification', (event) => {
-        const notificationId = event.payload;
-        removeNotificationById(notificationId);
+        receive('remove-notification', event.payload);
     });
 
     // Sender identity is decoration published as a separate companion message
@@ -263,6 +272,14 @@ async function setupListeners() {
         const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
         applySenderIdentity(payload?.forMessageId, payload?.sender);
     });
+    try {
+        const pending = await invoke('notifications_ready');
+        for (const entry of pending || []) dispatch(entry);
+    } catch (err) {
+        console.error('Failed to read startup notifications:', err);
+    }
+    for (const entry of arriving) dispatch(entry);
+    startupComplete = true;
 }
 
 // Initialize

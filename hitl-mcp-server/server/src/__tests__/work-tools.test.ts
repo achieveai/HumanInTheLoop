@@ -22,6 +22,24 @@ test('MCP exposes tools, publishes encrypted full snapshot and reads durable sta
     const handlers = internals.server._requestHandlers;
     const listed = await handlers.get('tools/list')!({ method: 'tools/list' }, {});
     expect(listed.tools.map(t => t.name)).toEqual(expect.arrayContaining(['Notify', 'UpdateWork', 'ReadWork']));
+    expect(listed.tools.find(t => t.name === 'ReadWork')).toMatchObject({
+      annotations: { readOnlyHint: true },
+      inputSchema: { required: ['workId'] },
+    });
+    expect(listed.tools.find(t => t.name === 'UpdateWork')).toMatchObject({
+      annotations: { readOnlyHint: false },
+      inputSchema: {
+        required: ['workId', 'updateId', 'expectedRevision', 'task'],
+        properties: {
+          expectedRevision: { type: 'integer', minimum: 0, description: expect.any(String) },
+          alert: { default: false },
+          task: { properties: {
+            completed: { type: 'array', description: expect.any(String) },
+            parentTaskId: { type: ['string', 'null'], description: expect.any(String) },
+          } },
+        },
+      },
+    });
     const call = async (name: string, args: unknown) => JSON.parse((await handlers.get('tools/call')!({ method: 'tools/call', params: {name, arguments: args} }, {})).content[0].text);
     const result = await call('UpdateWork', { workId: 'w', updateId: 'u', expectedRevision: 0, title: 'Title', goal: 'Goal', task: { taskId: 'root', parentTaskId: null, owner: 'agent', reportedBy: 'agent', status: 'pending', completed: [], learnings: [], current: null, remaining: [], blockers: [] } });
     expect(result).toMatchObject({ saved: true, published: true });

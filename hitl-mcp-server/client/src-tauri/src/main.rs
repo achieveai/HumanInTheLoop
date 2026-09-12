@@ -120,6 +120,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(payload_store::PayloadStore::default())
+        .manage(payload_store::NotificationStartup::default())
         .manage(hitl_transport::ntfy::review::AckWaiters::default())
         .manage(hitl_transport::ntfy::review::OutstandingReviews::default())
         .manage(hitl_transport::ntfy::identity::SenderIdentityCacheState::default())
@@ -132,7 +133,8 @@ fn main() {
             drafts::save_review_draft,
             drafts::clear_review_draft,
             opener::open_external,
-            payload_store::take_window_payload
+            payload_store::take_window_payload,
+            payload_store::notifications_ready
         ])
         .setup(|app| {
             // Setup system tray
@@ -153,6 +155,9 @@ fn main() {
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 payload_store::evict(window.app_handle(), window.label());
+                if window.label() == "notifications" {
+                    window.app_handle().state::<payload_store::NotificationStartup>().reset();
+                }
             }
         })
         .build(tauri::generate_context!())

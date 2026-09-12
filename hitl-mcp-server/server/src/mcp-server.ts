@@ -280,7 +280,7 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
           name: NOTIFY_TOOL_NAME,
           description:
             'Send a notification to the human without waiting for a response. ' +
-            'Use this for progress updates, status messages, or any information the human should see. ' +
+            'Use this for one-off status messages or information the human should see. For ongoing multi-step work, milestones, or team reporting, prefer UpdateWork: it keeps one evolving progress document in the Inbox instead of separate notifications for the same goal. ' +
             'The notification appears on all of the user\'s devices and can be dismissed. ' +
             'Unlike AskUserQuestion, this tool returns immediately — it does NOT block.',
           inputSchema: {

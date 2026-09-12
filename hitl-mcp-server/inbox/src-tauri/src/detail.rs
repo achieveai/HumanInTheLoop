@@ -166,6 +166,39 @@ mod tests {
     }
 
     #[test]
+    fn work_metadata_tracks_root_and_task_counts_independently_of_dismissal() {
+        let mut update = work("latest", 2);
+        let mut json = update.json();
+        json["document"]["tasks"][0]["status"] = serde_json::json!("in_progress");
+        let mut child = json["document"]["tasks"][0].clone();
+        child["taskId"] = serde_json::json!("child");
+        child["parentTaskId"] = serde_json::json!("root");
+        child["status"] = serde_json::json!("completed");
+        json["document"]["tasks"].as_array_mut().unwrap().push(child.clone());
+        update.payload = json.to_string();
+        let mut events = vec![work("old", 1), update];
+        let row = build_detail(&events, "work", NOW).unwrap().row;
+        let metadata = row.work.unwrap();
+        assert_eq!(metadata.status, "in_progress");
+        assert_eq!(metadata.owner, "lead");
+        assert_eq!(metadata.total_tasks, 2);
+        assert_eq!(metadata.completed_tasks, 1);
+        assert_eq!(metadata.blocked_tasks, 0);
+        child["taskId"] = serde_json::json!("blocked");
+        child["status"] = serde_json::json!("blocked");
+        json["document"]["tasks"].as_array_mut().unwrap().push(child);
+        events[1].payload = json.to_string();
+        events.push(ev("dismiss", NOW, r#"{"type":"dismiss_notification","messageId":"dismiss","notificationId":"work","dismissedFrom":"test"}"#));
+        let rows = view::build_list(&events, None, Some("all"), NOW).messages;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "dismissed");
+        let metadata = rows[0].work.as_ref().unwrap();
+        assert_eq!(metadata.status, "in_progress");
+        assert_eq!(metadata.total_tasks, 3);
+        assert_eq!(metadata.blocked_tasks, 1);
+    }
+
+    #[test]
     fn work_replay_selects_highest_valid_revision_for_list_and_detail() {
         let mut malformed = work("bad", 99);
         let mut json = malformed.json();
@@ -177,6 +210,7 @@ mod tests {
             assert_eq!(detail.row.message_id, "work");
             assert_eq!(detail.row.msg_type, "notification");
             assert_eq!(detail.row.badges.revision, Some(3));
+            assert_eq!(detail.row.work.as_ref().unwrap().snapshot_message_id, "b");
             assert_eq!(detail.request["messageId"], "b");
             assert_eq!(detail.request["type"], "work_update");
             assert_eq!(view::build_list(&order, None, Some("all"), NOW).messages.len(), 1);

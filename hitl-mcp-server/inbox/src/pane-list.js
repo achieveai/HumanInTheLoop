@@ -21,10 +21,24 @@ export const FILTERS = [
 ];
 
 export const TYPES = [
+    { key: 'work', label: 'Work' },
     { key: 'notification', label: 'Notifications' },
     { key: 'question', label: 'Questions' },
     { key: 'plan_review', label: 'Review plans' },
 ];
+
+/** Work shares notification transport but has its own display family. */
+export const messageType = message => message.work ? 'work' : message.msgType;
+
+/** Explicit lifecycle and task counts, separate from the read/dismissal pill. */
+export function appendWorkBadges(container, work) {
+    if (!work) return;
+    const label = { pending: 'Pending', in_progress: 'In progress', blocked: 'Blocked', completed: 'Completed', cancelled: 'Cancelled' }[work.status] ?? work.status;
+    container.appendChild(el('span', 'badge badge-work-status', `Work: ${label}`));
+    container.appendChild(el('span', 'badge badge-work-tasks', `${work.completedTasks}/${work.totalTasks} tasks completed`));
+    if (work.blockedTasks) container.appendChild(el('span', 'badge badge-work-blocked', `${work.blockedTasks} blocked`));
+    if (work.owner) container.appendChild(el('span', 'badge badge-work-owner', work.owner));
+}
 
 /**
  * A relative age, short enough to sit in a row without wrapping.
@@ -97,13 +111,13 @@ export function renderTypeFilterBar(container, messages, enabled, { onToggle } =
         button.setAttribute('aria-pressed', String(pressed));
         button.disabled = pressed && enabled.size === 1;
         button.querySelector('.filter-count').textContent = String(
-            messages.filter(message => message.msgType === type.key).length,
+            messages.filter(message => messageType(message) === type.key).length,
         );
     }
 }
 
 export function filterMessagesByType(messages, enabled) {
-    return messages.filter(message => enabled.has(message.msgType));
+    return messages.filter(message => enabled.has(messageType(message)));
 }
 
 /**
@@ -130,6 +144,7 @@ export function statusPill(message) {
  */
 function badges(message) {
     const row = el('div', 'message-badges');
+    appendWorkBadges(row, message.work);
     const { repo, batchCount, revision, attachment, plaintext } = message.badges ?? {};
 
     if (repo) row.appendChild(el('span', 'badge badge-repo', repo));
@@ -145,13 +160,13 @@ function messageRow(message, { selectedId, onSelect } = {}) {
     const row = el('div', 'message-row');
     row.dataset.messageId = message.messageId;
     row.dataset.status = message.status;
-    row.dataset.type = message.msgType;
+    row.dataset.type = messageType(message);
     row.setAttribute('role', 'button');
     row.tabIndex = 0;
     if (message.messageId === selectedId) row.classList.add('is-selected');
 
     const glyph = el('span', 'message-glyph', message.glyph);
-    glyph.title = message.msgType;
+    glyph.title = messageType(message);
     row.appendChild(glyph);
 
     const main = el('div', 'message-main');
