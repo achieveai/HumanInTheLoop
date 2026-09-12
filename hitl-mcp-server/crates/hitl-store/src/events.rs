@@ -11,6 +11,13 @@ use hitl_transport::ntfy::subscribe::NtfyEvent;
 
 use crate::{Result, Store};
 
+// Old clients can keep appending NULL subjects after the schema migration.
+// Derive only the new work type on reads, without rewriting the immutable log.
+const WORK_SUBJECT_SQL: &str = "CASE WHEN type = 'work_update' AND json_valid(payload) THEN
+    CASE WHEN json_type(payload, '$.workId') = 'text'
+    THEN nullif(json_extract(payload, '$.workId'), '') END END";
+
+
 /// One row of the append-only log.
 ///
 /// `ntfy_time` and `ntfy_id` together are the ordering authority (spec §4.3).
@@ -60,6 +67,7 @@ impl Event {
 /// `pending` from the question event alone.
 pub fn subject_of(msg_type: &str, payload: &Value) -> Option<String> {
     let key = match msg_type {
+        "work_update" => "workId",
         "answer" => "questionId",
         "plan_review_response" | "plan_review_ack" | "cancel_review" => "reviewId",
         "dismiss_notification" | "restore_notification" => "notificationId",
@@ -161,10 +169,12 @@ impl Store {
     /// for display gets the same order the fold saw. The fold re-sorts anyway,
     /// because it also has to work on events that never went through a store.
     pub fn events_for(&self, subject_id: &str) -> Result<Vec<Event>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT seq, ntfy_id, ntfy_time, message_id, type, subject_id, payload
-             FROM events WHERE subject_id = ?1 ORDER BY ntfy_time, ntfy_id",
-        )?;
+             FROM events WHERE subject_id = ?1
+                OR (subject_id IS NULL AND ({WORK_SUBJECT_SQL}) = ?1)
+             ORDER BY ntfy_time, ntfy_id"
+        ))?;
         let rows = stmt.query_map(params![subject_id], row_to_event)?;
         rows.collect()
     }
@@ -208,17 +218,20 @@ impl Store {
 
     /// Every distinct subject the log knows about, in first-seen ntfy order.
     pub fn subjects(&self) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT subject_id FROM events WHERE subject_id IS NOT NULL
-             GROUP BY subject_id ORDER BY min(ntfy_time), min(ntfy_id)",
-        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT effective_subject FROM (
+                SELECT coalesce(subject_id, {WORK_SUBJECT_SQL}) AS effective_subject,
+                       ntfy_time, ntfy_id FROM events)
+             WHERE effective_subject IS NOT NULL
+             GROUP BY effective_subject ORDER BY min(ntfy_time), min(ntfy_id)"
+        ))?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect()
     }
 }
 
 fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
-    Ok(Event {
+    let mut event = Event {
         seq: row.get(0)?,
         ntfy_id: row.get(1)?,
         ntfy_time: row.get::<_, i64>(2)? as u64,
@@ -226,7 +239,11 @@ fn row_to_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         msg_type: row.get(4)?,
         subject_id: row.get(5)?,
         payload: row.get(6)?,
-    })
+    };
+    if event.subject_id.is_none() && event.msg_type == "work_update" {
+        event.subject_id = subject_of(&event.msg_type, &event.json());
+    }
+    Ok(event)
 }
 
 #[cfg(test)]
@@ -256,6 +273,24 @@ mod tests {
             ..Default::default()
         };
         (event, raw)
+    }
+
+    #[test]
+    fn legacy_writer_after_migration_cannot_hide_work_updates() {
+        let store = Store::open_in_memory().unwrap();
+        let raw = r#"{"type":"work_update","messageId":"update","workId":"work"}"#;
+        store.conn.execute("INSERT INTO events (ntfy_id,ntfy_time,message_id,type,subject_id,payload) VALUES ('legacy',1,'update','work_update',NULL,?1)", [raw]).unwrap();
+        for (id, payload) in [("bad-json", "{"), ("bad-id", r#"{"workId":42}"#), ("empty-id", r#"{"workId":""}"#)] {
+            store.conn.execute("INSERT INTO events (ntfy_id,ntfy_time,message_id,type,subject_id,payload) VALUES (?1,2,?1,'work_update',NULL,?2)", (id, payload)).unwrap();
+        }
+        let changes = store.conn.total_changes();
+        assert_eq!(store.events_since(0, 10).unwrap()[0].subject_id.as_deref(), Some("work"));
+        assert_eq!(store.events_for("work").unwrap().len(), 1);
+        assert_eq!(store.subjects().unwrap(), vec!["work"]);
+        let event = NtfyEvent { id: "legacy".into(), ..Default::default() };
+        store.append(&event, raw).unwrap();
+        assert_eq!(store.events_for("work").unwrap().len(), 1);
+        assert_eq!(store.conn.total_changes(), changes, "read and replay must remain write-free");
     }
 
     #[test]
@@ -414,4 +449,15 @@ mod tests {
 
         assert_eq!(s.count_events().unwrap(), 1);
     }
+}
+
+/// Highest valid complete snapshot. Publication ID breaks equal revisions consistently.
+pub fn latest_work_event(events: &[Event]) -> Option<&Event> {
+    events.iter().filter_map(|event| {
+        if event.msg_type != "work_update" { return None; }
+        let msg: hitl_transport::types::WorkUpdateMessage = serde_json::from_str(&event.payload).ok()?;
+        (msg.is_valid() && event.subject_id.as_deref() == Some(msg.work_id.as_str()))
+            .then_some((msg.revision, event))
+    }).max_by(|(ar, a), (br, b)| (ar, &a.message_id).cmp(&(br, &b.message_id)))
+        .map(|(_, event)| event)
 }

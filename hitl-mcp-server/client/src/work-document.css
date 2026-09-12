@@ -1,0 +1,9 @@
+.work-document { overflow-wrap: anywhere; line-height: 1.5; }
+.work-section { margin: 0 0 14px; }
+.work-section h3 { font-size: 0.85rem; margin: 0 0 4px; font-weight: 650; }
+.work-section ul { margin: 0; padding-left: 20px; }
+.work-section p { margin: 0; }
+.work-empty, .work-freshness { opacity: 0.75; font-size: 0.8rem; }
+.work-task { border-left: 2px solid #94a3b8; padding: 8px 0 0 12px; margin-top: 12px; }
+.work-task > summary { cursor: pointer; font-weight: 600; }
+.work-task > summary:focus-visible { outline: 2px solid #3b82f6; outline-offset: 3px; }

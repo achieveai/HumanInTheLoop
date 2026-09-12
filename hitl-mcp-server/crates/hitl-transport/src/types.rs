@@ -117,6 +117,94 @@ pub struct NotificationMessage {
     pub context: Option<String>,
 }
 
+/// A complete living work document. Completion is task data, never dismissal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkUpdateMessage {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub message_id: String,
+    pub timestamp: u64,
+    pub work_id: String,
+    pub revision: u64,
+    pub title: String,
+    pub body: String,
+    pub alert: bool,
+    pub document: WorkDocument,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkDocument {
+    pub work_id: String,
+    pub title: String,
+    pub goal: String,
+    pub root_task_id: String,
+    pub revision: u64,
+    pub updated_at: u64,
+    pub changes: Vec<String>,
+    pub tasks: Vec<WorkTask>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkTask {
+    pub task_id: String,
+    pub parent_task_id: Option<String>,
+    pub revision: u64,
+    pub owner: String,
+    pub reported_by: String,
+    pub status: String,
+    pub completed: Vec<String>,
+    pub learnings: Vec<String>,
+    pub current: Option<WorkAction>,
+    pub remaining: Vec<String>,
+    pub blockers: Vec<String>,
+    pub reported_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkAction {
+    pub action: String,
+    pub purpose: String,
+}
+
+impl WorkUpdateMessage {
+    /// Reject partial, inconsistent or cyclic snapshots before replacing a good one.
+    pub fn is_valid(&self) -> bool {
+        let doc = &self.document;
+        if self.msg_type != "work_update" || self.message_id.is_empty()
+            || self.work_id.is_empty() || self.revision == 0
+            || doc.work_id != self.work_id || doc.revision != self.revision
+            || doc.title != self.title || doc.root_task_id.is_empty() || doc.tasks.is_empty()
+        { return false; }
+        let tasks: std::collections::HashMap<_, _> = doc.tasks.iter()
+            .map(|task| (task.task_id.as_str(), task)).collect();
+        if tasks.len() != doc.tasks.len() { return false; }
+        for task in &doc.tasks {
+            if task.task_id.is_empty() || task.revision == 0
+                || !matches!(task.status.as_str(), "pending" | "in_progress" | "blocked" | "completed" | "cancelled")
+            { return false; }
+            let mut current = task;
+            let mut visited = std::collections::HashSet::new();
+            loop {
+                if !visited.insert(current.task_id.as_str()) { return false; }
+                match current.parent_task_id.as_deref() {
+                    None => {
+                        if current.task_id != doc.root_task_id { return false; }
+                        break;
+                    }
+                    Some(parent) => match tasks.get(parent) {
+                        Some(next) => current = next,
+                        None => return false,
+                    },
+                }
+            }
+        }
+        tasks.get(doc.root_task_id.as_str()).is_some_and(|root| root.parent_task_id.is_none())
+    }
+}
+
 /// Dismiss notification message published by a client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1127,5 +1215,32 @@ mod tests {
         assert_eq!(msg.for_type, "");
         assert_eq!(msg.sender.label, "");
         assert_eq!(msg.sender.source, "");
+    }
+}
+
+#[cfg(test)]
+mod work_tests {
+    use super::*;
+    fn snapshot() -> WorkUpdateMessage {
+        serde_json::from_value(serde_json::json!({"type":"work_update","messageId":"m1","timestamp":1,"workId":"w1","revision":1,"title":"Work","body":"Progress","alert":false,"document":{"workId":"w1","title":"Work","goal":"Goal","rootTaskId":"root","revision":1,"updatedAt":1,"changes":[],"tasks":[{"taskId":"root","parentTaskId":null,"revision":1,"owner":"lead","reportedBy":"lead","status":"completed","completed":[],"learnings":[],"current":null,"remaining":[],"blockers":[],"reportedAt":1}]}})).unwrap()
+    }
+    #[test]
+    fn work_snapshot_rejects_mismatched_revision_and_invalid_tree() {
+        let mut msg = snapshot();
+        assert!(msg.is_valid());
+        msg.document.revision = 2;
+        assert!(!msg.is_valid());
+        msg.document.revision = 1;
+        msg.document.tasks[0].parent_task_id = Some("root".into());
+        assert!(!msg.is_valid());
+    }
+    #[test]
+    fn work_snapshot_rejects_duplicate_tasks_and_unknown_status() {
+        let mut msg = snapshot();
+        msg.document.tasks.push(msg.document.tasks[0].clone());
+        assert!(!msg.is_valid());
+        msg.document.tasks.pop();
+        msg.document.tasks[0].status = "invented".into();
+        assert!(!msg.is_valid());
     }
 }

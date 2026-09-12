@@ -1,3 +1,5 @@
+import './diagrams.js';
+
 // Plan-review rendering and interaction logic for the HITL Tauri client.
 //
 // This module is deliberately free of Tauri access: `renderPlanReview` is a pure

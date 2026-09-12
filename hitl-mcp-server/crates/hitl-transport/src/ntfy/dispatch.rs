@@ -347,6 +347,16 @@ pub async fn dispatch_message(
             }
         }
 
+        "work_update" => {
+            match serde_json::from_str::<crate::types::WorkUpdateMessage>(raw) {
+                Ok(mut msg) if msg.is_valid() => {
+                    // Reconnect restores revision knowledge without replaying past alerts.
+                    if matches!(origin, Origin::Cache { .. }) { msg.alert = false; }
+                    sink.on_work_update(&msg, was_encrypted);
+                },
+                _ => log::warn!("Invalid work snapshot {} ignored", env.message_id),
+            }
+        }
         "notification" => {
             // Cached notifications are intentionally skipped — they're ephemeral.
             if matches!(origin, Origin::Cache { .. }) {
@@ -751,6 +761,26 @@ mod dispatch_tests {
 
     fn cfg() -> HitlConfig {
         HitlConfig { encryption_key: None, ..Default::default() }
+    }
+
+    #[tokio::test]
+    async fn work_dispatch_deduplicates_and_cache_replay_is_quiet() {
+        let body = serde_json::json!({"type":"work_update","messageId":"m1","timestamp":1,"workId":"w1","revision":1,"title":"Work","body":"Progress","alert":true,"document":{"workId":"w1","title":"Work","goal":"Goal","rootTaskId":"root","revision":1,"updatedAt":1,"changes":[],"tasks":[{"taskId":"root","parentTaskId":null,"revision":1,"owner":"lead","reportedBy":"lead","status":"in_progress","completed":[],"learnings":[],"current":null,"remaining":[],"blockers":[],"reportedAt":1}]}}).to_string();
+        let sink = RecordingSink::default();
+        let mut seen = SeenIds::default();
+        let answered = HashSet::new();
+        dispatch_message(&sink, &cfg(), &body, false, None, Origin::Cache { answered_ids: &answered, seen: &mut seen }).await;
+        dispatch_message(&sink, &cfg(), &body, false, None, Origin::Live { seen: &mut seen }).await;
+        assert_eq!(sink.calls(), vec!["WorkUpdate(\"w1\", 1, false)"]);
+        let sink = RecordingSink::default();
+        let mut seen = SeenIds::default();
+        dispatch_message(&sink, &cfg(), &body, false, None, Origin::Live { seen: &mut seen }).await;
+        assert_eq!(sink.calls(), vec!["WorkUpdate(\"w1\", 1, true)"]);
+        let mut malformed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        malformed["messageId"] = serde_json::json!("bad");
+        malformed["document"]["revision"] = serde_json::json!(99);
+        dispatch_message(&sink, &cfg(), &malformed.to_string(), false, None, Origin::Live { seen: &mut seen }).await;
+        assert_eq!(sink.calls().len(), 1, "malformed snapshot never reaches the UI");
     }
 
     #[tokio::test]

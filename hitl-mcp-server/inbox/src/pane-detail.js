@@ -79,7 +79,10 @@ export function createDetailPane({ container, invoke, onError = console.error, a
         if (painted?.messageId === message.messageId
             && painted.status === message.status
             && painted.row?.status === message.status
-            && painted.row?.title === message.title) return true;
+            && painted.row?.title === message.title
+            && painted.row?.badges?.revision === message.badges?.revision
+            && painted.row?.work?.snapshotMessageId === message.work?.snapshotMessageId) return true;
+        if (painted?.messageId === message.messageId && message.msgType === 'notification' && message.badges?.revision) return update(message);
         if (restore(message.messageId)) return true;
 
         const token = ++generation;
@@ -212,6 +215,27 @@ export function createDetailPane({ container, invoke, onError = console.error, a
      */
     async function update(message) {
         if (!painted || painted.messageId !== message.messageId) return show(message);
+        if (message.msgType === 'notification' && message.badges?.revision
+            && (message.badges.revision !== painted.row?.badges?.revision
+                || message.work?.snapshotMessageId !== painted.row?.work?.snapshotMessageId)) {
+            const token = ++generation;
+            try {
+                const next = await invoke('get_message', { messageId: message.messageId });
+                if (token !== generation || !next) return;
+                // get_message selects the authoritative winner, including the
+                // messageId tie-break when two valid snapshots share a revision.
+                const nextRevision = next.row.badges?.revision || 0;
+                const currentRevision = painted.row?.badges?.revision || 0;
+                if (next.request?.type === 'work_update' && (nextRevision > currentRevision
+                    || (nextRevision === currentRevision
+                        && next.row.work?.snapshotMessageId !== painted.row?.work?.snapshotMessageId))) {
+                    painted.controller.applyDetail(next);
+                    painted.row = next.row;
+                    painted.status = next.row.status;
+                }
+            } catch (error) { if (token === generation) onError?.(error); }
+            return;
+        }
         if (painted.status === message.status) return;
 
         painted.status = message.status;

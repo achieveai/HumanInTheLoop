@@ -1,3 +1,4 @@
+import type { WorkUpdateMessage } from './work-store.js';
 import { randomBytes } from 'crypto';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs';
 import { homedir } from 'os';
@@ -411,6 +412,17 @@ export class NtfyTransport {
    * a chunked plan_review would break the one-message-per-review guarantee.
    */
   async publish(msg: HitlMessage): Promise<void> {
+    return this.publishChunked(msg);
+  }
+
+  /** Full work snapshots use the existing encrypted, chunked wire path. */
+  async publishWork(msg: WorkUpdateMessage): Promise<void> {
+    // Retries retain the logical messageId but encrypt independently. Distinct
+    // assembly groups prevent concurrent attempts from mixing ciphertext.
+    return this.publishChunked(msg, randomBytes(16).toString('hex'));
+  }
+
+  private async publishChunked(msg: HitlMessage | WorkUpdateMessage, groupId = msg.messageId): Promise<void> {
     let body: string;
     if (this.config.encryptionKey) {
       body = encrypt(JSON.stringify(msg), this.config.encryptionKey);
@@ -423,7 +435,7 @@ export class NtfyTransport {
       return;
     }
 
-    for (const chunk of splitIntoChunks(body, msg.messageId)) {
+    for (const chunk of splitIntoChunks(body, groupId)) {
       await this.publishRaw(JSON.stringify(chunk));
     }
   }

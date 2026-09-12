@@ -1,3 +1,4 @@
+import { renderWorkDocument } from './work-document.js';
 // Pane 3 — the notification renderer (spec §8.1).
 //
 // The simplest of the three, and read-mostly: a title, a markdown body, the
@@ -46,7 +47,8 @@ export function renderNotification(container, detail, actions = {}) {
     const scroll = el('div', 'detail-scroll');
 
     const body = el('div', 'notification-body md-content');
-    renderMarkdownInto(body, request?.body ?? '');
+    if (request?.type === 'work_update') renderWorkDocument(body, request.document, undefined, request.body);
+    else renderMarkdownInto(body, request?.body ?? '');
     scroll.appendChild(body);
 
     const context = contextBlock(request?.context);
@@ -137,5 +139,11 @@ export function renderNotification(container, detail, actions = {}) {
         }
     }
 
-    return { applyRow };
+    function applyDetail(next) {
+        if (next.request?.type !== 'work_update') return;
+        renderWorkDocument(body, next.request.document, undefined, next.request.body);
+        applyRow(next.row);
+    }
+
+    return { applyRow, applyDetail };
 }

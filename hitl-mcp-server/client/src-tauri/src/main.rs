@@ -90,7 +90,7 @@ async fn submit_plan_review(
 
 /// Tauri command: dismiss a notification from the frontend.
 #[tauri::command]
-async fn dismiss_notification(notification_id: String, encrypted: Option<bool>) -> Result<(), String> {
+async fn dismiss_notification(app: tauri::AppHandle, notification_id: String, encrypted: Option<bool>) -> Result<(), String> {
     let config = load_config().map_err(|e| e.to_string())?;
 
     let msg = DismissNotificationMessage {
@@ -108,6 +108,16 @@ async fn dismiss_notification(notification_id: String, encrypted: Option<bool>) 
         .await
         .map_err(|e| e.to_string())?;
 
+    // A renderer may reload while publication is pending. Record and deliver
+    // success from native state, rather than relying on the old IPC caller.
+    let (queued, entry) = app.state::<payload_store::NotificationStartup>()
+        .record("remove-notification", &serde_json::json!(msg.notification_id));
+    if !queued {
+        if let Some(window) = app.get_webview_window("notifications") {
+            use tauri::Emitter;
+            let _ = window.emit("remove-notification", &entry);
+        }
+    }
     Ok(())
 }
 
@@ -120,6 +130,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(payload_store::PayloadStore::default())
+        .manage(payload_store::NotificationStartup::default())
         .manage(hitl_transport::ntfy::review::AckWaiters::default())
         .manage(hitl_transport::ntfy::review::OutstandingReviews::default())
         .manage(hitl_transport::ntfy::identity::SenderIdentityCacheState::default())
@@ -132,7 +143,8 @@ fn main() {
             drafts::save_review_draft,
             drafts::clear_review_draft,
             opener::open_external,
-            payload_store::take_window_payload
+            payload_store::take_window_payload,
+            payload_store::notifications_ready
         ])
         .setup(|app| {
             // Setup system tray
@@ -153,6 +165,9 @@ fn main() {
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 payload_store::evict(window.app_handle(), window.label());
+                if window.label() == "notifications" {
+                    window.app_handle().state::<payload_store::NotificationStartup>().reset();
+                }
             }
         })
         .build(tauri::generate_context!())

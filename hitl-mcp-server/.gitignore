@@ -23,6 +23,10 @@ dist/
 # matching rule wins.
 /inbox/src/review.js
 /inbox/src/review.css
+/inbox/src/diagrams.js
+/inbox/src/diagrams.css
+/inbox/src/diagram-renderer.html
+/inbox/src/diagram-renderer.js
 /inbox/src/vendor/
 
 # IDE
@@ -58,3 +62,5 @@ playwright-report/
 # Temporary files
 tmp/
 temp/
+/inbox/src/work-document.js
+/inbox/src/work-document.css

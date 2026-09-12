@@ -1,3 +1,4 @@
+@import url("./work-document.css");
 /* LLM Inbox — three panes.
  *
  * Colours and type follow the existing client (notifications.css / styles.css)
@@ -1019,6 +1020,26 @@ body {
 .detail-review-host .review-root {
     height: 100%;
 }
+
+.review-reading-bar { padding: 6px 12px; border-bottom: 1px solid #e2e8f0; }
+.review-reading-bar .button { padding: 5px 10px; }
+
+/* Temporary review focus. Absolute positioning spans both Right and Bottom
+   layouts without overwriting the user's saved grid tracks or pane sizes. */
+html:not([data-layout='phone']) .inbox:has(.detail-review[data-expanded='true']) > #pane-detail {
+    position: absolute;
+    inset: 0;
+    grid-area: auto;
+    display: flex;
+    z-index: 5;
+}
+html:not([data-layout='phone']) .inbox:has(.detail-review[data-expanded='true']) > :not(#pane-detail) {
+    visibility: hidden;
+}
+
+.detail-review-host .md-content { overflow-wrap: anywhere; }
+.detail-review-host .md-content pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.detail-review-host .formatted-changes { max-width: none; }
 
 /* --- markdown --- */
 

@@ -266,6 +266,25 @@ export function renderReview(container, detail, body, actions = {}, draft = null
     root.dataset.status = row.status;
     root.appendChild(detailHeader(detail, KICKER));
 
+    // A plan is read for minutes. Give it the complete reading area without
+    // changing the user's saved pane widths or rebuilding a live review draft.
+    root.dataset.expanded = 'true';
+    const readingBar = el('div', 'review-reading-bar');
+    const expandButton = el('button', 'button button-secondary', 'Back to Inbox');
+    expandButton.type = 'button';
+    expandButton.setAttribute('aria-expanded', 'true');
+    expandButton.addEventListener('click', () => {
+        const expanded = root.dataset.expanded !== 'true';
+        root.dataset.expanded = String(expanded);
+        expandButton.textContent = expanded ? 'Back to Inbox' : 'Expand review';
+        expandButton.setAttribute('aria-expanded', String(expanded));
+        if (!expanded && document.documentElement.dataset.layout === 'phone') {
+            document.getElementById('pane-back')?.click();
+        }
+    });
+    readingBar.append(expandButton);
+    root.prepend(readingBar);
+
     const host = el('div', 'detail-review-host');
     root.appendChild(host);
     container.appendChild(root);

@@ -45,8 +45,22 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  * renderers use, so the two apps render a plan the same way.
  */
 const ASSETS = [
+    'work-document.js',
+    'work-document.css',
     'review.js',
     'review.css',
+    'diagrams.js',
+    'diagrams.css',
+    'diagram-renderer.html',
+    'diagram-renderer.js',
+    'vendor/mermaid.min.js',
+    'vendor/mermaid.LICENSE.txt',
+    'vendor/plantuml/plantuml.js',
+    'vendor/plantuml/viz-global.js',
+    'vendor/plantuml/themes.js',
+    'vendor/plantuml/emoji.js',
+    'vendor/plantuml/openiconic.js',
+    'vendor/plantuml/LICENSE',
     'vendor/markdown-it.min.js',
     'vendor/diff.min.js',
     'vendor/diff.LICENSE.txt',

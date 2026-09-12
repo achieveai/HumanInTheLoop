@@ -61,6 +61,47 @@ async function panel(page: Page) {
 }
 
 test.describe('Pane 3 — a reviewable plan (spec §8.3)', () => {
+  test('opens across the full reading area and restores the Inbox without losing feedback', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT + '\n\n' + 'longpath/'.repeat(100)) });
+    const inbox = await page.locator('.inbox').boundingBox();
+    const pane = await page.locator('#pane-detail').boundingBox();
+    expect(pane!.width).toBeGreaterThan(inbox!.width * 0.95);
+    expect(pane!.height).toBeGreaterThan(inbox!.height * 0.95);
+    const content = await page.locator('#rendered-content').boundingBox();
+    const readingArea = await page.locator('#review-panel-changes').boundingBox();
+    expect(content!.width).toBeGreaterThan(readingArea!.width * 0.9);
+    await page.screenshot({ path: test.info().outputPath('full-width-review.png') });
+    await page.locator('#overall-feedback').fill('Keep this draft');
+    await expect.poll(() => page.locator('#rendered-content').evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+    await page.getByRole('button', { name: 'Back to Inbox', exact: true }).click();
+    await expect(page.locator('.pane-list')).toBeVisible();
+    await page.getByRole('button', { name: 'Expand review', exact: true }).click();
+    await expect(page.locator('#overall-feedback')).toHaveValue('Keep this draft');
+  });
+
+  test('full review spans the Bottom layout and phone Back still reaches messages', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.addInitScript(() => localStorage.setItem('inbox.panes', JSON.stringify({ readingPane: 'bottom', collapse: 0 })));
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT) });
+    const inbox = await page.locator('.inbox').boundingBox();
+    const pane = await page.locator('#pane-detail').boundingBox();
+    expect(pane!.height).toBeGreaterThan(inbox!.height * 0.95);
+    await page.setViewportSize({ width: 420, height: 800 });
+    await page.evaluate(() => (window as any).__PANES.show('detail'));
+    await expect(page.locator('#pane-detail')).toBeVisible();
+    await page.getByRole('button', { name: 'Back to Inbox', exact: true }).click();
+    await expect(page.locator('#pane-list')).toBeVisible();
+    await expect(page.locator('#pane-detail')).toBeHidden();
+  });
+
+  test('renders bundled Mermaid and PlantUML diagrams inside the shared reviewer', async ({ page }) => {
+    await mount(page, 'review', review(), { body: bodyOk('```mermaid\nflowchart LR\nA --> B\n```\n\n```plantuml\n@startuml\nAlice -> Bob : Review\n@enduml\n```') });
+    await expect(page.locator('#rendered-content .diagram-viewer img')).toHaveCount(2, { timeout: 12000 });
+    await page.locator('#rendered-content .diagram-viewer').first().getByRole('button', { name: 'Expand diagram' }).click();
+    await expect(page.getByRole('dialog', { name: 'Expanded diagram' })).toBeVisible();
+  });
+
   test('renders the client reviewer, unmodified, inside the pane', async ({ page }) => {
     await mount(page, 'review', review(), { body: bodyOk(CONTENT) });
 

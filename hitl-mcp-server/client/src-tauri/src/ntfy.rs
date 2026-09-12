@@ -61,6 +61,7 @@ pub async fn subscribe_loop(app: AppHandle) {
     let sink = TauriSink {
         app: app.clone(),
         config,
+        work_revisions: Default::default(),
     };
     let status = app.state::<ConnectionStatus>();
 
@@ -98,6 +99,7 @@ pub async fn submit_review_response(
 struct TauriSink {
     app: AppHandle,
     config: HitlConfig,
+    work_revisions: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl NtfySink for TauriSink {
@@ -129,9 +131,20 @@ impl NtfySink for TauriSink {
         show_notification(&self.app, &self.config, msg, was_encrypted);
     }
 
+    fn on_work_update(&self, msg: &hitl_transport::types::WorkUpdateMessage, was_encrypted: bool) {
+        let mut revisions = self.work_revisions.lock().unwrap_or_else(|e| e.into_inner());
+        if !accept_work_revision(&mut revisions, &msg.work_id, msg.revision) { return; }
+        drop(revisions);
+        let mut payload = serde_json::to_value(msg).unwrap_or_default();
+        payload["_wasEncrypted"] = serde_json::Value::Bool(was_encrypted);
+        show_notification_payload(&self.app, &self.config, payload, msg.alert);
+    }
+
     fn on_dismiss_notification(&self, dismiss: &DismissNotificationMessage) {
         if let Some(win) = self.app.get_webview_window("notifications") {
-            if let Err(e) = win.emit("remove-notification", &dismiss.notification_id) {
+            let (queued, entry) = self.app.state::<payload_store::NotificationStartup>().record("remove-notification", &serde_json::json!(dismiss.notification_id));
+            if queued { return; }
+            if let Err(e) = win.emit("remove-notification", &entry) {
                 log::error!("Failed to emit remove-notification: {}", e);
             }
         }
@@ -560,10 +573,6 @@ fn show_notification(
 ) {
     log::info!("Received notification: {}", notification.message_id);
 
-    if config.sound_enabled {
-        crate::sound::play_notification();
-    }
-
     // Build a payload that includes the encrypted flag for the frontend
     let mut payload = serde_json::to_value(notification).unwrap_or_default();
     if let Some(obj) = payload.as_object_mut() {
@@ -573,19 +582,27 @@ fn show_notification(
     // before this notification card existed.
     let cached_sender = app.state::<SenderIdentityCacheState>().get(&notification.message_id);
     merge_cached_sender(&mut payload, cached_sender);
-    let notification_json = serde_json::to_string(&payload).unwrap_or_default();
+    show_notification_payload(app, config, payload, true);
+}
+
+/// Quiet snapshots can refresh visible cards but cannot raise or create a window.
+fn show_notification_payload(app: &AppHandle, config: &HitlConfig, payload: serde_json::Value, alert: bool) {
+    if alert && config.sound_enabled { crate::sound::play_notification(); }
     let label = "notifications";
 
     if let Some(win) = app.get_webview_window(label) {
-        if let Err(e) = win.emit("add-notification", &notification_json) {
+        let (queued, entry) = app.state::<payload_store::NotificationStartup>().record("add-notification", &payload);
+        if queued { return; }
+        if let Err(e) = win.emit("add-notification", &entry) {
             log::error!("Failed to emit add-notification: {}", e);
         }
-        let _ = crate::window_utils::show_window_no_activate(&win);
+        if alert { let _ = crate::window_utils::show_window_no_activate(&win); }
         return;
     }
 
-    let encoded = urlencoding::encode(&notification_json);
-    let url_str = format!("notifications.html?notification={}", encoded);
+    if !alert { return; }
+    app.state::<payload_store::NotificationStartup>().queue("add-notification", &payload);
+    let url_str = "notifications.html";
 
     match tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url_str.into()))
         .title("Notifications")
@@ -599,7 +616,10 @@ fn show_notification(
         .build()
     {
         Ok(_) => log::info!("Notifications window created"),
-        Err(e) => log::error!("Failed to create notifications window: {}", e),
+        Err(e) => {
+            app.state::<payload_store::NotificationStartup>().reset();
+            log::error!("Failed to create notifications window: {}", e);
+        }
     }
 }
 
@@ -931,5 +951,25 @@ mod tests {
             fit_to_work_area(REVIEW_PREFERRED_SIZE, REVIEW_MIN_SIZE, (0.0, 0.0)),
             REVIEW_PREFERRED_SIZE
         );
+    }
+}
+
+/// Keep revision knowledge across cache/live reconnects, including quiet updates.
+fn accept_work_revision(revisions: &mut std::collections::HashMap<String, u64>, work_id: &str, revision: u64) -> bool {
+    let known = revisions.entry(work_id.to_owned()).or_default();
+    if revision <= *known { return false; }
+    *known = revision;
+    true
+}
+
+#[cfg(test)]
+mod work_revision_tests {
+    #[test]
+    fn quiet_newer_snapshot_prevents_old_alert_replay() {
+        let mut revisions = Default::default();
+        assert!(super::accept_work_revision(&mut revisions, "w", 3));
+        assert!(!super::accept_work_revision(&mut revisions, "w", 2));
+        assert!(!super::accept_work_revision(&mut revisions, "w", 3));
+        assert!(super::accept_work_revision(&mut revisions, "w", 4));
     }
 }

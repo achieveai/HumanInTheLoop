@@ -11,7 +11,8 @@
 // place markdown is rendered goes through markdown-it with `html: false`, which
 // drops raw HTML outright.
 
-import { formatAbsolute, statusPill } from './pane-list.js';
+import './diagrams.js';
+import { appendWorkBadges, formatAbsolute, messageType, statusPill } from './pane-list.js';
 
 /** Create an element, optionally with a class and text. */
 export function el(tag, className, text) {
@@ -83,10 +84,10 @@ export function detailHeader(detail, kicker) {
     const { row, sender } = detail;
     const header = el('header', 'detail-header');
     header.dataset.messageId = row.messageId;
-    header.dataset.type = row.msgType;
+    header.dataset.type = messageType(row);
     header.dataset.status = row.status;
 
-    header.appendChild(el('div', 'detail-kicker', kicker));
+    header.appendChild(el('div', 'detail-kicker', row.work ? 'Work' : kicker));
 
     const line = el('div', 'detail-headline');
     line.appendChild(el('h2', 'detail-title', row.title));
@@ -94,6 +95,7 @@ export function detailHeader(detail, kicker) {
     header.appendChild(line);
 
     const meta = el('div', 'detail-meta');
+    appendWorkBadges(meta, row.work);
     const badge = senderBadge(sender);
     if (badge) meta.appendChild(badge);
     if (row.badges?.repo) meta.appendChild(el('span', 'badge badge-repo', row.badges.repo));

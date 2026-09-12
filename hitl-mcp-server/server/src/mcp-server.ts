@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { WorkStore, WorkValidationError } from './work-store.js';
+import { WORK_TOOLS } from './work-tools.js';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -87,6 +89,7 @@ export class HumanInTheLoopServer {
   private server: Server;
   private transport: NtfyTransport;
   private config: HitlConfig;
+  private workStore: WorkStore;
   private autoLaunchClient: boolean;
   /** reviewIds still waiting on a human, so a graceful exit can release them (D-3). */
   private outstandingReviews = new Set<string>();
@@ -97,6 +100,7 @@ export class HumanInTheLoopServer {
     options: { autoLaunchClient?: boolean } = {}
   ) {
     this.config = config;
+    this.workStore = new WorkStore(config);
     this.autoLaunchClient = options.autoLaunchClient ?? true;
 
     this.server = new Server(
@@ -111,6 +115,7 @@ export class HumanInTheLoopServer {
   private setupHandlers(): void {
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: [
+        ...WORK_TOOLS,
         {
           name: TOOL_NAME,
           description: `Use this tool when you need to ask the user questions during execution. This tool sends a push notification to ALL of the user's devices simultaneously — phone, laptop, desktop — so the human can respond from whichever device is most convenient, even when they have stepped away from the terminal. The answer is relayed back to you instantly.
@@ -275,7 +280,7 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
           name: NOTIFY_TOOL_NAME,
           description:
             'Send a notification to the human without waiting for a response. ' +
-            'Use this for progress updates, status messages, or any information the human should see. ' +
+            'Use this for one-off status messages or information the human should see. For ongoing multi-step work, milestones, or team reporting, prefer UpdateWork: it keeps one evolving progress document in the Inbox instead of separate notifications for the same goal. ' +
             'The notification appears on all of the user\'s devices and can be dismissed. ' +
             'Unlike AskUserQuestion, this tool returns immediately — it does NOT block.',
           inputSchema: {
@@ -341,6 +346,21 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      if (request.params.name === 'UpdateWork' || request.params.name === 'ReadWork') {
+        try {
+          const args = request.params.arguments ?? {};
+          const result = request.params.name === 'ReadWork'
+            ? { document: this.workStore.read(args.workId as string) }
+            : await this.workStore.update(args, async message => {
+                // Persist first; a missing client is a recoverable publication failure.
+                if (message.alert) this.requireClient();
+                await this.transport.publishWork(message);
+              });
+          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+        } catch (error) {
+          throw new McpError(error instanceof WorkValidationError ? ErrorCode.InvalidParams : ErrorCode.InternalError, describeError(error));
+        }
+      }
       // Handle setup tool
       if (request.params.name === SETUP_TOOL_NAME) {
         try {
