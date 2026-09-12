@@ -73,6 +73,13 @@ function pending(request: Record<string, unknown>, over = {}) {
 }
 
 test.describe('Pane 3 — a single question (spec §8.2)', () => {
+  test('option previews render diagrams with shared viewer controls', async ({ page }) => {
+    await mount(page, 'question', pending({ ...SINGLE, options: [
+      { label: 'Diagram', value: 'diagram', preview: '```mermaid\nflowchart LR\nA --> B\n```' },
+    ] }));
+    await expect(page.locator('.diagram-viewer img')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Expand diagram' })).toBeEnabled();
+  });
   // Reported from a screenshot: the radio sat "almost a line above" its label.
   //
   // Two causes, and neither was the radio. `align-items: flex-start` top-aligns

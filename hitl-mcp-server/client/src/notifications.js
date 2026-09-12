@@ -1,3 +1,5 @@
+import './diagrams.js';
+
 const { getCurrentWindow } = window.__TAURI__.window;
 const { listen } = window.__TAURI__.event;
 const { invoke } = window.__TAURI__.core;
