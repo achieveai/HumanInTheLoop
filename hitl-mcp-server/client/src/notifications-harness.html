@@ -30,6 +30,7 @@
                     console.log('[TAURI MOCK] invoke:', cmd, args);
                     if (cmd === 'notifications_ready') {
                         if (window.__DURING_READY) window.__listeners['add-notification']({ payload: window.__DURING_READY });
+                        if (window.__DURING_READY_EVENT) { const entry = window.__DURING_READY_EVENT; window.__listeners[entry.event]({ payload: entry }); }
                         return Promise.resolve(window.__PENDING_NOTIFICATIONS || []);
                     }
                     if (cmd === 'dismiss_notification' && window.__DEFER_DISMISS) {

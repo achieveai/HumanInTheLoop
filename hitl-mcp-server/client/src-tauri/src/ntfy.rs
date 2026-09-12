@@ -142,8 +142,9 @@ impl NtfySink for TauriSink {
 
     fn on_dismiss_notification(&self, dismiss: &DismissNotificationMessage) {
         if let Some(win) = self.app.get_webview_window("notifications") {
-            if self.app.state::<payload_store::NotificationStartup>().queue("remove-notification", &serde_json::json!(dismiss.notification_id)) { return; }
-            if let Err(e) = win.emit("remove-notification", &dismiss.notification_id) {
+            let (queued, entry) = self.app.state::<payload_store::NotificationStartup>().record("remove-notification", &serde_json::json!(dismiss.notification_id));
+            if queued { return; }
+            if let Err(e) = win.emit("remove-notification", &entry) {
                 log::error!("Failed to emit remove-notification: {}", e);
             }
         }
@@ -587,12 +588,12 @@ fn show_notification(
 /// Quiet snapshots can refresh visible cards but cannot raise or create a window.
 fn show_notification_payload(app: &AppHandle, config: &HitlConfig, payload: serde_json::Value, alert: bool) {
     if alert && config.sound_enabled { crate::sound::play_notification(); }
-    let notification_json = serde_json::to_string(&payload).unwrap_or_default();
     let label = "notifications";
 
     if let Some(win) = app.get_webview_window(label) {
-        if app.state::<payload_store::NotificationStartup>().queue("add-notification", &payload) { return; }
-        if let Err(e) = win.emit("add-notification", &notification_json) {
+        let (queued, entry) = app.state::<payload_store::NotificationStartup>().record("add-notification", &payload);
+        if queued { return; }
+        if let Err(e) = win.emit("add-notification", &entry) {
             log::error!("Failed to emit add-notification: {}", e);
         }
         if alert { let _ = crate::window_utils::show_window_no_activate(&win); }
@@ -600,8 +601,8 @@ fn show_notification_payload(app: &AppHandle, config: &HitlConfig, payload: serd
     }
 
     if !alert { return; }
-    let encoded = urlencoding::encode(&notification_json);
-    let url_str = format!("notifications.html?notification={}", encoded);
+    app.state::<payload_store::NotificationStartup>().queue("add-notification", &payload);
+    let url_str = "notifications.html";
 
     match tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url_str.into()))
         .title("Notifications")
@@ -615,7 +616,10 @@ fn show_notification_payload(app: &AppHandle, config: &HitlConfig, payload: serd
         .build()
     {
         Ok(_) => log::info!("Notifications window created"),
-        Err(e) => log::error!("Failed to create notifications window: {}", e),
+        Err(e) => {
+            app.state::<payload_store::NotificationStartup>().reset();
+            log::error!("Failed to create notifications window: {}", e);
+        }
     }
 }
 

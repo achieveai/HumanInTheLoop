@@ -19,29 +19,75 @@ use tauri::{AppHandle, Manager, State};
 #[derive(Default)]
 pub struct PayloadStore(pub Mutex<HashMap<String, String>>);
 
-/// Events received while the notifications webview is registering listeners.
-/// Switching to live delivery and draining the queue share the same lock.
-pub struct NotificationStartup(pub Mutex<Option<Vec<serde_json::Value>>>);
+/// Current notification presentation for the lifetime of its native window.
+/// Keep state even after ready, so renderer reloads cannot lose live arrivals.
+#[derive(Default)]
+pub struct NotificationStartup(Mutex<NotificationState>);
 
-impl Default for NotificationStartup {
-    fn default() -> Self { Self(Mutex::new(Some(Vec::new()))) }
+#[derive(Default)]
+struct NotificationState {
+    ready: bool,
+    sequence: u64,
+    entries: Vec<(String, Option<serde_json::Value>, bool)>,
 }
 
 impl NotificationStartup {
+    /// Record before emitting. The returned sequence lets a reloading renderer
+    /// ignore buffered events already represented in its restored snapshot.
+    pub fn record(&self, event: &str, payload: &serde_json::Value) -> (bool, serde_json::Value) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.sequence += 1;
+        let entry = serde_json::json!({"event":event,"payload":payload,"sequence":state.sequence});
+        let id = if event == "remove-notification" { payload.as_str() }
+            else if payload["type"] == "work_update" { payload["workId"].as_str() }
+            else { payload["messageId"].as_str() };
+        if let Some(id) = id {
+            let index = state.entries.iter().position(|(key, _, _)| key == id);
+            if event == "remove-notification" {
+                if let Some(index) = index { state.entries[index].2 = false; }
+                else { state.entries.push((id.to_string(), None, false)); }
+            } else if event == "add-notification" {
+                let work = payload["type"] == "work_update";
+                let visible = !work || payload["alert"] == true;
+                if let Some(index) = index {
+                    let (_, previous, was_visible) = &mut state.entries[index];
+                    if work && previous.as_ref().and_then(|p| p["revision"].as_u64()).unwrap_or(0)
+                        >= payload["revision"].as_u64().unwrap_or(0) {
+                        return (!state.ready, entry);
+                    }
+                    *previous = Some(payload.clone());
+                    *was_visible |= visible;
+                } else { state.entries.push((id.to_string(), Some(payload.clone()), visible)); }
+            }
+        }
+        (!state.ready, entry)
+    }
+
     pub fn queue(&self, event: &str, payload: &serde_json::Value) -> bool {
-        let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(events) = pending.as_mut() {
-            events.push(serde_json::json!({"event": event, "payload": payload}));
-            true
-        } else { false }
+        self.record(event, payload).0
     }
 
     pub fn ready(&self) -> Vec<serde_json::Value> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state.ready = true;
+        // Include a cursor even when all ordinary cards were dismissed.
+        let mut result = vec![serde_json::json!({"event":"notification-snapshot", "sequence":state.sequence})];
+        for (id, payload, visible) in &state.entries {
+            if let Some(mut payload) = payload.clone() {
+                if payload["type"] == "work_update" {
+                    // Replay visibility, not alert intent: no sound is triggered by IPC.
+                    payload["alert"] = serde_json::json!(visible);
+                } else if !visible { continue; }
+                result.push(serde_json::json!({"event":"add-notification","payload":payload,"sequence":state.sequence}));
+            } else {
+                result.push(serde_json::json!({"event":"remove-notification","payload":id,"sequence":state.sequence}));
+            }
+        }
+        result
     }
 
     pub fn reset(&self) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(Vec::new());
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = NotificationState::default();
     }
 }
 
@@ -109,23 +155,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notification_startup_drains_updates_in_order_then_switches_to_live() {
+    fn notification_reload_keeps_latest_and_dismissal_during_listener_gap() {
         let startup = NotificationStartup::default();
-        let first = serde_json::json!({"revision": 1});
-        let latest = serde_json::json!({"revision": 2});
+        let work = |revision, alert| serde_json::json!({"type":"work_update", "workId":"work", "revision":revision,"alert":alert});
+        startup.queue("add-notification", &work(1, true));
+        startup.ready();
+        // The renderer has gone away. Native reception must still retain state.
+        assert!(!startup.queue("add-notification", &work(2, false)));
+        let restored = startup.ready();
+        assert_eq!(restored[1]["payload"]["revision"], 2);
+        assert_eq!(restored[1]["payload"]["alert"], true);
+        startup.queue("remove-notification", &serde_json::json!("work"));
+        startup.queue("add-notification", &work(3, false));
+        let restored = startup.ready();
+        assert_eq!(restored[1]["payload"]["revision"], 3);
+        assert_eq!(restored[1]["payload"]["alert"], false);
+        startup.queue("add-notification", &work(2, true));
+        assert_eq!(startup.ready()[1]["payload"], restored[1]["payload"]);
+        startup.queue("add-notification", &work(4, true));
+        assert_eq!(startup.ready()[1]["payload"]["alert"], true);
+        startup.reset();
+        assert_eq!(startup.ready().len(), 1);
+    }
+
+    #[test]
+    fn notification_startup_coalesces_before_ready_and_preserves_other_cards() {
+        let startup = NotificationStartup::default();
+        let first = serde_json::json!({"type":"work_update", "workId":"work", "revision":1,"alert":true});
+        let latest = serde_json::json!({"type":"work_update", "workId":"work", "revision":2,"alert":false});
         assert!(startup.queue("add-notification", &first));
         assert!(startup.queue("add-notification", &latest));
-        assert!(startup.queue("remove-notification", &serde_json::json!("work")));
-        assert_eq!(startup.ready(), vec![
-            serde_json::json!({"event":"add-notification", "payload":first}),
-            serde_json::json!({"event":"add-notification", "payload":latest}),
-            serde_json::json!({"event":"remove-notification", "payload":"work"}),
-        ]);
-        assert!(!startup.queue("add-notification", &latest));
-        assert!(startup.ready().is_empty());
+        startup.queue("add-notification", &serde_json::json!({"messageId":"other"}));
+        let ready = startup.ready();
+        assert_eq!(ready.len(), 3);
+        assert_eq!(ready[0]["sequence"], 3);
+        assert_eq!(ready[1]["payload"]["revision"], 2);
+        assert_eq!(ready[1]["payload"]["alert"], true);
+        let (queued, removal) = startup.record("remove-notification", &serde_json::json!("work"));
+        assert!(!queued);
+        assert_eq!(removal["sequence"], 4);
+        let ready = startup.ready();
+        assert_eq!(ready[0]["sequence"], 4);
+        assert_eq!(ready[1]["payload"]["alert"], false);
+        assert_eq!(ready[2]["payload"]["messageId"], "other");
+        startup.queue("remove-notification", &serde_json::json!("other"));
+        assert_eq!(startup.ready().len(), 2);
         startup.reset();
-        assert!(startup.queue("add-notification", &latest));
-        assert_eq!(startup.ready(), vec![serde_json::json!({"event":"add-notification", "payload":latest})]);
+        assert!(startup.queue("add-notification", &first));
+        assert_eq!(startup.ready()[0]["sequence"], 1);
     }
 
     #[test]

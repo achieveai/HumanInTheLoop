@@ -90,7 +90,7 @@ async fn submit_plan_review(
 
 /// Tauri command: dismiss a notification from the frontend.
 #[tauri::command]
-async fn dismiss_notification(notification_id: String, encrypted: Option<bool>) -> Result<(), String> {
+async fn dismiss_notification(app: tauri::AppHandle, notification_id: String, encrypted: Option<bool>) -> Result<(), String> {
     let config = load_config().map_err(|e| e.to_string())?;
 
     let msg = DismissNotificationMessage {
@@ -108,6 +108,16 @@ async fn dismiss_notification(notification_id: String, encrypted: Option<bool>) 
         .await
         .map_err(|e| e.to_string())?;
 
+    // A renderer may reload while publication is pending. Record and deliver
+    // success from native state, rather than relying on the old IPC caller.
+    let (queued, entry) = app.state::<payload_store::NotificationStartup>()
+        .record("remove-notification", &serde_json::json!(msg.notification_id));
+    if !queued {
+        if let Some(window) = app.get_webview_window("notifications") {
+            use tauri::Emitter;
+            let _ = window.emit("remove-notification", &entry);
+        }
+    }
     Ok(())
 }
 

@@ -76,3 +76,51 @@ for (const fails of [false, true]) {
   await expect(page.locator('.notification-card[data-id="other"]')).toBeVisible();
  });
 }
+
+
+test('reload restores native latest snapshot and dismissal without an opening URL', async ({ page }) => {
+ await page.addInitScript(() => {
+  (window as any).__PENDING_NOTIFICATIONS = JSON.parse(sessionStorage.getItem('nativeSnapshot') || '[]');
+ });
+ await page.goto('/notifications-harness.html');
+ await send(page, work(1));
+ await send(page, work(2, false));
+ const other = { messageId: 'other', title: 'Other', body: 'Keep open', timestamp: Date.now() };
+ await send(page, other);
+ const snapshot = (payload: any, visible: boolean) => [
+  { event: 'notification-snapshot', sequence: 5 },
+  { event: 'add-notification', payload: { ...payload, alert: visible }, sequence: 5 },
+  { event: 'add-notification', payload: other, sequence: 5 },
+ ];
+ await page.evaluate(data => sessionStorage.setItem('nativeSnapshot', JSON.stringify(data)), snapshot(work(2, false), true));
+ await page.reload();
+ await expect(page.locator('.work-document')).toContainText('Change 2');
+ await page.locator('[data-id="work-1"] .dismiss-btn').click();
+ await expect(page.locator('[data-id="work-1"]')).toHaveCount(0);
+ await page.evaluate(data => sessionStorage.setItem('nativeSnapshot', JSON.stringify(data)), snapshot(work(3, false), false));
+ await page.reload();
+ await expect(page.locator('.notification-card[data-id="other"]')).toBeVisible();
+ await expect(page.locator('[data-id="work-1"]')).toHaveCount(0);
+ await send(page, work(2));
+ await send(page, work(4, false));
+ await expect(page.locator('[data-id="work-1"]')).toHaveCount(0);
+ await send(page, work(5));
+ await expect(page.locator('.work-document')).toContainText('Change 5');
+});
+
+test('native snapshot cursor ignores buffered dismissal already superseded by an alert', async ({ page }) => {
+ await page.addInitScript(payload => {
+  (window as any).__PENDING_NOTIFICATIONS = [
+   { event: 'notification-snapshot', sequence: 3 },
+   { event: 'add-notification', payload, sequence: 3 },
+  ];
+  (window as any).__DURING_READY_EVENT = { event: 'remove-notification', payload: 'work-1', sequence: 2 };
+ }, work(3));
+ await page.goto('/notifications-harness.html');
+ await expect(page.locator('.work-document')).toContainText('Change 3');
+ await page.waitForTimeout(350);
+ await expect(page.locator('.notification-card')).toHaveCount(1);
+ // An event after the snapshot cursor must still be applied.
+ await page.evaluate(() => (window as any).__listeners['remove-notification']({ payload: {event: 'remove-notification', payload: 'work-1', sequence: 4} }));
+ await expect(page.locator('.notification-card')).toHaveCount(0);
+});

@@ -417,10 +417,12 @@ export class NtfyTransport {
 
   /** Full work snapshots use the existing encrypted, chunked wire path. */
   async publishWork(msg: WorkUpdateMessage): Promise<void> {
-    return this.publishChunked(msg);
+    // Retries retain the logical messageId but encrypt independently. Distinct
+    // assembly groups prevent concurrent attempts from mixing ciphertext.
+    return this.publishChunked(msg, randomBytes(16).toString('hex'));
   }
 
-  private async publishChunked(msg: HitlMessage | WorkUpdateMessage): Promise<void> {
+  private async publishChunked(msg: HitlMessage | WorkUpdateMessage, groupId = msg.messageId): Promise<void> {
     let body: string;
     if (this.config.encryptionKey) {
       body = encrypt(JSON.stringify(msg), this.config.encryptionKey);
@@ -433,7 +435,7 @@ export class NtfyTransport {
       return;
     }
 
-    for (const chunk of splitIntoChunks(body, msg.messageId)) {
+    for (const chunk of splitIntoChunks(body, groupId)) {
       await this.publishRaw(JSON.stringify(chunk));
     }
   }

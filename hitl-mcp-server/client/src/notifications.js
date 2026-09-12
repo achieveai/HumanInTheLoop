@@ -242,6 +242,7 @@ async function setupListeners() {
     // Buffer live events while IPC drains earlier events so a quiet update
     // cannot overtake the alert that first creates its card.
     let startupComplete = false;
+    let restoredThrough = 0;
     const arriving = [];
     // One bad payload must not abort the drain or strand subsequent live events.
     const dispatch = entry => {
@@ -253,8 +254,11 @@ async function setupListeners() {
         } catch (err) { console.error('Failed to handle notification event:', err); }
     };
     const receive = (event, payload) => {
-        const entry = { event, payload };
-        if (startupComplete) dispatch(entry);
+        const entry = payload?.event === event && Number.isSafeInteger(payload.sequence)
+            ? payload : { event, payload };
+        if (startupComplete) {
+            if (!entry.sequence || entry.sequence > restoredThrough) dispatch(entry);
+        }
         else arriving.push(entry);
     };
     await listen('add-notification', (event) => {
@@ -274,21 +278,23 @@ async function setupListeners() {
     });
     try {
         const pending = await invoke('notifications_ready');
-        for (const entry of pending || []) dispatch(entry);
+        for (const entry of pending || []) {
+            dispatch(entry);
+            restoredThrough = Math.max(restoredThrough, entry.sequence || 0);
+        }
     } catch (err) {
         console.error('Failed to read startup notifications:', err);
     }
-    for (const entry of arriving) dispatch(entry);
+    for (const entry of arriving) {
+        if (!entry.sequence || entry.sequence > restoredThrough) dispatch(entry);
+    }
     startupComplete = true;
+    // IPC now supplies the opening card too. Paint before revealing the window.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (notifications.length) invoke('show_no_activate');
+    }));
 }
 
 // Initialize
 loadInitialNotification();
 setupListeners();
-
-// Show window after content is fully painted (prevents flash)
-requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-        if (notifications.length) invoke('show_no_activate');
-    });
-});
