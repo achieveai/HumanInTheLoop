@@ -521,7 +521,7 @@ For an Inbox-only release, finish the checklist below, then create and push a ne
 2. Run server, Rust, client UI, and Inbox UI tests. The server's version-sync test checks manifest consistency.
 3. Build target-platform binaries and installers. Test installation and a real request/reply flow.
 4. Check artifact names, hashes, signing status, and absence of user config, databases, keys, or other private files.
-5. For a full/npm release, inspect the npm package contents. `npm publish` runs the server build, but does not create or bundle missing tray binaries. Skip this step for an Inbox-only release.
+5. For a full/npm release, inspect the npm package contents. `npm publish` rejects missing or empty tray binaries before running the server build. Download all four client artifacts from the release workflow and place their executables under `server/dist/bin/{windows-x64,linux-x64,macos-arm64,macos-x64}/` first. It does not build or download those binaries for you. Skip this step for an Inbox-only release.
 6. Publish only with maintainer authorization. Review the tag-triggered workflow's effects first.
 7. Verify the downloadable assets and installation instructions after release.
 
