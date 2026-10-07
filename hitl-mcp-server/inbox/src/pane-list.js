@@ -12,6 +12,11 @@ const MINUTE = 60;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const scrollRestoreTokens = new WeakMap();
+// Reused DOM rows must dispatch the latest projection and selection callback.
+const rowSelections = new WeakMap();
+const virtualLists = new WeakMap();
+const VIRTUAL_THRESHOLD = 200;
+const OVERSCAN = 8;
 
 /** The pinned filters of spec §7.3, in the order they are shown. */
 export const FILTERS = [
@@ -158,6 +163,7 @@ function badges(message) {
 
 function messageRow(message, { selectedId, onSelect } = {}) {
     const row = el('div', 'message-row');
+    rowSelections.set(row, { message, onSelect });
     row.dataset.messageId = message.messageId;
     row.dataset.status = message.status;
     row.dataset.type = messageType(message);
@@ -195,7 +201,10 @@ function messageRow(message, { selectedId, onSelect } = {}) {
 
     row.appendChild(main);
 
-    const select = () => onSelect?.(message);
+    const select = () => {
+        const current = rowSelections.get(row);
+        current.onSelect?.(current.message);
+    };
     row.addEventListener('click', select);
     row.addEventListener('keydown', event => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -207,10 +216,13 @@ function messageRow(message, { selectedId, onSelect } = {}) {
     return row;
 }
 
-function visibleSelectedAnchor(container) {
-    const selected = container.querySelector('.message-row.is-selected');
-    if (!selected) return null;
+function visibleSelectedAnchor(container, anyVisible = false) {
     const containerRect = container.getBoundingClientRect();
+    const selected = anyVisible ? Array.from(container.querySelectorAll('.message-row')).find(row => {
+        const rect = row.getBoundingClientRect();
+        return rect.bottom > containerRect.top && rect.top < containerRect.bottom;
+    }) : container.querySelector('.message-row.is-selected');
+    if (!selected) return null;
     const rowRect = selected.getBoundingClientRect();
     if (rowRect.bottom <= containerRect.top || rowRect.top >= containerRect.bottom) return null;
     return {
@@ -220,7 +232,8 @@ function visibleSelectedAnchor(container) {
 }
 
 function restoreSelectedAnchor(container, anchor) {
-    const selected = container.querySelector('.message-row.is-selected');
+    const selected = Array.from(container.querySelectorAll('.message-row'))
+        .find(row => row.dataset.messageId === anchor.messageId);
     if (!selected || selected.dataset.messageId !== anchor.messageId) return;
     const currentTop = selected.getBoundingClientRect().top - container.getBoundingClientRect().top;
     const delta = currentTop - anchor.top;
@@ -247,21 +260,226 @@ function restoreSelectedAnchorAfterLayout(container, anchor, restoreToken, expec
     });
 }
 
-/** Render the list. Server-ordered newest first; nothing is re-sorted here. */
-export function renderMessageList(container, list, options = {}) {
-    const anchor = visibleSelectedAnchor(container);
-    const restoreToken = {};
-    scrollRestoreTokens.set(container, restoreToken);
-    const fragment = document.createDocumentFragment();
-
-    if (!list.messages.length) {
-        fragment.appendChild(el('p', 'list-empty', options.emptyText ?? emptyText(list)));
-    } else {
-        for (const message of list.messages) {
-            fragment.appendChild(messageRow(message, options));
+function reconcileMessageNodes(container, candidates) {
+    const activeElement = container.ownerDocument.activeElement;
+    const focusedId = container.contains(activeElement)
+        ? activeElement.closest('.message-row')?.dataset.messageId : null;
+    // Replacing a large list makes WebView2 announce every removed and added
+    // accessibility object to Windows. Keep unchanged rows connected instead.
+    const existing = new Map(Array.from(container.children, row => [row.dataset.messageId, row]));
+    const desired = candidates.map(candidate => {
+        const previous = existing.get(candidate.dataset.messageId);
+        if (previous && previous.isEqualNode(candidate)) {
+            if (rowSelections.has(candidate)) {
+                rowSelections.set(previous, rowSelections.get(candidate));
+            }
+            return previous;
+        }
+        return candidate;
+    });
+    const retained = new Set(desired);
+    for (const row of Array.from(container.children)) {
+        if (!retained.has(row)) row.remove();
+    }
+    let cursor = container.firstChild;
+    for (const row of desired) {
+        if (row === cursor) cursor = cursor.nextSibling;
+        else container.insertBefore(row, cursor);
+    }
+    if (focusedId) {
+        const focusedRow = desired.find(row => row.dataset.messageId === focusedId);
+        if (focusedRow && container.ownerDocument.activeElement !== focusedRow) {
+            focusedRow.focus({ preventScroll: true });
         }
     }
-    container.replaceChildren(fragment);
+}
+
+function heightKind(message) {
+    const b = message.badges ?? {};
+    const hasBadges = message.work || b.repo || b.batchCount || b.revision || b.attachment || b.plaintext;
+    return `${Boolean(message.contextSnippet || message.responder)}:${Boolean(hasBadges)}`;
+}
+
+function measureOffsets(state) {
+    state.offsets = [0];
+    for (const message of state.messages) {
+        const height = state.heights.get(message.messageId) ?? state.estimates.get(heightKind(message)) ?? 60;
+        state.offsets.push(state.offsets.at(-1) + height);
+    }
+}
+
+function indexAt(state, top) {
+    let low = 0, high = state.messages.length - 1;
+    while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (state.offsets[middle + 1] <= top) low = middle + 1;
+        else high = middle;
+    }
+    return low;
+}
+
+function virtualAnchor(state) {
+    if (!state.messages.length || state.container.scrollTop <= 0) return null;
+    const index = indexAt(state, state.container.scrollTop);
+    return { id: state.messages[index].messageId, within: state.container.scrollTop - state.offsets[index] };
+}
+
+function atVirtualEnd(state) {
+    return state.container.scrollTop > 0
+        && state.container.scrollTop >= state.offsets.at(-1) - state.container.clientHeight - 2;
+}
+
+function paintVirtual(state, anchor = virtualAnchor(state), stickToEnd = atVirtualEnd(state)) {
+    const { container } = state;
+    const viewport = container.clientHeight || 600;
+    // Two bounded passes learn actual variable row heights without mounting
+    // the history. The same message stays under the reader as estimates settle.
+    for (let pass = 0; pass < 2; pass++) {
+        const anchorIndex = anchor ? state.indices.get(anchor.id) : undefined;
+        const top = Math.max(0, stickToEnd ? state.offsets.at(-1) - viewport
+            : anchorIndex === undefined ? 0 : state.offsets[anchorIndex] + anchor.within);
+        const first = Math.max(0, indexAt(state, top) - OVERSCAN);
+        const end = Math.min(state.messages.length, indexAt(state, top + viewport) + 1 + OVERSCAN);
+        const indices = new Set(Array.from({ length: end - first }, (_, i) => first + i));
+        const active = container.ownerDocument.activeElement;
+        const focusedId = state.focusTarget ?? (container.contains(active) ? active.closest('.message-row')?.dataset.messageId : null);
+        const focusedIndex = state.indices.get(focusedId);
+        if (focusedIndex !== undefined) indices.add(focusedIndex);
+
+        const spacer = el('div', 'message-list-spacer');
+        spacer.setAttribute('aria-hidden', 'true');
+        spacer.style.height = `${state.offsets.at(-1)}px`;
+        const nodes = [spacer];
+        for (const index of [...indices].sort((a, b) => a - b)) {
+            const row = messageRow(state.messages[index], state.options);
+            row.classList.add('message-row--virtual');
+            row.style.top = `${state.offsets[index]}px`;
+            row.setAttribute('aria-description', `Message ${index + 1} of ${state.messages.length}`);
+            nodes.push(row);
+        }
+        reconcileMessageNodes(container, nodes);
+        container.scrollTop = top;
+
+        let changed = false;
+        for (const row of container.querySelectorAll('.message-row')) {
+            const height = row.getBoundingClientRect().height;
+            if (height <= 0) continue;
+            const message = state.messages[state.indices.get(row.dataset.messageId)];
+            const kind = heightKind(message);
+            if (!state.estimates.has(kind)) { state.estimates.set(kind, height); changed = true; }
+            if (state.heights.get(message.messageId) !== height) {
+                state.heights.set(message.messageId, height);
+                changed = true;
+            }
+        }
+        if (!changed) break;
+        measureOffsets(state);
+        container.firstElementChild.style.height = `${state.offsets.at(-1)}px`;
+        for (const row of container.querySelectorAll('.message-row')) {
+            row.style.top = `${state.offsets[state.indices.get(row.dataset.messageId)]}px`;
+        }
+        container.scrollTop = Math.max(0, stickToEnd ? state.offsets.at(-1) - viewport
+            : anchorIndex === undefined ? 0 : state.offsets[anchorIndex] + anchor.within);
+    }
+}
+
+function focusVirtual(state, index) {
+    const { container } = state;
+    const id = state.messages[index].messageId;
+    state.focusTarget = id;
+    const top = state.offsets[index], bottom = state.offsets[index + 1];
+    if (top < container.scrollTop) container.scrollTop = top;
+    else if (bottom > container.scrollTop + container.clientHeight) container.scrollTop = bottom - container.clientHeight;
+    paintVirtual(state);
+    const row = Array.from(container.children).find(row => row.dataset.messageId === id);
+    row?.focus({ preventScroll: true });
+    row?.scrollIntoView({ block: 'nearest' });
+    state.focusTarget = null;
+}
+
+function renderVirtualList(container, list, options) {
+    let state = virtualLists.get(container);
+    const entering = !state;
+    const previousAnchor = entering && container.scrollTop > 0 ? visibleSelectedAnchor(container, true) : null;
+    if (!state) {
+        state = { container, messages: [], options: {}, offsets: [0], indices: new Map(),
+            heights: new Map(), estimates: new Map(), width: container.clientWidth, frame: 0 };
+        state.schedule = () => {
+            if (state.frame) return;
+            state.frame = requestAnimationFrame(() => {
+                state.frame = 0;
+                if (virtualLists.get(container) !== state || !container.isConnected) return;
+                const anchor = virtualAnchor(state), end = atVirtualEnd(state);
+                if (container.clientWidth && state.width !== container.clientWidth) {
+                    state.width = container.clientWidth;
+                    state.heights.clear(); state.estimates.clear(); measureOffsets(state);
+                }
+                paintVirtual(state, anchor, end);
+            });
+        };
+        state.keydown = event => {
+            if (event.altKey || event.ctrlKey || event.metaKey) return;
+            const row = event.target.closest('.message-row');
+            const index = state.indices.get(row?.dataset.messageId);
+            if (index === undefined) return;
+            const page = Math.max(1, Math.floor(container.clientHeight / 60));
+            const target = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0,
+                End: state.messages.length - 1, PageDown: index + page, PageUp: index - page,
+                Tab: index + (event.shiftKey ? -1 : 1) }[event.key];
+            if (target === undefined || (event.key === 'Tab' && (target < 0 || target >= state.messages.length))) return;
+            event.preventDefault();
+            focusVirtual(state, Math.max(0, Math.min(state.messages.length - 1, target)));
+        };
+        virtualLists.set(container, state);
+        container.dataset.virtual = 'true';
+        container.addEventListener('scroll', state.schedule, { passive: true });
+        container.addEventListener('keydown', state.keydown);
+        state.resize = new ResizeObserver(state.schedule);
+        state.resize.observe(container);
+    }
+    const sameScope = state.scopeKey === list.scopeKey && state.filter === list.filter;
+    const anchor = previousAnchor ? { id: previousAnchor.messageId, within: -previousAnchor.top }
+        : sameScope ? virtualAnchor(state) : null;
+    const end = !entering && sameScope && atVirtualEnd(state);
+    const selectionChanged = !entering && state.options.selectedId !== options.selectedId;
+    state.messages = list.messages; state.options = options;
+    state.scopeKey = list.scopeKey; state.filter = list.filter;
+    state.indices = new Map(list.messages.map((message, index) => [message.messageId, index]));
+    for (const id of state.heights.keys()) if (!state.indices.has(id)) state.heights.delete(id);
+    measureOffsets(state);
+    paintVirtual(state, anchor, end);
+    if (selectionChanged && state.indices.has(options.selectedId)) {
+        const index = state.indices.get(options.selectedId);
+        // Selection may change from a dismissal or keyboard action. Reveal it
+        // without stealing focus from the reading pane or an action button.
+        if (state.offsets[index + 1] <= container.scrollTop || state.offsets[index] >= container.scrollTop + container.clientHeight) {
+            container.scrollTop = state.offsets[index];
+            paintVirtual(state);
+        }
+    }
+}
+
+/** Render the list. Server-ordered newest first; nothing is re-sorted here. */
+export function renderMessageList(container, list, options = {}) {
+    if (list.messages.length > VIRTUAL_THRESHOLD) {
+        renderVirtualList(container, list, options);
+        return;
+    }
+    const virtual = virtualLists.get(container);
+    const anchor = visibleSelectedAnchor(container, Boolean(virtual));
+    if (virtual) {
+        cancelAnimationFrame(virtual.frame);
+        virtual.resize.disconnect();
+        container.removeEventListener('scroll', virtual.schedule);
+        container.removeEventListener('keydown', virtual.keydown);
+        virtualLists.delete(container);
+        delete container.dataset.virtual;
+    }
+    const restoreToken = {};
+    scrollRestoreTokens.set(container, restoreToken);
+    const nodes = list.messages.length ? list.messages.map(message => messageRow(message, options))
+        : [el('p', 'list-empty', options.emptyText ?? emptyText(list))];
+    reconcileMessageNodes(container, nodes);
     if (!anchor) return;
 
     restoreSelectedAnchor(container, anchor);

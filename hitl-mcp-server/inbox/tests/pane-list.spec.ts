@@ -55,6 +55,165 @@ async function projectionCounts(page: Page) {
   }));
 }
 
+test.describe('Incremental message refresh', () => {
+  test('one arriving message keeps existing rows and keyboard focus', async ({ page }) => {
+    await open(page, only(message({ messageId: 'base' })));
+    const result = await page.evaluate(async base => {
+      const modulePath = '/pane-list.js';
+      const { renderMessageList } = await import(modulePath);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const messages = Array.from({ length: 150 }, (_, i) => ({ ...base, messageId: `old-${i}` }));
+      renderMessageList(container, { messages });
+      const before = Array.from(container.children);
+      (before[50] as HTMLElement).focus();
+      const observer = new MutationObserver(() => {});
+      observer.observe(container, { childList: true });
+      renderMessageList(container, { messages: [{ ...base, messageId: 'new' }, ...messages] });
+      const mutations = observer.takeRecords();
+      observer.disconnect();
+      return {
+        retained: before.every((row, i) => container.children[i + 1] === row),
+        focused: document.activeElement === before[50],
+        removed: mutations.reduce((sum, record) => sum + record.removedNodes.length, 0),
+        added: mutations.reduce((sum, record) => sum + record.addedNodes.length, 0),
+      };
+    }, message({ messageId: 'base' }));
+    expect(result).toEqual({ retained: true, focused: true, removed: 0, added: 1 });
+  });
+
+  test('reused rows select fresh data and the latest callback', async ({ page }) => {
+    await open(page, only(message({ messageId: 'base' })));
+    const result = await page.evaluate(async base => {
+      const modulePath = '/pane-list.js';
+      const { renderMessageList } = await import(modulePath);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      let oldCalls = 0;
+      const selected: number[] = [];
+      renderMessageList(container, { messages: [{ ...base, revisionForSelection: 1 }] }, { onSelect: () => oldCalls++ });
+      const row = container.firstElementChild as HTMLElement;
+      renderMessageList(container, { messages: [{ ...base, revisionForSelection: 2 }] }, {
+        onSelect: (m: any) => selected.push(m.revisionForSelection),
+      });
+      (container.firstElementChild as HTMLElement).click();
+      container.firstElementChild!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      return { retained: row === container.firstElementChild, oldCalls, selected };
+    }, message({ messageId: 'base' }));
+    expect(result).toEqual({ retained: true, oldCalls: 0, selected: [2, 2] });
+  });
+
+  test('reorders, removes and updates rows without duplicating them', async ({ page }) => {
+    await open(page, only(message({ messageId: 'base' })));
+    const result = await page.evaluate(async base => {
+      const modulePath = '/pane-list.js';
+      const { renderMessageList } = await import(modulePath);
+      const container = document.createElement('div');
+      const a = { ...base, messageId: 'a' }, b = { ...base, messageId: 'b' }, c = { ...base, messageId: 'c' };
+      document.body.appendChild(container);
+      renderMessageList(container, { messages: [a, b, c, { ...base, messageId: 'removed' }] });
+      const oldC = container.children[2];
+      (oldC as HTMLElement).focus();
+      renderMessageList(container, { messages: [c, a, { ...b, title: 'Updated', status: 'answered' }] }, { selectedId: 'b' });
+      return {
+        ids: Array.from(container.children).map((row: any) => row.dataset.messageId),
+        keptC: oldC === container.firstElementChild,
+        focusedC: document.activeElement === oldC,
+        title: container.lastElementChild!.querySelector('.message-title')!.textContent,
+        selected: container.lastElementChild!.classList.contains('is-selected'),
+        status: (container.lastElementChild as HTMLElement).dataset.status,
+      };
+    }, message({ messageId: 'base' }));
+    expect(result).toEqual({ ids: ['c', 'a', 'b'], keptC: true, focusedC: true, title: 'Updated', selected: true, status: 'answered' });
+  });
+});
+
+test.describe('Large lists render on scroll', () => {
+  test('preserves the reading position across the virtualization threshold in both directions', async ({ page }) => {
+    await open(page, only(message({ messageId: 'base' })));
+    const shifts = await page.evaluate(async base => {
+      const modulePath = '/pane-list.js';
+      const { renderMessageList } = await import(modulePath);
+      const container = document.createElement('div');
+      container.className = 'message-list';
+      container.style.cssText = 'height:400px;width:600px;position:fixed;top:0;overflow:auto;flex:none';
+      document.body.appendChild(container);
+      const messages = Array.from({ length: 200 }, (_, i) => ({ ...base, messageId: `threshold-${i}` }));
+      renderMessageList(container, { messages });
+      container.scrollTop = 5000;
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+      const row = Array.from(container.querySelectorAll<HTMLElement>('.message-row')).find(r => r.getBoundingClientRect().bottom > 0)!;
+      const id = row.dataset.messageId;
+      const before = row.getBoundingClientRect().top;
+      renderMessageList(container, { messages: [{ ...base, messageId: 'arrival' }, ...messages] });
+      const anchoredRow = container.querySelector(`[data-message-id="${id}"]`);
+      if (!anchoredRow) throw new Error(JSON.stringify({ id, before, scrollTop: container.scrollTop, mounted: Array.from(container.children).map((r: any) => r.dataset.messageId) }));
+      const after = anchoredRow.getBoundingClientRect().top;
+      renderMessageList(container, { messages });
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+      const restored = container.querySelector(`[data-message-id="${id}"]`)!.getBoundingClientRect().top;
+      return [after - before, restored - before];
+    }, message({ messageId: 'base' }));
+    expect(Math.abs(shifts[0]), JSON.stringify(shifts)).toBeLessThan(2);
+    expect(Math.abs(shifts[1]), JSON.stringify(shifts)).toBeLessThan(2);
+  });
+
+  const history = () => Array.from({ length: 5000 }, (_, i) => message({
+    messageId: `history-${i}`, title: `History ${i}`, contextSnippet: i % 2 ? 'Extra context' : null,
+  }));
+
+  test('bounds mounted rows and reaches the last message by scrolling', async ({ page }) => {
+    await open(page, only(...history()));
+    await expect.poll(() => page.locator('.message-row').count()).toBeLessThan(100);
+    await page.locator('#message-list').evaluate(el => { el.scrollTop = el.scrollHeight; });
+    const last = page.locator('[data-message-id="history-4999"]');
+    await expect(last).toBeInViewport();
+    await expect(last).toHaveAccessibleDescription('Message 5000 of 5000');
+    await expect.poll(() => page.locator('.message-row').count()).toBeLessThan(100);
+  });
+
+  test('keyboard navigation reaches unmounted messages', async ({ page }) => {
+    await open(page, only(...history()));
+    await page.locator('[data-message-id="history-0"]').focus();
+    await page.keyboard.press('End');
+    await expect(page.locator('[data-message-id="history-4999"]')).toBeFocused();
+    await expect(page.locator('[data-message-id="history-4999"]')).toBeInViewport();
+    await page.keyboard.press('Home');
+    await expect(page.locator('[data-message-id="history-0"]')).toBeFocused();
+    await page.keyboard.press('ArrowDown');
+    await expect(page.locator('[data-message-id="history-1"]')).toBeFocused();
+  });
+
+  test('arrival preserves the row being read and filter changes discard old rows', async ({ page }) => {
+    const rows = history();
+    await open(page, { messages: {
+      'all|null': list({ messages: rows, filter: 'all' }),
+      'all|all': list({ messages: rows, filter: 'all' }),
+      'all|needs_you': list({ messages: [rows[0]], filter: 'needs_you' }),
+    } });
+    await page.locator('#message-list').evaluate(el => { el.scrollTop = el.scrollHeight / 2; });
+    await expect(page.locator('[data-message-id="history-0"]')).toHaveCount(0);
+    const anchor = await page.evaluate(() => {
+      const list = document.getElementById('message-list')!;
+      const top = list.getBoundingClientRect().top;
+      const row = Array.from(list.querySelectorAll<HTMLElement>('.message-row')).find(r => r.getBoundingClientRect().bottom > top)!;
+      return { id: row.dataset.messageId!, top: row.getBoundingClientRect().top };
+    });
+    await page.evaluate(projection => {
+      (window as any).__INBOX_FIXTURE.messages['all|all'] = projection;
+      (window as any).__simulateChange();
+    }, list({ messages: [message({ messageId: 'arrived' }), ...rows], filter: 'all' }));
+    await expect(page.locator('.filter[data-filter="all"]')).toContainText('5001');
+    await expect.poll(async () => Math.abs(await page.locator(`[data-message-id="${anchor.id}"]`).evaluate(r => r.getBoundingClientRect().top) - anchor.top)).toBeLessThan(2);
+    await page.locator('.filter[data-filter="needs_you"]').click();
+    await expect(page.locator('.message-row')).toHaveCount(1);
+    await expect(page.locator('.message-row')).toHaveAttribute('data-message-id', 'history-0');
+    await expect(page.locator('#message-list')).not.toHaveAttribute('data-virtual', 'true');
+  });
+});
+
 test.describe('Pane 2 — the header fields (spec §7.1)', () => {
   test('a question row shows every field it has a source for', async ({ page }) => {
     await open(page, only(message({

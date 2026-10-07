@@ -251,7 +251,7 @@ test.describe('§4 — large-list resize containment', () => {
     await open(page, WIDE, largeFixture);
 
     const messageRows = page.locator('.message-row');
-    await expect(messageRows).toHaveCount(2_322);
+    await expect.poll(() => messageRows.count()).toBeLessThan(100);
     const cold = await page.evaluate(() => {
       const listElement = document.querySelector('#message-list') as HTMLElement;
       const rowElements = [...document.querySelectorAll('.message-row')] as HTMLElement[];
@@ -263,12 +263,12 @@ test.describe('§4 — large-list resize containment', () => {
         visibleHeights: [...new Set(rowElements.slice(0, 4).map(row => row.getBoundingClientRect().height))],
       };
     });
-    expect(cold.contentVisibility).toBe('auto');
-    expect(cold.containIntrinsicSize).toBe('auto 38px');
+    expect(cold.contentVisibility).toBe('visible');
+    expect(cold.containIntrinsicSize).toBe('none');
     expect(cold.visibleHeights.length).toBeGreaterThan(1);
 
-    const last = messageRows.last();
-    await last.evaluate(row => row.scrollIntoView({ block: 'end' }));
+    await page.locator('#message-list').evaluate(el => { el.scrollTop = el.scrollHeight; });
+    const last = page.locator(`.message-row[data-message-id="${finalRow.messageId}"]`);
     await expect(last).toBeInViewport();
     await last.click();
     await last.focus();
@@ -406,8 +406,8 @@ test.describe('§4 — large-list resize containment', () => {
         paneInside: paneRect.top >= inboxRect.top && paneRect.bottom <= inboxRect.bottom,
       };
     });
-    expect(bottomContainment.contentVisibility).toBe('auto');
-    expect(bottomContainment.containIntrinsicSize).toBe('auto 38px');
+    expect(bottomContainment.contentVisibility).toBe('visible');
+    expect(bottomContainment.containIntrinsicSize).toBe('none');
     expect(Math.abs(bottomContainment.scrollHeight - beforeOrientation.scrollHeight) / beforeOrientation.scrollHeight)
       .toBeLessThanOrEqual(0.01);
     expect(bottomContainment.scrollTop).toBe(beforeOrientation.scrollTop);
