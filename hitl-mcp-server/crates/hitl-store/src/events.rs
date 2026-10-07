@@ -72,7 +72,7 @@ pub fn subject_of(msg_type: &str, payload: &Value) -> Option<String> {
         "plan_review_response" | "plan_review_ack" | "cancel_review" => "reviewId",
         "dismiss_notification" | "restore_notification" => "notificationId",
         "sender_identity" => "forMessageId",
-        "question" | "notification" | "plan_review" => "messageId",
+        "question" | "notification" | "plan_review" | "handoff" => "messageId",
         // A type this build does not know still gets logged; it simply has no
         // subject to attach to, so it folds into nothing.
         _ => return None,

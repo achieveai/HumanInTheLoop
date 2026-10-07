@@ -64,7 +64,7 @@ fn settles(msg_type: &str) -> bool {
 /// The request event a subject is about.
 fn request_event(events: &[Event]) -> Option<&Event> {
     hitl_store::events::latest_work_event(events).or_else(|| events.iter()
-        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review")))
+        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review" | "handoff")))
 }
 
 /// The settlement selected by the already-folded row.

@@ -132,6 +132,23 @@ export interface AnswerMessage extends BaseMessage {
  */
 export type HitlMessage = QuestionMessage | AnswerMessage | NotificationMessage | DismissNotificationMessage;
 
+/**
+ * Published by the HandOff tool: an agent's end-of-work summary, waiting for the
+ * human's next instruction. Settled by an ordinary `answer` whose questionId is
+ * this messageId: `selectedValues: ['end']` stops the agent, `otherText` is the
+ * next instruction. Clients that predate it drop it, so it needs a current Inbox.
+ */
+export interface HandoffMessage extends BaseMessage {
+  type: 'handoff';
+  repo: RepoContext | null;
+  /** Which project and task is handing off. */
+  context: string;
+  /** What was finished, in a few words. The Inbox row title. */
+  title: string;
+  /** The summary, markdown. */
+  summary: string;
+}
+
 /** Published by MCP server for fire-and-forget progress notifications. */
 export interface NotificationMessage extends BaseMessage {
   type: 'notification';
@@ -178,7 +195,7 @@ export interface SenderIdentityMessage {
   type: 'sender_identity';
   /** messageId of the question/notification this decorates. */
   forMessageId: string;
-  forType: 'question' | 'notification';
+  forType: 'question' | 'notification' | 'handoff';
   sender: SenderIdentity;
 }
 

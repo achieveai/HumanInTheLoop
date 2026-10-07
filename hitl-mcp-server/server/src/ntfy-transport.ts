@@ -7,6 +7,7 @@ import type {
   QuestionMessage,
   AnswerMessage,
   HitlMessage,
+  HandoffMessage,
   PlanMessage,
   SenderIdentityMessage,
   AnyHitlMessage,
@@ -422,7 +423,12 @@ export class NtfyTransport {
     return this.publishChunked(msg, randomBytes(16).toString('hex'));
   }
 
-  private async publishChunked(msg: HitlMessage | WorkUpdateMessage, groupId = msg.messageId): Promise<void> {
+  /** A HandOff summary rides the same encrypted, chunked path as a question. */
+  async publishHandoff(msg: HandoffMessage): Promise<void> {
+    return this.publishChunked(msg);
+  }
+
+  private async publishChunked(msg: HitlMessage | WorkUpdateMessage | HandoffMessage, groupId = msg.messageId): Promise<void> {
     let body: string;
     if (this.config.encryptionKey) {
       body = encrypt(JSON.stringify(msg), this.config.encryptionKey);

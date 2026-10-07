@@ -35,6 +35,7 @@
 import { el } from './detail-shell.js';
 import { renderNotification } from './render-notification.js';
 import { renderQuestion } from './render-question.js';
+import { renderHandoff } from './render-handoff.js';
 import { renderReview } from './render-review.js';
 
 function panel(container, className, title, note) {
@@ -116,6 +117,10 @@ export function createDetailPane({ container, invoke, onError = console.error, a
 
         if (detail.row.msgType === 'notification') {
             remember(detail.row, renderNotification(container, detail, actions));
+            return;
+        }
+        if (detail.row.msgType === 'handoff') {
+            remember(detail.row, renderHandoff(container, detail, actions));
             return;
         }
         if (detail.row.msgType !== 'plan_review') {

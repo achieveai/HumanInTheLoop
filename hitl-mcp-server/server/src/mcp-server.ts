@@ -16,6 +16,7 @@ import { realpathSync } from 'fs';
 import path from 'path';
 import type {
   QuestionMessage,
+  HandoffMessage,
   NotificationMessage,
   HitlToolResponse,
   SubQuestion,
@@ -49,6 +50,10 @@ const TOOL_NAME = 'AskUserQuestion';
 const NOTIFY_TOOL_NAME = 'Notify';
 const SETUP_TOOL_NAME = 'setup';
 const REVIEW_TOOL_NAME = 'ReviewPlan';
+export const HANDOFF_TOOL_NAME = 'HandOff';
+const HANDOFF_END_VALUE = 'end';
+/** Keeps end-of-work summaries short enough to read at a glance. */
+const HANDOFF_SUMMARY_MAX = 1200;
 const SERVER_NAME = 'hitl-mcp-server';
 
 /** Interval between progress notifications that keep a blocked MCP call alive. */
@@ -342,6 +347,39 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
             required: ['filePath', 'context'],
           },
         },
+        {
+          name: HANDOFF_TOOL_NAME,
+          description: `Hand your finished work to the human and wait for their next instruction. Call this instead of ending your turn when you have finished everything you were asked to do.
+
+The summary appears in the user's Inbox on all their devices. The user is dyslexic with ADHD and reads it at a glance, so keep it short and use exactly this shape:
+**Outcome:** done | done with risks | blocked | failed
+**Did:** 3-5 bullets
+**Not done / risks:** bullets, only if any
+**Needs you:** bullets, only if any
+Short sentences. No preamble. Do not repeat what the title says.
+
+This call blocks until the user replies. Returns JSON { success, respondedFrom, action, instructions?, note? }:
+- action "continue": do the work in "instructions", then call HandOff again when finished.
+- action "end": the user has no more work. Reply with one short line and stop. Do not call HandOff again.`,
+          inputSchema: {
+            type: 'object',
+            properties: {
+              title: {
+                type: 'string',
+                description: 'What was finished, in under 8 words (e.g. "Inbox repaint fix merged"). Shown as the Inbox row title.',
+              },
+              summary: {
+                type: 'string',
+                description: `The end-of-work summary in the shape above. Markdown. At most ${HANDOFF_SUMMARY_MAX} characters.`,
+              },
+              context: {
+                type: 'string',
+                description: 'Project and task in one line, so the user knows which agent is handing off.',
+              },
+            },
+            required: ['title', 'summary', 'context'],
+          },
+        },
       ],
     }));
 
@@ -416,6 +454,10 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
         return await this.handleReviewPlan(request.params.arguments as Record<string, unknown>, extra);
       }
 
+      if (request.params.name === HANDOFF_TOOL_NAME) {
+        return await this.handleHandOff(request.params.arguments as Record<string, unknown>, extra);
+      }
+
       if (request.params.name !== TOOL_NAME) {
         throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${request.params.name}`);
       }
@@ -481,31 +523,7 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
           questions: batchQuestions,
         };
 
-        console.error(`Publishing question ${questionMsg.messageId} to ntfy...`);
-        await this.transport.publish(questionMsg);
-        console.error('Question published. Waiting for answer...');
-
-        await this.publishSenderIdentityFor(questionMsg.messageId, 'question');
-
-        this.transport.pending.record({
-          kind: 'question',
-          id: questionMsg.messageId,
-          createdAt: Date.now(),
-        });
-
-        let answer;
-        const stopHeartbeat = this.startHeartbeat(extra);
-        try {
-          answer = await this.transport.waitForAnswer(questionMsg.messageId, extra?.signal);
-        } finally {
-          // One finally for both: a host cancellation must release the SSE
-          // connection and the timer together, or every stop/retry cycle leaks
-          // one of each for the life of the process (D-9).
-          stopHeartbeat();
-          this.transport.pending.clear(questionMsg.messageId);
-        }
-
-        console.error(`Answer received from ${answer.respondedFrom}`);
+        const answer = await this.publishQuestionAndWait(questionMsg, extra);
 
         // Strip (RECOMMENDED) markers from values
         const stripRecommended = (v: string) => v.replace(/\s*\(RECOMMENDED\)\s*/gi, '').trim();
@@ -905,6 +923,91 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
         ErrorCode.InternalError,
         `No HITL client available, so nobody would see this. ${result.reason ?? ''}`.trim()
       );
+    }
+  }
+
+  /**
+   * Publish a question or a HandOff summary, then block until a human answers
+   * it or the host cancels. Both are settled by an `answer` naming this id.
+   */
+  private async publishQuestionAndWait(questionMsg: QuestionMessage | HandoffMessage, extra: RequestExtra) {
+    console.error(`Publishing ${questionMsg.type} ${questionMsg.messageId} to ntfy...`);
+    if (questionMsg.type === 'handoff') await this.transport.publishHandoff(questionMsg);
+    else await this.transport.publish(questionMsg);
+    console.error('Published. Waiting for answer...');
+
+    await this.publishSenderIdentityFor(questionMsg.messageId, questionMsg.type);
+
+    this.transport.pending.record({
+      kind: 'question',
+      id: questionMsg.messageId,
+      createdAt: Date.now(),
+    });
+
+    let answer;
+    const stopHeartbeat = this.startHeartbeat(extra);
+    try {
+      answer = await this.transport.waitForAnswer(questionMsg.messageId, extra?.signal);
+    } finally {
+      // One finally for both: a host cancellation must release the SSE
+      // connection and the timer together, or every stop/retry cycle leaks
+      // one of each for the life of the process (D-9).
+      stopHeartbeat();
+      this.transport.pending.clear(questionMsg.messageId);
+    }
+
+    console.error(`Answer received from ${answer.respondedFrom}`);
+    return answer;
+  }
+
+  /**
+   * HandOff: show the agent's end-of-work summary in the Inbox, with an End
+   * checkbox and a text box, and return the human's next instruction.
+   */
+  private async handleHandOff(
+    args: Record<string, unknown>,
+    extra: RequestExtra
+  ): Promise<{ content: Array<{ type: string; text: string }> }> {
+    for (const key of ['title', 'summary', 'context'] as const) {
+      if (typeof args?.[key] !== 'string' || (args[key] as string).trim() === '') {
+        throw new McpError(ErrorCode.InvalidParams, `Missing required parameter: ${key}`);
+      }
+    }
+    const summary = (args.summary as string).trim();
+    if (summary.length > HANDOFF_SUMMARY_MAX) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        `summary is ${summary.length} characters; shorten it to ${HANDOFF_SUMMARY_MAX} or fewer`
+      );
+    }
+
+    try {
+      this.requireClient();
+
+      const handoff: HandoffMessage = {
+        type: 'handoff',
+        messageId: uuidv4(),
+        timestamp: Date.now(),
+        repo: detectRepoContext(),
+        context: args.context as string,
+        title: (args.title as string).trim(),
+        summary,
+      };
+
+      const answer = await this.publishQuestionAndWait(handoff, extra);
+      const note = answer.otherText?.trim() || undefined;
+      const ended = answer.skipped || answer.selectedValues.includes(HANDOFF_END_VALUE) || !note;
+      const result = ended
+        ? { success: true, respondedFrom: answer.respondedFrom, action: 'end', note }
+        : { success: true, respondedFrom: answer.respondedFrom, action: 'continue', instructions: note };
+
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      if (error instanceof McpError) throw error;
+      if (error instanceof AbortedWaitError) {
+        throw new McpError(ErrorCode.InternalError, ABORT_REMEDIATION_MESSAGE);
+      }
+      throw new McpError(ErrorCode.InternalError, `HandOff failed: ${describeError(error)}`);
     }
   }
 

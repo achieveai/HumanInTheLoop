@@ -25,7 +25,7 @@ pub const UNATTRIBUTED_NAME: &str = "Unattributed";
 /// The message types a human is blocked on. A pending notification is not one:
 /// nothing is waiting for it (spec §6.1).
 fn blocks_an_agent(msg_type: &str) -> bool {
-    matches!(msg_type, "question" | "plan_review")
+    matches!(msg_type, "question" | "plan_review" | "handoff")
 }
 
 /// Which renderer pane 3 will use, as one character (spec §7.1).
@@ -34,6 +34,7 @@ fn glyph_for(msg_type: &str) -> &'static str {
         "question" => "?",
         "notification" | "work_update" => "!",
         "plan_review" => "▤",
+        "handoff" => "✓",
         _ => "·",
     }
 }
@@ -45,7 +46,7 @@ fn glyph_for(msg_type: &str) -> &'static str {
 /// is nothing truthful to put in one.
 fn request_event(events: &[Event]) -> Option<&Event> {
     hitl_store::events::latest_work_event(events).or_else(|| events.iter()
-        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review")))
+        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review" | "handoff")))
 }
 
 /// The one line that identifies a message (spec §7.1).
@@ -66,7 +67,7 @@ fn title_of(request: &Event) -> String {
                 _ => request.field("question"),
             }
         }
-        "notification" | "work_update" => request.field("title"),
+        "notification" | "work_update" | "handoff" => request.field("title"),
         _ => request.field("displayPath"),
     };
     title.unwrap_or_else(|| "(untitled)".to_string())
@@ -1016,6 +1017,28 @@ mod tests {
         assert_eq!(row.title, "Proceed with q-1?");
         assert_eq!(row.glyph, "?");
         assert_eq!(row.msg_type, "question");
+    }
+
+    #[test]
+    fn a_handoff_needs_you_until_an_answer_settles_it() {
+        let handoff = ev(
+            "ntfy-h-1",
+            NOW - MINUTE,
+            r#"{"type":"handoff","messageId":"h-1","title":"Inbox fix merged",
+                "summary":"**Outcome:** done","context":"Hitl_MCP"}"#,
+        );
+
+        let list = build_list(std::slice::from_ref(&handoff), None, Some("all"), NOW);
+        let row = &list.messages[0];
+        assert_eq!(row.title, "Inbox fix merged");
+        assert_eq!(row.glyph, "✓");
+        assert_eq!(row.msg_type, "handoff");
+        assert_eq!(row.status, "pending");
+        assert_eq!(list.counts.needs_you, 1);
+
+        let settled = build_list(&[handoff, answer("h-1", NOW, "phone")], None, Some("all"), NOW);
+        assert_eq!(settled.messages[0].status, "answered");
+        assert_eq!(settled.counts.needs_you, 0);
     }
 
     #[test]

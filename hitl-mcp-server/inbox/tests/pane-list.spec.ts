@@ -40,7 +40,7 @@ async function open(page: Page, fixture: Fixture) {
   }, { sessions: AGENTS, ...fixture });
   await page.goto('/inbox-harness.html');
   await expect(page.locator('.filter-bar .filter')).toHaveCount(3);
-  await expect(page.locator('.type-filter')).toHaveCount(4);
+  await expect(page.locator('.type-filter')).toHaveCount(5);
 }
 
 /** One list, answering every scope/filter combination. */
@@ -646,8 +646,9 @@ test.describe('Pane 2 — the filters (spec §7.3)', () => {
       /Notifications\s*1/,
       /Questions\s*1/,
       /Review plans\s*0/,
+      /Handoffs\s*0/,
     ]);
-    await expect(page.locator('.type-filter[aria-pressed="true"]')).toHaveCount(4);
+    await expect(page.locator('.type-filter[aria-pressed="true"]')).toHaveCount(5);
   });
 
   test('a keyboard type toggle keeps focus on the same control after projection', async ({ page }) => {
@@ -808,6 +809,7 @@ test.describe('Pane 2 — the filters (spec §7.3)', () => {
     await page.locator('.type-filter[data-type="notification"]').click();
     await page.locator('.type-filter[data-type="plan_review"]').click();
     await page.locator('.type-filter[data-type="work"]').click();
+    await page.locator('.type-filter[data-type="handoff"]').click();
 
     await expect(page.locator('.message-title')).toHaveText(['question']);
     expect(await page.evaluate(() => (window as any).__INVOCATIONS.length)).toBe(before);

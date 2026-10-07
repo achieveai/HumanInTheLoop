@@ -20,14 +20,14 @@ use crate::{Result, Store};
 /// projected, because there is nothing truthful to show in a row for it.
 fn request_event(events: &[Event]) -> Option<&Event> {
     crate::events::latest_work_event(events).or_else(|| events.iter()
-        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review")))
+        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review" | "handoff")))
 }
 
 /// The one line that identifies a message in the list (spec §7.1).
 fn title_of(request: &Event) -> String {
     let key = match request.msg_type.as_str() {
         "question" => "question",
-        "notification" | "work_update" => "title",
+        "notification" | "work_update" | "handoff" => "title",
         _ => "displayPath",
     };
     request.field(key).unwrap_or_default()

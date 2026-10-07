@@ -162,7 +162,7 @@ export function message(over: Partial<MessageRow> & { messageId: string }): Mess
   const createdAt = over.createdAt ?? NOW - 2 * MINUTE;
   return {
     msgType,
-    glyph: { question: '?', notification: '!', plan_review: '▤' }[msgType] ?? '·',
+    glyph: { question: '?', notification: '!', plan_review: '▤', handoff: '✓' }[msgType] ?? '·',
     title: 'Proceed?',
     status: 'pending',
     verdict: null,

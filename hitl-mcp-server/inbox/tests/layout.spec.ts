@@ -410,7 +410,13 @@ test.describe('§4 — large-list resize containment', () => {
     expect(bottomContainment.containIntrinsicSize).toBe('none');
     expect(Math.abs(bottomContainment.scrollHeight - beforeOrientation.scrollHeight) / beforeOrientation.scrollHeight)
       .toBeLessThanOrEqual(0.01);
-    expect(bottomContainment.scrollTop).toBe(beforeOrientation.scrollTop);
+    // The reader was at the end, so the shorter Bottom list stays at the end
+    // and the selected last row stays in view rather than below the fold.
+    await expect.poll(() => page.evaluate(() => {
+      const list = document.querySelector('#message-list') as HTMLElement;
+      const selected = document.querySelector('.message-row.is-selected') as HTMLElement;
+      return Math.abs(list.getBoundingClientRect().bottom - selected.getBoundingClientRect().bottom);
+    })).toBeLessThanOrEqual(2);
     expect(bottomContainment.documentFits).toBe(true);
     expect(bottomContainment.inboxFits).toBe(true);
     expect(bottomContainment.paneInside).toBe(true);

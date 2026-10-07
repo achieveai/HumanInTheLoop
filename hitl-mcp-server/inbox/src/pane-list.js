@@ -30,6 +30,7 @@ export const TYPES = [
     { key: 'notification', label: 'Notifications' },
     { key: 'question', label: 'Questions' },
     { key: 'plan_review', label: 'Review plans' },
+    { key: 'handoff', label: 'Handoffs' },
 ];
 
 /** Work shares notification transport but has its own display family. */
@@ -366,7 +367,7 @@ function paintVirtual(state, anchor = virtualAnchor(state), stickToEnd = atVirtu
             if (height <= 0) continue;
             const message = state.messages[state.indices.get(row.dataset.messageId)];
             const kind = heightKind(message);
-            if (!state.estimates.has(kind)) { state.estimates.set(kind, height); changed = true; }
+            if (!state.estimates.has(kind) || state.staleKinds?.delete(kind)) { state.estimates.set(kind, height); changed = true; }
             if (state.heights.get(message.messageId) !== height) {
                 state.heights.set(message.messageId, height);
                 changed = true;
@@ -409,13 +410,22 @@ function renderVirtualList(container, list, options) {
             state.frame = requestAnimationFrame(() => {
                 state.frame = 0;
                 if (virtualLists.get(container) !== state || !container.isConnected) return;
-                const anchor = virtualAnchor(state), end = atVirtualEnd(state);
+                // A resize has already changed the geometry by now, so "at the
+                // end" comes from the last scroll or paint, not from this frame.
+                const anchor = virtualAnchor(state), end = state.atEnd ?? atVirtualEnd(state);
                 if (container.clientWidth && state.width !== container.clientWidth) {
                     state.width = container.clientWidth;
-                    state.heights.clear(); state.estimates.clear(); measureOffsets(state);
+                    // Old estimates stay until each kind is measured again: the
+                    // rows on screen are too few to stand in for the rest.
+                    state.heights.clear(); state.staleKinds = new Set(state.estimates.keys()); measureOffsets(state);
                 }
                 paintVirtual(state, anchor, end);
+                state.atEnd = atVirtualEnd(state);
             });
+        };
+        state.scroll = () => {
+            state.atEnd = atVirtualEnd(state);
+            state.schedule();
         };
         state.keydown = event => {
             if (event.altKey || event.ctrlKey || event.metaKey) return;
@@ -432,7 +442,7 @@ function renderVirtualList(container, list, options) {
         };
         virtualLists.set(container, state);
         container.dataset.virtual = 'true';
-        container.addEventListener('scroll', state.schedule, { passive: true });
+        container.addEventListener('scroll', state.scroll, { passive: true });
         container.addEventListener('keydown', state.keydown);
         state.resize = new ResizeObserver(state.schedule);
         state.resize.observe(container);
@@ -448,6 +458,7 @@ function renderVirtualList(container, list, options) {
     for (const id of state.heights.keys()) if (!state.indices.has(id)) state.heights.delete(id);
     measureOffsets(state);
     paintVirtual(state, anchor, end);
+    state.atEnd = atVirtualEnd(state);
     if (selectionChanged && state.indices.has(options.selectedId)) {
         const index = state.indices.get(options.selectedId);
         // Selection may change from a dismissal or keyboard action. Reveal it
@@ -470,7 +481,7 @@ export function renderMessageList(container, list, options = {}) {
     if (virtual) {
         cancelAnimationFrame(virtual.frame);
         virtual.resize.disconnect();
-        container.removeEventListener('scroll', virtual.schedule);
+        container.removeEventListener('scroll', virtual.scroll);
         container.removeEventListener('keydown', virtual.keydown);
         virtualLists.delete(container);
         delete container.dataset.virtual;

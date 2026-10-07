@@ -5,6 +5,8 @@ import { execFileSync } from 'child_process';
 import { loadConfig, saveConfig, generateDefaultConfig, getConfigPath } from './config.js';
 import { findClientBinary, launchClient } from './setup.js';
 import { applyAutoBackgroundSetting } from './host-settings.js';
+import { runStopHook } from './handoff-hook.js';
+import { readFileSync } from 'fs';
 import { dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -18,6 +20,7 @@ Usage:
   hitl test                Send a test question through ntfy
   hitl client              Launch the HITL desktop client app
   hitl claude-code install Register HITL as a Claude Code MCP server (user scope)
+  hitl hook stop           Claude Code Stop hook: hand finished work to the Inbox
   hitl help                Show this help message
 `;
 
@@ -36,6 +39,8 @@ async function main() {
       return cmdClient();
     case 'claude-code':
       return cmdClaudeCode(args.slice(1));
+    case 'hook':
+      return cmdHook(args.slice(1));
     case 'help':
     case '--help':
     case '-h':
@@ -47,6 +52,16 @@ async function main() {
       console.log(HELP);
       process.exit(1);
   }
+}
+
+/** `hitl hook stop`: the Claude Code Stop hook. Reads hook JSON on stdin. */
+function cmdHook(args: string[]) {
+  if (args[0] !== 'stop') {
+    console.error(`Unknown hook: ${args[0] ?? '(none)'}. Supported: stop`);
+    process.exit(1);
+  }
+  const output = runStopHook(readFileSync(0, 'utf8'));
+  if (output) process.stdout.write(output);
 }
 
 function cmdInit() {
