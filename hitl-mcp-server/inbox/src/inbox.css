@@ -346,6 +346,22 @@ body {
     background: #f7fafc;
 }
 
+.message-list[data-virtual] {
+    position: relative;
+}
+
+.message-list-spacer {
+    pointer-events: none;
+}
+
+.message-row--virtual {
+    position: absolute;
+    left: 0;
+    right: 0;
+    content-visibility: visible;
+    contain-intrinsic-size: none;
+}
+
 .message-row.is-selected {
     background: #ebf4ff;
     box-shadow: inset 3px 0 0 #667eea;

@@ -642,7 +642,7 @@ test.describe('Pane 3 — staying in step with the log (spec §4.2)', () => {
 });
 
 test.describe('Pane 3 — optimistic actions', () => {
-  test('bulk mark read predicts every target in one click-turn commit and one native invocation', async ({ page }) => {
+  test('bulk mark read predicts every target before the click returns and makes one native invocation', async ({ page }) => {
     const inFlight = message({ messageId: 'n-in-flight', msgType: 'notification', title: 'single in flight' });
     const first = message({ messageId: 'n-bulk-a', msgType: 'notification', title: 'bulk first' });
     const survivor = message({ messageId: 'q-bulk-survivor', title: 'bulk survivor' });
@@ -683,16 +683,10 @@ test.describe('Pane 3 — optimistic actions', () => {
     await controlReply(page, 'dismiss_notifications');
     const immediate = await page.evaluate(() => {
       const browserWindow = window as any;
-      const listElement = document.getElementById('message-list')!;
-      const replaceChildren = listElement.replaceChildren.bind(listElement);
-      browserWindow.__LIST_COMMITS = 0;
-      listElement.replaceChildren = (...nodes: (Node | string)[]) => {
-        browserWindow.__LIST_COMMITS += 1;
-        replaceChildren(...nodes);
-      };
+      // Observe the settled UI in the same task: both full replacement and
+      // incremental row updates must finish before the click returns.
       (document.querySelector('.mark-all-read') as HTMLButtonElement).click();
       return {
-        commits: browserWindow.__LIST_COMMITS,
         rows: [...document.querySelectorAll('.message-row')].map((row: any) => row.dataset.messageId),
         selected: (document.querySelector('.message-row.is-selected') as HTMLElement)?.dataset.messageId,
         detail: (document.querySelector('.detail-loading, .detail-root') as HTMLElement)?.dataset.messageId,
@@ -701,7 +695,6 @@ test.describe('Pane 3 — optimistic actions', () => {
     });
 
     expect(immediate).toEqual({
-      commits: 1,
       rows: ['q-bulk-survivor'],
       selected: 'q-bulk-survivor',
       detail: 'q-bulk-survivor',
