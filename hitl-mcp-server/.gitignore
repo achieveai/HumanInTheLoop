@@ -7,6 +7,7 @@ dist/
 *.js.map
 *.d.ts
 !jest.config.js
+!server/scripts/*.js
 
 # The Tauri frontends are hand-written ES modules with no build step, so they
 # are source, not output. Without these negations the tree-wide *.js above
