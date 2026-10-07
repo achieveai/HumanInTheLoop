@@ -60,7 +60,7 @@ jest.unstable_mockModule('../host-settings.js', () => ({
 }));
 
 // Dynamically import the module under test AFTER mocks are registered
-const { performSetup, isProcessRunning, findClientBinary, launchClient } = await import('../setup.js');
+const { performSetup, isProcessRunning, findClientBinary, launchClient, ensureClientRunning } = await import('../setup.js');
 
 describe('setup', () => {
   beforeEach(() => {
@@ -198,6 +198,33 @@ describe('setup', () => {
 
       expect(emitError).toBeDefined();
       expect(() => emitError?.(new Error('spawn ENOENT'))).not.toThrow();
+    });
+  });
+
+  // ---- ensureClientRunning ----
+  describe('ensureClientRunning', () => {
+    it('accepts a running Inbox when no legacy client is installed (win32)', () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      mockExecSync.mockImplementation((command: unknown) =>
+        String(command).includes('hitl-inbox.exe')
+          ? 'hitl-inbox.exe  35564 RDP-Tcp#0  2  131,816 K'
+          : 'INFO: No tasks are running which match the specified criteria.');
+      mockExistsSync.mockReturnValue(false);
+
+      expect(ensureClientRunning('/mock/server/dist')).toEqual({ ok: true });
+      expect(mockSpawn).not.toHaveBeenCalled();
+
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    });
+
+    it('still fails when neither client nor Inbox is running and no binary exists', () => {
+      mockExecSync.mockImplementation(() => { throw new Error('not running'); });
+      mockExistsSync.mockReturnValue(false);
+
+      const result = ensureClientRunning('/mock/server/dist');
+      expect(result.ok).toBe(false);
+      expect(result.reason).toContain('HITL client binary not found');
     });
   });
 

@@ -144,9 +144,11 @@ export interface ClientRunningResult {
  * failed" must reach the agent as an error before anything is published.
  */
 export function ensureClientRunning(serverDir: string): ClientRunningResult {
-  const binaryName = process.platform === 'win32' ? 'hitl-client.exe' : 'hitl-client';
+  const exe = process.platform === 'win32' ? '.exe' : '';
+  const binaryName = `hitl-client${exe}`;
 
-  if (isProcessRunning(binaryName)) {
+  // A running Inbox also subscribes to the topic, so it can show the message.
+  if (isProcessRunning(binaryName) || isProcessRunning(`hitl-inbox${exe}`)) {
     return { ok: true };
   }
 
