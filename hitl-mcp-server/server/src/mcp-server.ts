@@ -36,7 +36,7 @@ import { PROTOCOL_VERSION } from './types.js';
 import { NtfyTransport, AttachmentExpiredError, AbortedWaitError } from './ntfy-transport.js';
 import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
-import { noteToolCallMeta, resolveSenderIdentity } from './identity.js';
+import { resolveSenderIdentity, sessionResolverFor } from './identity.js';
 import { performSetup, ensureClientRunning } from './setup.js';
 import { SERVER_VERSION } from './version.js';
 import { readPlanFile, PlanFileError } from './plan-file.js';
@@ -384,7 +384,6 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-      noteToolCallMeta(request.params._meta);
       if (request.params.name === 'UpdateWork' || request.params.name === 'ReadWork') {
         try {
           const args = request.params.arguments ?? {};
@@ -438,7 +437,7 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
           };
 
           await this.transport.publish(notification);
-          await this.publishSenderIdentityFor(notification.messageId, 'notification');
+          await this.publishSenderIdentityFor(notification.messageId, 'notification', extra);
 
           return {
             content: [{ type: 'text', text: JSON.stringify({ success: true, messageId: notification.messageId }) }],
@@ -657,7 +656,7 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
     // already bound to `resolvePlanIdentity(...)` a few lines up.
     const senderIdentity =
       this.config.identityEnabled !== false
-        ? resolveSenderIdentity(path.dirname(plan.resolvedPath), this.config.deviceName)
+        ? resolveSenderIdentity(path.dirname(plan.resolvedPath), this.config.deviceName, sessionResolverFor(extra?._meta))
         : undefined;
 
     const reviewMsg: PlanReviewMessage = {
@@ -867,12 +866,13 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
    */
   private async publishSenderIdentityFor(
     forMessageId: string,
-    forType: SenderIdentityMessage['forType']
+    forType: SenderIdentityMessage['forType'],
+    extra: RequestExtra
   ): Promise<void> {
     if (this.config.identityEnabled === false) return;
 
     try {
-      const senderIdentity = resolveSenderIdentity(process.cwd(), this.config.deviceName);
+      const senderIdentity = resolveSenderIdentity(process.cwd(), this.config.deviceName, sessionResolverFor(extra?._meta));
       await this.transport.publishSenderIdentity({
         type: 'sender_identity',
         forMessageId,
@@ -937,7 +937,7 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
     else await this.transport.publish(questionMsg);
     console.error('Published. Waiting for answer...');
 
-    await this.publishSenderIdentityFor(questionMsg.messageId, questionMsg.type);
+    await this.publishSenderIdentityFor(questionMsg.messageId, questionMsg.type, extra);
 
     this.transport.pending.record({
       kind: 'question',

@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { detectRepoContext, isLinkedWorktree } from './git-context.js';
 import type { RepoContext, SenderIdentity } from './types.js';
 
@@ -8,55 +8,56 @@ export type SessionNameResolver = () => string | null;
 /** Last resort: hosts that name no session get one id per server process. */
 const PROCESS_SESSION_UUID = randomUUID();
 
-/** The first Codex thread id seen on a tool call; see `noteToolCallMeta`. */
-let toolCallThreadId: string | undefined;
-
 /**
- * Codex passes no session id in the environment. It names its thread on every
- * tool call instead, as `_meta.threadId`. Remember the first one, before any
- * identity is resolved for that call.
+ * The conversation a tool call came from, when the host names it per call in
+ * `_meta`: Codex sends `threadId`, VS Code (Copilot Chat) sends
+ * `vscode.conversationId`. Per call, not per process, because one VS Code MCP
+ * server serves every chat in the window.
  */
-export function noteToolCallMeta(meta: unknown): void {
-  const id = (meta as { threadId?: unknown } | null | undefined)?.threadId;
-  if (toolCallThreadId === undefined && typeof id === 'string' && id.trim() !== '') {
-    toolCallThreadId = id.trim();
+export function sessionIdFromMeta(meta: unknown): string | undefined {
+  const fields = meta as Record<string, unknown> | null | undefined;
+  for (const key of ['threadId', 'vscode.conversationId']) {
+    const id = fields?.[key];
+    if (typeof id === 'string' && id.trim() !== '') return id.trim();
   }
+  return undefined;
 }
 
 /**
  * Builds a `SessionNameResolver`, in precedence order (spec §5.2, §5.3):
- * - `CLAUDE_CODE_SESSION_ID`: the conversation id Claude Code passes to every
- *   stdio MCP server. It survives restarts, reconnects and `--resume`, so one
- *   conversation stays one Inbox session.
- * - The Codex thread id from the first tool call's `_meta.threadId`, which
- *   likewise survives `codex resume`.
+ * - A conversation id the host puts in the environment: `CLAUDE_CODE_SESSION_ID`
+ *   (Claude Code) or `COPILOT_AGENT_SESSION_ID` (GitHub Copilot CLI). Both
+ *   survive restarts, reconnects and resume, so one conversation stays one
+ *   Inbox session.
+ * - The id from this tool call's `_meta`; see `sessionIdFromMeta`.
  * - `CLAUDE_CODE_BRIDGE_SESSION_ID`: set only while Remote Control is active.
  * - A minted id: other hosts, one per server process.
  *
- * The bridge id can appear or disappear mid-process, so the result is
- * resolved once, at first call, and cached — a label that changes mid-session
+ * The bridge id can appear or disappear mid-process, so that fallback is
+ * resolved once, at first use, and cached — a label that changes mid-session
  * would be worse than one that is merely opportunistic.
  */
 export function makeSessionNameResolver(opts: {
   env: NodeJS.ProcessEnv;
   mintedUuid: string;
-  threadId?: () => string | undefined;
-}): SessionNameResolver {
-  let resolved: string | null = null;
-  return () => {
-    if (resolved === null) {
-      resolved = opts.env.CLAUDE_CODE_SESSION_ID || opts.threadId?.() ||
-        opts.env.CLAUDE_CODE_BRIDGE_SESSION_ID || opts.mintedUuid;
-    }
-    return resolved;
+}): (meta?: unknown) => string {
+  let fallback: string | null = null;
+  return meta => {
+    const named = opts.env.CLAUDE_CODE_SESSION_ID || opts.env.COPILOT_AGENT_SESSION_ID || sessionIdFromMeta(meta);
+    if (named) return named;
+    fallback ??= opts.env.CLAUDE_CODE_BRIDGE_SESSION_ID || opts.mintedUuid;
+    return fallback;
   };
 }
 
-export const defaultSessionNameResolver: SessionNameResolver = makeSessionNameResolver({
-  env: process.env,
-  mintedUuid: PROCESS_SESSION_UUID,
-  threadId: () => toolCallThreadId,
-});
+const sessionNameFor = makeSessionNameResolver({ env: process.env, mintedUuid: PROCESS_SESSION_UUID });
+
+/** The session resolver for one tool call, given that call's `_meta`. */
+export function sessionResolverFor(meta?: unknown): SessionNameResolver {
+  return () => sessionNameFor(meta);
+}
+
+export const defaultSessionNameResolver: SessionNameResolver = sessionResolverFor();
 
 /**
  * Stable key for "which project" a session belongs to (spec §5.4).
@@ -100,6 +101,8 @@ function shortSessionId(sessionId: string): string {
   // A UUIDv7 (Codex thread ids) starts with a timestamp, so its head is the
   // same for every thread made in the same weeks. Its tail is random.
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-7/i.test(sessionId)) return sessionId.slice(-4);
+  // A URI (a VS Code remote chat) shares its scheme prefix with every other.
+  if (!/^[\w-]+$/.test(sessionId)) return createHash('sha256').update(sessionId).digest('hex').slice(0, 4);
   return sessionId.replace(/^session_/, '').slice(0, 4);
 }
 

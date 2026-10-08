@@ -172,20 +172,39 @@ describe('session identity', () => {
     expect(resolver()).toBe('b780c474-1169-419a-b8dd-b8ffbc5dca2c');
   });
 
-  it('uses the Codex thread id from tool-call meta when Claude names no session', () => {
-    const codex = makeSessionNameResolver({
+  it('uses the GitHub Copilot CLI session id from the environment', () => {
+    const resolver = makeSessionNameResolver({
+      env: { COPILOT_AGENT_SESSION_ID: 'c169723c-2412-4533-87f1-c8d7762338a8' },
+      mintedUuid: 'uuid-fallback',
+    });
+    expect(resolver({ threadId: 'ignored-when-env-names-the-session' })).toBe('c169723c-2412-4533-87f1-c8d7762338a8');
+  });
+
+  it('reads the conversation from each tool call when the environment names none', () => {
+    const resolver = makeSessionNameResolver({
       env: { CLAUDE_CODE_BRIDGE_SESSION_ID: 'session_abc123' },
       mintedUuid: 'uuid-fallback',
-      threadId: () => '01a11cf2-4e82-7f40-ad61-3737090ed46a',
     });
-    expect(codex()).toBe('01a11cf2-4e82-7f40-ad61-3737090ed46a');
+    // Codex, then two VS Code chats served by the same server process.
+    expect(resolver({ threadId: '01a11cf2-4e82-7f40-ad61-3737090ed46a' })).toBe('01a11cf2-4e82-7f40-ad61-3737090ed46a');
+    expect(resolver({ 'vscode.conversationId': 'chat-a' })).toBe('chat-a');
+    expect(resolver({ 'vscode.conversationId': 'chat-b' })).toBe('chat-b');
+    expect(resolver({ progressToken: 1 })).toBe('session_abc123');
+  });
 
-    const claude = makeSessionNameResolver({
+  it('lets the Claude Code conversation id outrank tool-call meta', () => {
+    const resolver = makeSessionNameResolver({
       env: { CLAUDE_CODE_SESSION_ID: 'b780c474-1169-419a-b8dd-b8ffbc5dca2c' },
       mintedUuid: 'uuid-fallback',
-      threadId: () => '01a11cf2-4e82-7f40-ad61-3737090ed46a',
     });
-    expect(claude()).toBe('b780c474-1169-419a-b8dd-b8ffbc5dca2c');
+    expect(resolver({ threadId: '01a11cf2-4e82-7f40-ad61-3737090ed46a' })).toBe('b780c474-1169-419a-b8dd-b8ffbc5dca2c');
+  });
+
+  it('suffixes a URI-shaped chat id with a hash, not its shared scheme prefix', () => {
+    const a = resolveSenderIdentity('/repo/path', 'Kay9', () => 'vscode-chat-session://remote/one');
+    const b = resolveSenderIdentity('/repo/path', 'Kay9', () => 'vscode-chat-session://remote/two');
+    expect(a.label).toMatch(/ · [0-9a-f]{4}$/);
+    expect(a.label).not.toBe(b.label);
   });
 
   it('suffixes a time-ordered (v7) thread id with its random tail, not its timestamp head', () => {
