@@ -567,8 +567,10 @@ export class NtfyTransport {
     const startedAt = Date.now();
     let delayMs = this.retry.initialDelayMs;
     let lastMessage = '';
+    let attempts = 0;
 
     for (let attempt = 1; attempt <= this.retry.maxAttempts; attempt++) {
+      attempts = attempt;
       let response: Response;
       try {
         response = await fetch(url, init);
@@ -621,7 +623,7 @@ export class NtfyTransport {
     }
 
     throw new NtfyPublishError(
-      `Failed to ${describe} after ${this.retry.maxAttempts} attempts: ${lastMessage}`,
+      `Failed to ${describe} after ${attempts} attempt${attempts === 1 ? '' : 's'}: ${lastMessage}`,
       429
     );
   }

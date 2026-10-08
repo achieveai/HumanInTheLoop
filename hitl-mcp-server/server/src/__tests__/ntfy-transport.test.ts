@@ -28,9 +28,13 @@ const CONFIG: HitlConfig = {
   soundEnabled: false,
 };
 
-/** Fast policy so a retry test costs milliseconds, not a minute. */
+/**
+ * Fast policy so a retry test costs milliseconds, not a minute. The budget is
+ * wall-clock, so it stays far out of reach: under a loaded full-suite run a
+ * tight one expires before the attempt cap and the retry tests flake.
+ */
 const FAST = {
-  retry: { maxAttempts: 3, totalBudgetMs: 200, initialDelayMs: 1, maxDelayMs: 2 },
+  retry: { maxAttempts: 3, totalBudgetMs: 60_000, initialDelayMs: 1, maxDelayMs: 2 },
   subscription: { initialBackoffMs: 1, maxBackoffMs: 4, healthyConnectionMs: 5_000 },
 };
 
@@ -410,6 +414,21 @@ describe('NtfyTransport', () => {
     ).rejects.toBeInstanceOf(NtfyPublishError);
 
     expect(attempts).toBe(FAST.retry.maxAttempts);
+  });
+
+  it('stops retrying once the time budget is spent, and says how many attempts it made', async () => {
+    let attempts = 0;
+    globalThis.fetch = jest.fn(async () => {
+      attempts++;
+      return errorResponse(429, JSON.stringify({ code: 42901 }));
+    }) as unknown as typeof fetch;
+
+    transport = new NtfyTransport(CONFIG, { ...FAST, retry: { ...FAST.retry, totalBudgetMs: 0 } });
+    await expect(
+      transport.publish({ type: 'notification', messageId: 'n4', timestamp: 1, title: 't', body: 'b' })
+    ).rejects.toThrow(/after 1 attempt:/);
+
+    expect(attempts).toBe(1);
   });
 
   it('uploads an attachment as one PUT carrying the outer message in X-Message', async () => {
