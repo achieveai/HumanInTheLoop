@@ -157,6 +157,25 @@ body {
     font-size: 12px;
 }
 
+.agent-search {
+    display: block;
+    box-sizing: border-box;
+    width: calc(100% - 16px);
+    margin: 0 8px 4px;
+    padding: 5px 8px;
+    border: 1px solid #cbd5e0;
+    border-radius: 6px;
+    background: white;
+    font: inherit;
+    font-size: 12px;
+}
+
+.agents-older {
+    padding: 12px;
+    color: #718096;
+    font-size: 12px;
+}
+
 /* --- Pane 2: filters --- */
 
 .filter-bar {

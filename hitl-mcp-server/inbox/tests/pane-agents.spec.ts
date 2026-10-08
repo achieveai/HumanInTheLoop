@@ -357,3 +357,75 @@ test.describe('Pane 1 — live updates', () => {
     expect(errors).toEqual([]);
   });
 });
+
+test.describe('Pane 1 — older agents and search', () => {
+  const OLD = project({
+    projectKey: 'legacy-api',
+    state: 'stale',
+    recent: false,
+    lastEventAt: NOW - 9 * DAY,
+    sessions: [
+      session({ sessionKey: 'legacy-api · main · 1111', label: 'main · 1111', projectKey: 'legacy-api', state: 'stale', recent: false, lastEventAt: NOW - 9 * DAY }),
+    ],
+  });
+  const MIXED = project({
+    projectKey: 'Hitl_MCP',
+    sessions: [
+      session({ sessionKey: 'Hitl_MCP · master · a3f2', label: 'master · a3f2' }),
+      session({ sessionKey: 'Hitl_MCP · spike/old · 2222', label: 'spike/old · 2222', state: 'stale', recent: false, lastEventAt: NOW - 8 * DAY }),
+    ],
+  });
+  const fixture = { sessions: tree({ projects: [MIXED, OLD] }) };
+
+  test('quiet-for-a-week rows are hidden by default and the count says so', async ({ page }) => {
+    await open(page, fixture);
+
+    await expect(page.locator('.agent-row--project .agent-name')).toHaveText(['Hitl_MCP']);
+    await expect(page.locator('.agent-row--session .agent-name')).toHaveText(['master · a3f2']);
+    await expect(page.locator('.agents-older')).toHaveText('2 agents quiet for over a week. Search to find them.');
+  });
+
+  test('search finds old agents by folder or by session label', async ({ page }) => {
+    await open(page, fixture);
+    const search = page.locator('.agent-search');
+
+    await search.fill('LEGACY');
+    await expect(page.locator('.agent-row--project .agent-name')).toHaveText(['legacy-api']);
+    await expect(page.locator('.agent-row--session .agent-name')).toHaveText(['main · 1111']);
+    await expect(page.locator('.agents-older')).toHaveCount(0);
+
+    await search.fill('spike');
+    await expect(page.locator('.agent-row--project .agent-name')).toHaveText(['Hitl_MCP']);
+    await expect(page.locator('.agent-row--session .agent-name')).toHaveText(['spike/old · 2222']);
+
+    await search.fill('nothing-like-this');
+    await expect(page.locator('.agents-empty')).toHaveText('No agents or folders match.');
+
+    await search.press('Escape');
+    await expect(search).toHaveValue('');
+    await expect(page.locator('.agent-row--session .agent-name')).toHaveText(['master · a3f2']);
+  });
+
+  test('an old session picked from search stays visible after the search is cleared', async ({ page }) => {
+    await open(page, fixture);
+    await page.locator('.agent-search').fill('legacy');
+    await page.locator('.agent-row--session', { hasText: 'main · 1111' }).click();
+
+    const invocations = await page.evaluate(() => (window as any).__INVOCATIONS);
+    expect(invocations.filter((i: any) => i.cmd === 'list_messages').pop().args.sessionKey)
+      .toBe('session:legacy-api · main · 1111');
+
+    await page.locator('.agent-search').fill('');
+    await expect(page.locator('.agent-row.is-selected .agent-name')).toHaveText('main · 1111');
+  });
+
+  test('a live update keeps the typed query and its results', async ({ page }) => {
+    await open(page, fixture);
+    await page.locator('.agent-search').fill('legacy');
+
+    await landNewEvents(page, fixture);
+
+    await expect(page.locator('.agent-search')).toHaveValue('legacy');
+    await expect(page.locator('.agent-row--project .agent-name')).toHaveText(['legacy-api']);
+  });
+});

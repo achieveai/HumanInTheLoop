@@ -7,7 +7,8 @@
 // The tree decides nothing. Session state, ordering, counts and the
 // `Unattributed` grouping are all computed in the projection layer and arrive
 // here already settled — so what this file can get wrong is limited to how it
-// draws them, which is what the harness tests check.
+// draws them, which is what the harness tests check. `recent` is settled there
+// too; this file only hides rows that are not, until a search asks for them.
 
 import { formatAge, formatAbsolute } from './pane-list.js';
 
@@ -63,16 +64,42 @@ function agentRow({ kind, scopeKey, glyph, name, state, pending, lastEventAt, no
 }
 
 /**
- * Render the tree.
- *
- * `tree` is exactly what `list_sessions()` returns.
+ * The rows to draw. Without a query: recent rows only (the projection's
+ * `recent`), plus the selected row so a selection never vanishes. With one:
+ * every project whose name matches, with all its sessions, and every session
+ * whose label matches, however old.
  */
-export function renderAgentTree(container, tree, options = {}) {
-    const opts = { selectedScope: 'all', ...options };
-    const now = tree.now;
-    container.textContent = '';
+function visibleTree(tree, query, selectedScope) {
+    const q = query.trim().toLowerCase();
+    const matches = text => String(text ?? '').toLowerCase().includes(q);
+    const projects = [];
+    let hidden = 0;
 
-    container.appendChild(agentRow({
+    for (const project of tree.projects) {
+        const projectHit = q !== '' && matches(project.name);
+        const sessions = project.sessions.filter(session => {
+            if (q) return projectHit || matches(session.label);
+            const shown = session.recent !== false || session.scopeKey === selectedScope;
+            if (!shown) hidden++;
+            return shown;
+        });
+        const shown = q
+            ? projectHit || sessions.length > 0
+            : project.recent !== false || sessions.length > 0 || project.scopeKey === selectedScope;
+        if (shown) projects.push({ ...project, sessions });
+    }
+    return { projects, hidden };
+}
+
+/** The last tree and options per container, so typing a query can redraw. */
+const drawn = new WeakMap();
+
+function drawTree(container, body, query) {
+    const { tree, opts } = drawn.get(container);
+    const now = tree.now;
+    body.textContent = '';
+
+    body.appendChild(agentRow({
         kind: 'root',
         scopeKey: tree.scopeKey,
         glyph: '',
@@ -82,11 +109,17 @@ export function renderAgentTree(container, tree, options = {}) {
     }, opts));
 
     if (!tree.projects.length) {
-        container.appendChild(el('p', 'agents-empty', 'No agents have said anything yet.'));
+        body.appendChild(el('p', 'agents-empty', 'No agents have said anything yet.'));
         return;
     }
 
-    for (const project of tree.projects) {
+    const { projects, hidden } = visibleTree(tree, query, opts.selectedScope);
+    if (query.trim() && !projects.length) {
+        body.appendChild(el('p', 'agents-empty', 'No agents or folders match.'));
+        return;
+    }
+
+    for (const project of projects) {
         const group = el('div', 'agent-group');
         if (project.unattributed) group.classList.add('agent-group--unattributed');
 
@@ -114,6 +147,42 @@ export function renderAgentTree(container, tree, options = {}) {
             }, opts));
         }
 
-        container.appendChild(group);
+        body.appendChild(group);
     }
+
+    if (hidden > 0) {
+        const noun = hidden === 1 ? 'agent' : 'agents';
+        body.appendChild(el('p', 'agents-older',
+            `${hidden} ${noun} quiet for over a week. Search to find them.`));
+    }
+}
+
+/**
+ * Render the tree.
+ *
+ * `tree` is exactly what `list_sessions()` returns. The search box is created
+ * once and kept across redraws, so a live update never eats what was typed.
+ */
+export function renderAgentTree(container, tree, options = {}) {
+    let search = container.querySelector(':scope > .agent-search');
+    let body = container.querySelector(':scope > .agent-tree');
+    if (!search || !body) {
+        container.textContent = '';
+        search = el('input', 'agent-search');
+        search.type = 'search';
+        search.placeholder = 'Search agents or folders';
+        search.setAttribute('aria-label', 'Search agents or folders, including older ones');
+        body = el('div', 'agent-tree');
+        container.append(search, body);
+        search.addEventListener('input', () => drawTree(container, body, search.value));
+        search.addEventListener('keydown', event => {
+            if (event.key !== 'Escape' || !search.value) return;
+            event.stopPropagation();
+            search.value = '';
+            drawTree(container, body, '');
+        });
+    }
+
+    drawn.set(container, { tree, opts: { selectedScope: 'all', ...options } });
+    drawTree(container, body, search.value);
 }

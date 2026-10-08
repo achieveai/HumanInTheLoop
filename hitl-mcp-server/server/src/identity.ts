@@ -5,14 +5,16 @@ import type { RepoContext, SenderIdentity } from './types.js';
 /** Resolves a human-readable session name, or null when none is available. */
 export type SessionNameResolver = () => string | null;
 
-/** One MCP server process is exactly one Claude Code session. */
+/** Last resort: hosts that name no session get one id per server process. */
 const PROCESS_SESSION_UUID = randomUUID();
 
 /**
- * Builds a `SessionNameResolver` that prefers the Claude Code Remote Control
- * bridge session id (`CLAUDE_CODE_BRIDGE_SESSION_ID`, set only while Remote
- * Control is active, v2.1.199+) and falls back to a minted id otherwise
- * (spec §5.2, §5.3).
+ * Builds a `SessionNameResolver`, in precedence order (spec §5.2, §5.3):
+ * - `CLAUDE_CODE_SESSION_ID`: the conversation id Claude Code passes to every
+ *   stdio MCP server. It survives restarts, reconnects and `--resume`, so one
+ *   conversation stays one Inbox session.
+ * - `CLAUDE_CODE_BRIDGE_SESSION_ID`: set only while Remote Control is active.
+ * - A minted id: Codex and older Claude Code, one per server process.
  *
  * The bridge id can appear or disappear mid-process, so the result is
  * resolved once, at first call, and cached — a label that changes mid-session
@@ -25,7 +27,7 @@ export function makeSessionNameResolver(opts: {
   let resolved: string | null = null;
   return () => {
     if (resolved === null) {
-      resolved = opts.env.CLAUDE_CODE_BRIDGE_SESSION_ID ?? opts.mintedUuid;
+      resolved = opts.env.CLAUDE_CODE_SESSION_ID || opts.env.CLAUDE_CODE_BRIDGE_SESSION_ID || opts.mintedUuid;
     }
     return resolved;
   };

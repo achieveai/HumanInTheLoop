@@ -28,6 +28,14 @@ fn blocks_an_agent(msg_type: &str) -> bool {
     matches!(msg_type, "question" | "plan_review" | "handoff")
 }
 
+/// How long a quiet session stays in the default views. Older ones are found
+/// by searching the agent tree; anything still waiting on you never ages out.
+pub const RECENT_WINDOW_SECS: u64 = 7 * 24 * 60 * 60;
+
+fn is_recent(pending: u32, last_event_at: u64, now: u64) -> bool {
+    pending > 0 || (last_event_at > 0 && now.saturating_sub(last_event_at) <= RECENT_WINDOW_SECS)
+}
+
 /// Which renderer pane 3 will use, as one character (spec §7.1).
 fn glyph_for(msg_type: &str) -> &'static str {
     match msg_type {
@@ -243,6 +251,13 @@ struct Subject {
     identity: Option<Identity>,
 }
 
+impl Subject {
+    fn is_recent(&self, now: u64) -> bool {
+        let waiting = self.folded_status == "pending" && blocks_an_agent(&self.row.msg_type);
+        is_recent(u32::from(waiting), self.last_event_at, now)
+    }
+}
+
 fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
     let request = request_event(events)?;
     let state: MessageState = fold(events);
@@ -314,6 +329,8 @@ pub struct SessionRow {
     pub pending_count: u32,
     pub message_count: u32,
     pub last_event_at: u64,
+    /// Shown by default: active within [`RECENT_WINDOW_SECS`] or waiting on you.
+    pub recent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -327,6 +344,8 @@ pub struct ProjectNode {
     pub pending_count: u32,
     pub message_count: u32,
     pub last_event_at: u64,
+    /// Same rule as [`SessionRow::recent`], over the whole project.
+    pub recent: bool,
     pub sessions: Vec<SessionRow>,
     /// True for the one `Unattributed` node, which has no sessions because its
     /// messages have no session to belong to yet.
@@ -389,14 +408,19 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
     // project -> session -> counters. `""` is the session slot of the
     // Unattributed node, which never renders a session row.
     let mut projects: BTreeMap<String, BTreeMap<String, Counters>> = BTreeMap::new();
-    let mut labels: BTreeMap<String, String> = BTreeMap::new();
+    // The newest label per session: a session that switched branch shows the
+    // branch it is on now.
+    let mut labels: BTreeMap<String, (u64, String)> = BTreeMap::new();
     let mut total = Counters::default();
 
     for subject in &subjects {
         total.add(subject);
         let (project, session) = match &subject.identity {
             Some(id) => {
-                labels.insert(id.session_key.clone(), id.session_label.clone());
+                let newest = labels.entry(id.session_key.clone()).or_insert((0, String::new()));
+                if subject.last_event_at >= newest.0 {
+                    *newest = (subject.last_event_at, id.session_label.clone());
+                }
                 (id.project_key.clone(), id.session_key.clone())
             }
             None => (UNATTRIBUTED_KEY.to_string(), String::new()),
@@ -428,7 +452,7 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
                 rows.push(SessionRow {
                     label: labels
                         .get(&session_key)
-                        .cloned()
+                        .map(|(_, label)| label.clone())
                         .unwrap_or_else(|| session_key.clone()),
                     scope_key: format!("session:{session_key}"),
                     session_key,
@@ -438,6 +462,7 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
                     pending_count: counters.pending,
                     message_count: counters.messages,
                     last_event_at: counters.last_event_at,
+                    recent: is_recent(counters.pending, counters.last_event_at, now),
                 });
             }
 
@@ -465,6 +490,7 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
                 pending_count: rolled.pending,
                 message_count: rolled.messages,
                 last_event_at: rolled.last_event_at,
+                recent: is_recent(rolled.pending, rolled.last_event_at, now),
                 sessions: rows,
                 unattributed,
             }
@@ -618,6 +644,9 @@ pub fn build_list(events: &[Event], scope_key: Option<&str>, filter: Option<&str
     let mut rows: Vec<MessageRow> = group_by_subject(events)
         .values()
         .filter_map(|e| build_subject(e, now))
+        // "All agents" is the default view, so it keeps to recent work. A
+        // project or session picked from the tree shows its whole history.
+        .filter(|subject| scope != Scope::All || subject.is_recent(now))
         .map(|subject| subject.row)
         .filter(|row| scope.admits(row))
         .collect();
@@ -901,6 +930,43 @@ mod tests {
 
         assert_eq!(project(&build_tree(&quiet(HOUR), NOW), "Hitl_MCP").sessions[0].state, "idle");
         assert_eq!(project(&build_tree(&quiet(2 * DAY), NOW), "Hitl_MCP").sessions[0].state, "stale");
+    }
+
+    #[test]
+    fn a_session_that_switches_branch_is_one_row_named_for_its_newest_branch() {
+        let events = vec![
+            question("q-1", NOW - HOUR, "Hitl_MCP"),
+            identity("q-1", NOW - HOUR, "Hitl_MCP · master · 63f2"),
+            answer("q-1", NOW - HOUR, "laptop"),
+            question("q-2", NOW - MINUTE, "Hitl_MCP"),
+            identity("q-2", NOW - MINUTE, "Hitl_MCP · codex/inbox-fix · 63f2"),
+        ];
+
+        let tree = build_tree(&events, NOW);
+        let sessions = &project(&tree, "Hitl_MCP").sessions;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].label, "codex/inbox-fix · 63f2");
+        assert_eq!(sessions[0].message_count, 2);
+    }
+
+    #[test]
+    fn a_session_quiet_for_over_a_week_is_not_recent_unless_it_waits_on_you() {
+        let events = vec![
+            question("q-new", NOW - 6 * DAY, "fresh"),
+            identity("q-new", NOW - 6 * DAY, "fresh · master · aaaa"),
+            answer("q-new", NOW - 6 * DAY, "laptop"),
+            question("q-old", NOW - 8 * DAY - MINUTE, "old"),
+            identity("q-old", NOW - 8 * DAY - MINUTE, "old · master · bbbb"),
+            answer("q-old", NOW - 8 * DAY, "laptop"),
+            question("q-wait", NOW - 30 * DAY, "waiting"),
+            identity("q-wait", NOW - 30 * DAY, "waiting · master · cccc"),
+        ];
+
+        let tree = build_tree(&events, NOW);
+        let recent = |name: &str| (project(&tree, name).recent, project(&tree, name).sessions[0].recent);
+        assert_eq!(recent("fresh"), (true, true));
+        assert_eq!(recent("old"), (false, false));
+        assert_eq!(recent("waiting"), (true, true), "a pending question never ages out");
     }
 
     #[test]
@@ -1289,6 +1355,29 @@ mod tests {
     }
 
     #[test]
+    fn all_agents_hides_settled_work_older_than_a_week_but_its_project_keeps_it() {
+        let events = [
+            question("q-old", NOW - 8 * DAY - MINUTE, "Hitl_MCP"),
+            identity("q-old", NOW - 8 * DAY - MINUTE, "Hitl_MCP · master · a3f2"),
+            answer("q-old", NOW - 8 * DAY, "laptop"),
+            notification("n-old", NOW - 9 * DAY, "unread for ages"),
+            identity("n-old", NOW - 9 * DAY, "Hitl_MCP · master · a3f2"),
+            question("q-wait", NOW - 20 * DAY, "Hitl_MCP"),
+            identity("q-wait", NOW - 20 * DAY, "Hitl_MCP · master · a3f2"),
+            question("q-new", NOW - DAY, "Hitl_MCP"),
+            identity("q-new", NOW - DAY, "Hitl_MCP · master · a3f2"),
+            answer("q-new", NOW - DAY + MINUTE, "laptop"),
+        ];
+
+        let all = build_list(&events, None, Some("all"), NOW);
+        assert_eq!(ids(&all), vec!["q-new", "q-wait"], "a pending question never ages out");
+        assert_eq!(all.counts.all, 2);
+
+        let project = build_list(&events, Some("project:Hitl_MCP"), Some("all"), NOW);
+        assert_eq!(ids(&project).len(), 4);
+    }
+
+    #[test]
     fn staleness_is_judged_over_the_whole_session_not_the_selected_scope() {
         // The session is alive — it asked something a minute ago — so the old
         // question in it is `pending`, not `stale`. Deriving the state from
@@ -1301,7 +1390,7 @@ mod tests {
             identity("q-new", NOW - MINUTE, "Hitl_MCP · master · a3f2"),
         ];
 
-        let list = build_list(&events, Some("session:Hitl_MCP · master · a3f2"), Some("all"), NOW);
+        let list = build_list(&events, Some("session:Hitl_MCP · a3f2"), Some("all"), NOW);
         assert_eq!(list.messages.len(), 2);
         assert!(list.messages.iter().all(|m| m.status == "pending"));
     }
@@ -1324,7 +1413,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert_eq!(scoped(Some("session:Hitl_MCP · master · a3f2")), vec!["q-1"]);
+        assert_eq!(scoped(Some("session:Hitl_MCP · a3f2")), vec!["q-1"]);
         assert_eq!(scoped(Some("project:Hitl_MCP")), vec!["q-1", "q-2"]);
         assert_eq!(scoped(Some("all")), vec!["q-1", "q-2", "q-3"]);
         assert_eq!(scoped(None), vec!["q-1", "q-2", "q-3"]);
@@ -1483,7 +1572,7 @@ mod tests {
                 vec!["n-alpha", "n-beta", "n-unattributed", "n-stale"],
             ),
             (Some("project:Alpha"), vec!["n-alpha", "n-stale"]),
-            (Some("session:Alpha · main · aaaa"), vec!["n-alpha"]),
+            (Some("session:Alpha · aaaa"), vec!["n-alpha"]),
             (Some("unattributed"), vec!["n-unattributed"]),
         ];
 
@@ -1564,6 +1653,7 @@ mod tests {
                 "name",
                 "pendingCount",
                 "projectKey",
+                "recent",
                 "scopeKey",
                 "sessions",
                 "state",
@@ -1579,6 +1669,7 @@ mod tests {
                 "messageCount",
                 "pendingCount",
                 "projectKey",
+                "recent",
                 "scopeKey",
                 "sessionKey",
                 "state"

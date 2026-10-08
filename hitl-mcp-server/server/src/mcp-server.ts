@@ -351,7 +351,7 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
           name: HANDOFF_TOOL_NAME,
           description: `Hand your finished work to the human and wait for their next instruction. Call this instead of ending your turn when you have finished everything you were asked to do.
 
-The summary appears in the user's Inbox on all their devices. The user is dyslexic with ADHD and reads it at a glance, so keep it short and use exactly this shape:
+The summary appears in the user's HITL Inbox app (not the tray popup). The user is dyslexic with ADHD and reads it at a glance, so keep it short and use exactly this shape:
 **Outcome:** done | done with risks | blocked | failed
 **Did:** 3-5 bullets
 **Not done / risks:** bullets, only if any

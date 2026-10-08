@@ -84,7 +84,7 @@ test.describe('Pane 3 — a handoff', () => {
 
     await expect(page.locator('.other-answered')).toContainText('Next instruction sent');
     await expect(page.locator('.other-answered-text')).toHaveText('Ship it.');
-    await expect(page.locator('textarea, input')).toHaveCount(0);
+    await expect(page.locator('#pane-detail').locator('textarea, input')).toHaveCount(0);
     await expect(page.locator('.detail-retained')).toBeVisible();
   });
 

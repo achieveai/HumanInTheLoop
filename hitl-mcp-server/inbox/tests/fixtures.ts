@@ -63,6 +63,7 @@ export interface SessionRow {
   pendingCount: number;
   messageCount: number;
   lastEventAt: number;
+  recent: boolean;
 }
 
 export interface ProjectNode {
@@ -74,6 +75,7 @@ export interface ProjectNode {
   pendingCount: number;
   messageCount: number;
   lastEventAt: number;
+  recent: boolean;
   sessions: SessionRow[];
   unattributed: boolean;
 }
@@ -113,6 +115,7 @@ export function session(over: Partial<SessionRow> & { sessionKey: string }): Ses
     pendingCount: 0,
     messageCount: 1,
     lastEventAt: NOW - HOUR,
+    recent: true,
     ...over,
     state,
   };
@@ -127,6 +130,7 @@ export function project(over: Partial<ProjectNode> & { projectKey: string }): Pr
     pendingCount: 0,
     messageCount: 1,
     lastEventAt: NOW - HOUR,
+    recent: true,
     sessions: [],
     unattributed: false,
     ...over,

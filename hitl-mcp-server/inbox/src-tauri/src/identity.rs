@@ -28,9 +28,9 @@ const LABEL_SEP: &str = " · ";
 /// Everything the agent tree needs to know about one message's sender.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
-    /// Stable for the life of one MCP server process — one Claude Code
-    /// session — because that is what the label is minted from (spec §5.3).
-    /// The label *is* the key: the minted UUID itself never reaches the wire.
+    /// `<project> · <id4>` for a session-tier label, so a branch switch inside
+    /// one session stays one row; the whole label for any other tier. The full
+    /// session id itself never reaches the wire (spec §5.3).
     pub session_key: String,
     /// What the session row shows, with the project prefix stripped so the
     /// tree does not repeat the project name on every child (spec §6).
@@ -114,6 +114,20 @@ pub fn session_label_under(label: &str, project: &str) -> String {
     label.strip_prefix(&prefix).unwrap_or(label).to_string()
 }
 
+/// The session id head that ends a session-tier label
+/// (`<repoName> · <branch> · <id4>`), or `None` for any other shape.
+///
+/// The branch in the middle is read per message, so a session that switches
+/// branch sends a new label with the same id. Keying on the id keeps it one
+/// session.
+fn session_id_of(label: &str) -> Option<&str> {
+    let segments: Vec<&str> = label.split(LABEL_SEP).collect();
+    match segments.as_slice() {
+        [first, .., id] if segments.len() >= 3 && !first.is_empty() && !id.is_empty() => Some(id),
+        _ => None,
+    }
+}
+
 /// Resolve one subject's identity, or `None` while it is unattributed.
 ///
 /// `request` supplies the repo block; `events` supplies the label. Both come
@@ -124,10 +138,14 @@ pub fn resolve(request: &Event, events: &[Event]) -> Option<Identity> {
     // statement of where it is, whereas the label's first segment is only a
     // segment that usually happens to be the repo name.
     let project_key = repo_name(request).unwrap_or_else(|| project_of_label(&label));
+    let session_key = match session_id_of(&label) {
+        Some(id) => format!("{project_key}{LABEL_SEP}{id}"),
+        None => label.clone(),
+    };
     Some(Identity {
         session_label: session_label_under(&label, &project_key),
         project_key,
-        session_key: label,
+        session_key,
     })
 }
 
@@ -181,7 +199,7 @@ mod tests {
         assert_eq!(
             resolve(&q, &events),
             Some(Identity {
-                session_key: "Hitl_MCP · master · a3f2".to_string(),
+                session_key: "Hitl_MCP · a3f2".to_string(),
                 session_label: "master · a3f2".to_string(),
                 project_key: "Hitl_MCP".to_string(),
             })
@@ -268,6 +286,17 @@ mod tests {
             identity_event("Hitl_MCP · master · a3f2"),
             identity_event("Hitl_MCP · master · a3f2"),
         ];
-        assert_eq!(resolve(&q, &events).unwrap().session_key, "Hitl_MCP · master · a3f2");
+        assert_eq!(resolve(&q, &events).unwrap().session_key, "Hitl_MCP · a3f2");
+    }
+
+    #[test]
+    fn a_session_that_switches_branch_keeps_its_key() {
+        let q = question("Hitl_MCP");
+        let key = |label: &str| resolve(&q, &[q.clone(), identity_event(label)]).unwrap().session_key;
+        assert_eq!(key("Hitl_MCP · master · 63f2"), key("Hitl_MCP · codex/inbox-fix · 63f2"));
+        assert_ne!(key("Hitl_MCP · master · 63f2"), key("Hitl_MCP · master · fb08"));
+        // No session id inside, so the whole label stays the key.
+        assert_eq!(key("Users/gautamb · 3327"), "Users/gautamb · 3327");
+        assert_eq!(key("Kay9 - work-item/1-reviewplan"), "Kay9 - work-item/1-reviewplan");
     }
 }

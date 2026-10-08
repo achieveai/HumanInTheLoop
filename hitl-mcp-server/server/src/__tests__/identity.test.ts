@@ -161,7 +161,18 @@ describe('resolveSenderIdentity', () => {
 });
 
 describe('session identity', () => {
-  it('prefers the bridge session id when Claude Code provides one', () => {
+  it('prefers the Claude Code conversation id, which survives server restarts', () => {
+    const resolver = makeSessionNameResolver({
+      env: {
+        CLAUDE_CODE_SESSION_ID: 'b780c474-1169-419a-b8dd-b8ffbc5dca2c',
+        CLAUDE_CODE_BRIDGE_SESSION_ID: 'session_abc123',
+      },
+      mintedUuid: 'uuid-fallback',
+    });
+    expect(resolver()).toBe('b780c474-1169-419a-b8dd-b8ffbc5dca2c');
+  });
+
+  it('uses the bridge session id when there is no conversation id', () => {
     const resolver = makeSessionNameResolver({
       env: { CLAUDE_CODE_BRIDGE_SESSION_ID: 'session_abc123' },
       mintedUuid: 'uuid-fallback',
