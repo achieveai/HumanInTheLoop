@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicbarker/tauri/dev/.schema/config.schema.json",
   "productName": "HITL Inbox",
-  "version": "2.14.0",
+  "version": "2.14.1",
   "identifier": "com.hitl.inbox",
   "build": {
     "frontendDist": "../src",
