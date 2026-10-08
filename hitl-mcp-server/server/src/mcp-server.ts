@@ -36,7 +36,7 @@ import { PROTOCOL_VERSION } from './types.js';
 import { NtfyTransport, AttachmentExpiredError, AbortedWaitError } from './ntfy-transport.js';
 import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
-import { resolveSenderIdentity } from './identity.js';
+import { noteToolCallMeta, resolveSenderIdentity } from './identity.js';
 import { performSetup, ensureClientRunning } from './setup.js';
 import { SERVER_VERSION } from './version.js';
 import { readPlanFile, PlanFileError } from './plan-file.js';
@@ -384,6 +384,7 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      noteToolCallMeta(request.params._meta);
       if (request.params.name === 'UpdateWork' || request.params.name === 'ReadWork') {
         try {
           const args = request.params.arguments ?? {};

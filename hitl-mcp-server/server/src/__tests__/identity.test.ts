@@ -172,6 +172,30 @@ describe('session identity', () => {
     expect(resolver()).toBe('b780c474-1169-419a-b8dd-b8ffbc5dca2c');
   });
 
+  it('uses the Codex thread id from tool-call meta when Claude names no session', () => {
+    const codex = makeSessionNameResolver({
+      env: { CLAUDE_CODE_BRIDGE_SESSION_ID: 'session_abc123' },
+      mintedUuid: 'uuid-fallback',
+      threadId: () => '01a11cf2-4e82-7f40-ad61-3737090ed46a',
+    });
+    expect(codex()).toBe('01a11cf2-4e82-7f40-ad61-3737090ed46a');
+
+    const claude = makeSessionNameResolver({
+      env: { CLAUDE_CODE_SESSION_ID: 'b780c474-1169-419a-b8dd-b8ffbc5dca2c' },
+      mintedUuid: 'uuid-fallback',
+      threadId: () => '01a11cf2-4e82-7f40-ad61-3737090ed46a',
+    });
+    expect(claude()).toBe('b780c474-1169-419a-b8dd-b8ffbc5dca2c');
+  });
+
+  it('suffixes a time-ordered (v7) thread id with its random tail, not its timestamp head', () => {
+    // Every Codex thread from the same weeks starts `01a1`.
+    const a = resolveSenderIdentity('/repo/path', 'Kay9', () => '01a11cf2-4e82-7f40-ad61-3737090ed46a');
+    const b = resolveSenderIdentity('/repo/path', 'Kay9', () => '01a11ceb-358b-7ea1-a3de-4b59984236b7');
+    expect(a.label.endsWith(' · d46a')).toBe(true);
+    expect(b.label.endsWith(' · 36b7')).toBe(true);
+  });
+
   it('uses the bridge session id when there is no conversation id', () => {
     const resolver = makeSessionNameResolver({
       env: { CLAUDE_CODE_BRIDGE_SESSION_ID: 'session_abc123' },

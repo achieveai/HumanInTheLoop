@@ -8,13 +8,30 @@ export type SessionNameResolver = () => string | null;
 /** Last resort: hosts that name no session get one id per server process. */
 const PROCESS_SESSION_UUID = randomUUID();
 
+/** The first Codex thread id seen on a tool call; see `noteToolCallMeta`. */
+let toolCallThreadId: string | undefined;
+
+/**
+ * Codex passes no session id in the environment. It names its thread on every
+ * tool call instead, as `_meta.threadId`. Remember the first one, before any
+ * identity is resolved for that call.
+ */
+export function noteToolCallMeta(meta: unknown): void {
+  const id = (meta as { threadId?: unknown } | null | undefined)?.threadId;
+  if (toolCallThreadId === undefined && typeof id === 'string' && id.trim() !== '') {
+    toolCallThreadId = id.trim();
+  }
+}
+
 /**
  * Builds a `SessionNameResolver`, in precedence order (spec §5.2, §5.3):
  * - `CLAUDE_CODE_SESSION_ID`: the conversation id Claude Code passes to every
  *   stdio MCP server. It survives restarts, reconnects and `--resume`, so one
  *   conversation stays one Inbox session.
+ * - The Codex thread id from the first tool call's `_meta.threadId`, which
+ *   likewise survives `codex resume`.
  * - `CLAUDE_CODE_BRIDGE_SESSION_ID`: set only while Remote Control is active.
- * - A minted id: Codex and older Claude Code, one per server process.
+ * - A minted id: other hosts, one per server process.
  *
  * The bridge id can appear or disappear mid-process, so the result is
  * resolved once, at first call, and cached — a label that changes mid-session
@@ -23,11 +40,13 @@ const PROCESS_SESSION_UUID = randomUUID();
 export function makeSessionNameResolver(opts: {
   env: NodeJS.ProcessEnv;
   mintedUuid: string;
+  threadId?: () => string | undefined;
 }): SessionNameResolver {
   let resolved: string | null = null;
   return () => {
     if (resolved === null) {
-      resolved = opts.env.CLAUDE_CODE_SESSION_ID || opts.env.CLAUDE_CODE_BRIDGE_SESSION_ID || opts.mintedUuid;
+      resolved = opts.env.CLAUDE_CODE_SESSION_ID || opts.threadId?.() ||
+        opts.env.CLAUDE_CODE_BRIDGE_SESSION_ID || opts.mintedUuid;
     }
     return resolved;
   };
@@ -36,6 +55,7 @@ export function makeSessionNameResolver(opts: {
 export const defaultSessionNameResolver: SessionNameResolver = makeSessionNameResolver({
   env: process.env,
   mintedUuid: PROCESS_SESSION_UUID,
+  threadId: () => toolCallThreadId,
 });
 
 /**
@@ -77,6 +97,9 @@ function lastTwoSegments(cwd: string): string {
  * session, and leaves the UUID case byte-for-byte as it was.
  */
 function shortSessionId(sessionId: string): string {
+  // A UUIDv7 (Codex thread ids) starts with a timestamp, so its head is the
+  // same for every thread made in the same weeks. Its tail is random.
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-7/i.test(sessionId)) return sessionId.slice(-4);
   return sessionId.replace(/^session_/, '').slice(0, 4);
 }
 
