@@ -28,6 +28,8 @@ export interface TranscriptEntry {
   isMeta?: boolean;
   isSidechain?: boolean;
   entrypoint?: string;
+  /** `task_notification` when a background task, not the human, started the turn. */
+  turnOrigin?: string;
   message?: { content?: unknown };
 }
 
@@ -54,9 +56,13 @@ function textOf(content: unknown): string {
   return '';
 }
 
-/** A prompt that starts a turn: user text that is neither a tool result nor hook feedback. */
+/**
+ * A prompt that starts a turn: user text that is neither a tool result nor hook
+ * feedback. A background-task notice continues the human's last turn, so a
+ * turn that already handed off or was nudged is not nudged again.
+ */
 function isTurnStart(entry: TranscriptEntry): boolean {
-  if (entry.type !== 'user' || entry.isMeta) return false;
+  if (entry.type !== 'user' || entry.isMeta || entry.turnOrigin === 'task_notification') return false;
   const content = entry.message?.content;
   return typeof content === 'string' || blocks(entry).some(b => b.type === 'text');
 }

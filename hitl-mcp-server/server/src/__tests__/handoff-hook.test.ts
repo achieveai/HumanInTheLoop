@@ -76,6 +76,15 @@ describe('decideStop', () => {
     expect(decideStop(entries, env).block).toBe(true);
   });
 
+  it('treats a background-task notice as part of the last human turn', () => {
+    const notice: TranscriptEntry = { type: 'user', turnOrigin: 'task_notification', message: { content: '<task-notification>done</task-notification>' } };
+    // Already nudged once this turn: work after the notice does not nudge again.
+    expect(decideStop([prompt(), ...tool(), ourBlock(), say('Waiting.'), notice, ...tool('Read')], env))
+      .toMatchObject({ block: false, why: 'agent ignored the previous block' });
+    // Real work after a notice in a turn that never handed off still gets one nudge.
+    expect(decideStop([prompt('hi'), say('hello'), notice, ...tool()], env).block).toBe(true);
+  });
+
   it('ignores subagent (sidechain) tool calls', () => {
     const sidechain = tool().map(e => ({ ...e, isSidechain: true }));
     expect(decideStop([prompt(), ...sidechain, say('hi')], env)).toMatchObject({ block: false });
