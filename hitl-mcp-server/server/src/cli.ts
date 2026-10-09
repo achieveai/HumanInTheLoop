@@ -6,6 +6,8 @@ import { loadConfig, saveConfig, generateDefaultConfig, getConfigPath } from './
 import { findClientBinary, launchClient } from './setup.js';
 import { applyAutoBackgroundSetting } from './host-settings.js';
 import { runStopHook } from './handoff-hook.js';
+import { runSessionStartHook, syncFromCwd } from './memory/hook.js';
+import type { ReplicaHost } from './memory/sync.js';
 import { readFileSync } from 'fs';
 import { dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -21,6 +23,10 @@ Usage:
   hitl client              Launch the HITL desktop client app
   hitl claude-code install Register HITL as a Claude Code MCP server (user scope)
   hitl hook stop           Claude Code Stop hook: hand finished work to the Inbox
+  hitl hook session-start --host <claude|codex|copilot>
+                           Sync this repo's shared memory into the session
+  hitl memory sync [--host <h>] [--cwd <dir>]
+                           Sync the shared memory of the repo in <dir>
   hitl help                Show this help message
 `;
 
@@ -41,6 +47,8 @@ async function main() {
       return cmdClaudeCode(args.slice(1));
     case 'hook':
       return cmdHook(args.slice(1));
+    case 'memory':
+      return cmdMemory(args.slice(1));
     case 'help':
     case '--help':
     case '-h':
@@ -54,14 +62,68 @@ async function main() {
   }
 }
 
-/** `hitl hook stop`: the Claude Code Stop hook. Reads hook JSON on stdin. */
-function cmdHook(args: string[]) {
-  if (args[0] !== 'stop') {
-    console.error(`Unknown hook: ${args[0] ?? '(none)'}. Supported: stop`);
+const HOSTS: ReplicaHost[] = ['claude', 'codex', 'copilot'];
+
+/** The value after `--name` in `args`, if any. */
+function flag(args: string[], name: string): string | undefined {
+  const at = args.indexOf(`--${name}`);
+  return at >= 0 ? args[at + 1] : undefined;
+}
+
+function hostFlag(args: string[], fallback?: ReplicaHost): ReplicaHost | undefined {
+  const host = flag(args, 'host') ?? fallback;
+  if (host !== undefined && !HOSTS.includes(host as ReplicaHost)) {
+    console.error(`Unknown host: ${host}. Supported: ${HOSTS.join(', ')}`);
     process.exit(1);
   }
-  const output = runStopHook(readFileSync(0, 'utf8'));
+  return host as ReplicaHost | undefined;
+}
+
+/** Resolves undefined after `ms` if `work` has not settled, so a hook never holds its host up for long. */
+async function withinMs<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: NodeJS.Timeout | number | undefined;
+  try {
+    return await Promise.race([work, new Promise<undefined>(resolve => (timer = setTimeout(resolve, ms)))]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** `hitl hook stop` and `hitl hook session-start`. Both read hook JSON on stdin. */
+async function cmdHook(args: string[]) {
+  const stdin = readFileSync(0, 'utf8');
+  if (args[0] === 'session-start') {
+    const output = await runSessionStartHook(stdin, hostFlag(args, 'claude')!);
+    if (output) process.stdout.write(output);
+    return;
+  }
+  if (args[0] !== 'stop') {
+    console.error(`Unknown hook: ${args[0] ?? '(none)'}. Supported: stop, session-start`);
+    process.exit(1);
+  }
+  const output = runStopHook(stdin);
   if (output) process.stdout.write(output);
+  // Send this session's memory edits out now rather than at the next session start.
+  try {
+    const cwd = (JSON.parse(stdin) as { cwd?: string }).cwd;
+    if (cwd) await withinMs(syncFromCwd(cwd, 'claude').catch(() => null), 5000);
+  } catch {
+    // Memory sync never changes the Stop decision.
+  }
+}
+
+/** `hitl memory sync`: sync a repo's shared memory by hand and print what changed. */
+async function cmdMemory(args: string[]) {
+  if (args[0] !== 'sync') {
+    console.error(`Unknown memory command: ${args[0] ?? '(none)'}. Supported: sync`);
+    process.exit(1);
+  }
+  const result = await syncFromCwd(flag(args, 'cwd') ?? process.cwd(), hostFlag(args));
+  if (!result) {
+    console.error('Not inside a git repo: nothing to sync.');
+    process.exit(1);
+  }
+  console.log(JSON.stringify(result, null, 2));
 }
 
 function cmdInit() {

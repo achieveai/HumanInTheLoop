@@ -23,7 +23,7 @@ import { DEFAULT_NTFY_URL } from './types.js';
  * matching the Rust rule — an empty value there would silently mean the process
  * working directory.
  */
-function hitlDir(): string {
+export function hitlDir(): string {
   const override = process.env.HITL_HOME;
   if (override !== undefined) {
     if (override.trim() === '') {

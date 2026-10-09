@@ -45,6 +45,7 @@ import { resolveBaseline, buildPlanDiff } from './plan-diff.js';
 import { encodePayload, decodePayload, PayloadDecodeError } from './payload.js';
 import type { ReviewPlanResult } from './plan-review.js';
 import { parseVerdict, normalizeResponseBody, ReviewResponseError } from './plan-review.js';
+import { startMemorySyncer } from './memory/syncer.js';
 
 const TOOL_NAME = 'AskUserQuestion';
 const NOTIFY_TOOL_NAME = 'Notify';
@@ -1050,6 +1051,8 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
     await this.server.connect(stdioTransport);
 
     console.error(`${SERVER_NAME} v${SERVER_VERSION} running on stdio (ntfy-backed)`);
+    const memorySyncer = startMemorySyncer();
+    process.stdin.on('end', () => memorySyncer.stop());
 
     let shuttingDown = false;
     const shutdown = async () => {
@@ -1063,6 +1066,7 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
       // A hard kill (SIGKILL/OOM) cannot be caught here by design.
       await this.cancelOutstandingReviews('agent_exited');
 
+      memorySyncer.stop();
       this.transport.close();
       process.exit(0);
     };
