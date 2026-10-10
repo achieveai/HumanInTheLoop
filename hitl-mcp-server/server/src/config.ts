@@ -66,6 +66,7 @@ export function loadConfig(): HitlConfig {
     soundEnabled: parsed.soundEnabled !== false,
     encryptionKey: parsed.encryptionKey || undefined,
     identityEnabled: parsed.identityEnabled !== false,
+    ...(parsed.memoryRemote === true ? { memoryRemote: true } : {}),
   };
 }
 

@@ -359,6 +359,8 @@ export interface HitlConfig {
   encryptionKey?: string;
   /** Whether this device publishes its own sender identity (default: true) */
   identityEnabled?: boolean;
+  /** Whether agent memory syncs with your other machines over `<topicId>-memory` (default: off) */
+  memoryRemote?: boolean;
 }
 
 export const DEFAULT_NTFY_URL = 'https://ntfy.sh';

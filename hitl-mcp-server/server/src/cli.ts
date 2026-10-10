@@ -7,6 +7,7 @@ import { findClientBinary, launchClient } from './setup.js';
 import { applyAutoBackgroundSetting } from './host-settings.js';
 import { runStopHook } from './handoff-hook.js';
 import { runSessionStartHook, syncFromCwd } from './memory/hook.js';
+import { importClaudeMemory } from './memory/import.js';
 import type { ReplicaHost } from './memory/sync.js';
 import { readFileSync } from 'fs';
 import { dirname } from 'path';
@@ -27,7 +28,11 @@ Usage:
                            Sync this repo's shared memory into the session
   hitl memory sync [--host <h>] [--cwd <dir>]
                            Sync the shared memory of the repo in <dir>
-  hitl help                Show this help message
+  hitl memory import [--dry-run]
+                           Bring every existing Claude memory folder into shared memory
+  hitl memory remote [on|off]
+                           Sync memory with your other machines (encrypted, off by default)
+  hitl help               Show this help message
 `;
 
 async function main() {
@@ -112,10 +117,18 @@ async function cmdHook(args: string[]) {
   }
 }
 
-/** `hitl memory sync`: sync a repo's shared memory by hand and print what changed. */
+/** `hitl memory sync|import|remote`: sync a repo's shared memory by hand, or bring in existing Claude memory. */
 async function cmdMemory(args: string[]) {
+  if (args[0] === 'remote') {
+    cmdMemoryRemote(args[1]);
+    return;
+  }
+  if (args[0] === 'import') {
+    console.log(JSON.stringify(await importClaudeMemory(args.includes('--dry-run')), null, 2));
+    return;
+  }
   if (args[0] !== 'sync') {
-    console.error(`Unknown memory command: ${args[0] ?? '(none)'}. Supported: sync`);
+    console.error(`Unknown memory command: ${args[0] ?? '(none)'}. Supported: sync, import, remote`);
     process.exit(1);
   }
   const result = await syncFromCwd(flag(args, 'cwd') ?? process.cwd(), hostFlag(args));
@@ -124,6 +137,26 @@ async function cmdMemory(args: string[]) {
     process.exit(1);
   }
   console.log(JSON.stringify(result, null, 2));
+}
+
+/** `hitl memory remote [on|off]`: turn syncing with other machines on or off, or show it. */
+function cmdMemoryRemote(setting: string | undefined) {
+  const config = loadConfig();
+  if (setting === 'on' || setting === 'off') {
+    if (setting === 'on' && !config.encryptionKey) {
+      console.error('Memory only leaves this machine encrypted: add an encryptionKey to the HITL config first.');
+      process.exit(1);
+    }
+    const { memoryRemote: _, ...rest } = config;
+    saveConfig(setting === 'on' ? { ...rest, memoryRemote: true } : rest);
+  } else if (setting !== undefined) {
+    console.error(`Unknown setting: ${setting}. Use on or off.`);
+    process.exit(1);
+  }
+  const on = loadConfig().memoryRemote === true;
+  console.log(on
+    ? 'Memory syncs with your other machines, encrypted, over the memory topic. Restart HITL sessions to apply.'
+    : 'Memory stays on this machine.');
 }
 
 function cmdInit() {

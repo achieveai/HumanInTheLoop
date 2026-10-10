@@ -41,8 +41,8 @@ export function claudeMemoryDir(cwd: string): string | null {
 }
 
 const safeKey = (key: string) => key.replace(/[^a-z0-9._/-]/gi, '_');
-export const sharedDir = (key: string) => path.join(memoryRoot(), safeKey(key));
-const syncDir = (key: string) => path.join(memoryRoot(), '.sync', safeKey(key));
+export const sharedDir = (key: string, root = memoryRoot()) => path.join(root, safeKey(key));
+export const syncDir = (key: string, root = memoryRoot()) => path.join(root, '.sync', safeKey(key));
 const replicaId = (replicaPath: string) =>
   createHash('sha256').update(path.resolve(replicaPath).toLowerCase()).digest('hex').slice(0, 16);
 
@@ -66,7 +66,7 @@ export function registerReplica(key: string, replica: Replica): void {
   atomicWrite(registryPath(), JSON.stringify(registry, null, 2));
 }
 
-function read(file: string): string | null {
+export function read(file: string): string | null {
   try {
     return readFileSync(file, 'utf8');
   } catch {
@@ -74,20 +74,20 @@ function read(file: string): string | null {
   }
 }
 
-function atomicWrite(file: string, text: string): void {
+export function atomicWrite(file: string, text: string): void {
   mkdirSync(path.dirname(file), { recursive: true });
   const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.hitl-tmp`);
   writeFileSync(tmp, text);
   renameSync(tmp, file);
 }
 
-function put(file: string, text: string | null): void {
+export function put(file: string, text: string | null): void {
   if (text === null) rmSync(file, { force: true });
   else atomicWrite(file, text);
 }
 
 /** Memory files in `dir`: top-level `*.md` only. */
-function memoryFiles(dir: string): string[] {
+export function memoryFiles(dir: string): string[] {
   try {
     return readdirSync(dir, { withFileTypes: true })
       .filter(entry => entry.isFile() && entry.name.toLowerCase().endsWith('.md'))
@@ -97,7 +97,7 @@ function memoryFiles(dir: string): string[] {
   }
 }
 
-function tooBig(file: string): boolean {
+export function tooBig(file: string): boolean {
   try {
     return statSync(file).size > MAX_FILE_BYTES;
   } catch {
@@ -198,6 +198,6 @@ export function syncKey(key: string): SyncResult {
 }
 
 /** Sync every repo this machine knows about. */
-export function syncAll(): void {
-  for (const key of Object.keys(readRegistry())) syncKey(key);
+export function syncAll(): Array<{ key: string; result: SyncResult }> {
+  return Object.keys(readRegistry()).map(key => ({ key, result: syncKey(key) }));
 }

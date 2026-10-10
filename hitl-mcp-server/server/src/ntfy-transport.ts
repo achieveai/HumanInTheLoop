@@ -545,8 +545,8 @@ export class NtfyTransport {
     return await response.text();
   }
 
-  /** POST a single raw body string to the ntfy topic. */
-  private async publishRaw(body: string): Promise<void> {
+  /** POST a single raw body string to the ntfy topic. Memory sync sends its own sealed bodies through this. */
+  async publishRaw(body: string): Promise<void> {
     await this.fetchWithRetry(
       this.topicUrl,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body },
@@ -608,7 +608,8 @@ export class NtfyTransport {
       // both the cache replay and the live stream, and a retry re-sends
       // byte-identical bytes. Remove that de-dupe and this retry starts
       // double-delivering dialogs — there is nothing at this site that would
-      // stop it. The residual cost today is a doubled attachment upload
+      // stop it. Memory sync (`memory/remote.ts`) relies on the same rule: it
+      // skips a payload id it has already applied. The residual cost today is a doubled attachment upload
       // against the daily bandwidth quota; the orphan expires in 3 h.
       const elapsed = Date.now() - startedAt;
       if (attempt === this.retry.maxAttempts || elapsed >= this.retry.totalBudgetMs) break;

@@ -21,7 +21,45 @@ A scripted test with two fake machines making clashing edits ends with identical
 - Secrets would sync. Mitigations: end-to-end encryption, plus a secret-pattern guard that skips the file and notifies you.
 - "Keep both" can leave duplicate or contradicting lines. They are visible in the file, and Claude's consolidate-memory skill cleans them up.
 
-**Now / next:** your review → slice 1 (shared folder plus hooks, one machine) → slice 2 (sync between machines).
+**Now / next:** slice 1 done (`3242c05`) → your review of the slice 2 plan below → build slice 2.
+
+## Slice 2 plan: sync between machines
+
+**Done when:** two fake machines (two memory roots) on your real ntfy server make clashing edits to one file. Both end byte-identical, with both edits kept. Then two real machines do the same.
+
+1. **Its own topic.** Memory travels on `<your topic>-memory`, not on the Inbox topic. Inbox clients and the phone never see it. It uses the same encryption key. With no key configured, nothing leaves the machine.
+   - **Opt-in.** Sync between machines is off until `hitl memory remote on`, which refuses without a key. `HITL_MEMORY_REMOTE=0` or `1` overrides the config.
+2. **The machine's shared folder is the thing that syncs.** A second shadow per file holds the last state agreed through the topic. Each 10 s tick, every file that differs from its shadow goes out in one bundled message (gzipped, encrypted). If the message is over 3.9 KB, it goes as an attachment. A bundle stops at about 2 MB of text; the rest goes on the next tick.
+3. **Each change carries its old and new text,** not a diff. Every machine applies every change, in one order, with the slice 1 merge (keep both on a clash; an edit beats a delete). Same start, same changes and same order give the same bytes.
+   - **In flight:** a file is not sent again while its last change has not come back from the topic (2 min timeout). When the change does come back, the normal apply settles the file.
+4. **One order everywhere.** Changes are applied sorted by (ntfy time, message id), one finished second at a time.
+   - Second T counts as finished once an event stamped T+1 or later arrives (a message, or ntfy's 45 s keepalive), or 3 s after T by ntfy's clock. So live and replayed messages line up the same.
+   - The cursor is the last second applied. A resume asks for `since=<cursor+1>`.
+   - Only events from the current connection finish a second. ntfy's `open` event is ignored: its time is now, and the replay after it is older.
+   - A drain finishes only the seconds it handled. An event that arrives while it waits on a download waits for the next drain.
+   - An event leaves the queue only once it is handled. A failed download (network, 5xx) or a failed apply is retried, and the cursor holds. While applied changes are past the cursor, the machine sends nothing.
+   - Checked live on your server: `since=<time>` includes that second, and an unknown id returns everything.
+   - **Drift check:** each message carries a hash of the sender's shadows at its cursor. A machine whose own hash at that cursor differs asks for a snapshot. So a wrong start heals itself.
+   - **Each change once.** A ledger of applied message ids (kept 13 h, carried in snapshots) skips replays and duplicates. A change whose cursor is more than 13 h older than its ntfy time is refused as a re-post.
+5. **A snapshot when history is missing.** This happens on a new machine, after more than 11 h offline, or when a message can never be read (attachment expired or refused, failed decrypt, corrupt payload). A lost message is remembered, so it is not asked about again. A live peer answers after a random 0–5 s with its shadows, cursor and ledger. If nobody answers in 20 s, the machine starts from whatever the topic still holds. Local memory is merged in, never overwritten. A file the snapshot lacks is kept and sent again, not deleted.
+6. **Guards:**
+   - A file that matches a secret pattern (private key, cloud or API token) stays on this machine, and you get one Notify.
+   - Any clash gets one Notify naming the files (at most one per file per hour). The Notify is encrypted, so with no key it is only logged.
+   - A message that does not decrypt with this machine's key is skipped, and logged once: the keys likely differ.
+7. **Catch-up from slice 1:** `hitl memory import` registers the existing Claude memory folders. I had not built this.
+
+**Your decision:** a separate `-memory` topic (recommended). The alternative is the Inbox topic: your ntfy phone app would then get encrypted memory pushes, and Inbox would load more history. Safe default: separate.
+
+**Proof:**
+- Unit tests with an in-memory topic: shuffled arrival order gives the same bytes; edit beats delete; no re-send while in flight; a late joiner with a wrong start converges; secret guard.
+- A two-root run against your ntfy server on a throwaway topic.
+- One real second machine (needs you).
+
+**Material risks:**
+- **Delay.** A change lands elsewhere within the 10 s tick plus about 3 s, the time its second takes to finish.
+- **Order.** If ntfy's clock steps backwards, machines can drift. The drift check catches it and snapshots.
+- **Secret patterns** miss custom secrets. Encryption still covers transit.
+- **Retention.** I assume your server keeps 12 h. If it keeps less, snapshots just happen more often.
 
 ---
 
