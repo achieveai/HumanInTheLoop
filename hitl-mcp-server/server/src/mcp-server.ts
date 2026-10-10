@@ -276,10 +276,18 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
             'Ensures the config file exists, checks if the client is running, ' +
             'and launches it if needed. Call this tool with no arguments. ' +
             'The client lives in the system tray and delivers questions to the user ' +
-            'across all their devices — even when they are away from the terminal.',
+            'across all their devices — even when they are away from the terminal. ' +
+            'Pass memoryRemote only when the user asks to sync agent memory with their other machines (true) or to stop (false).',
           inputSchema: {
             type: 'object',
-            properties: {},
+            properties: {
+              memoryRemote: {
+                type: 'boolean',
+                description:
+                  "Sync agent memory with the user's other machines, encrypted, over the memory topic (true), or keep it on this machine (false). " +
+                  'Needs an encryptionKey in the HITL config. Each machine opts in on its own; HITL sessions restart to apply it.',
+              },
+            },
           },
         },
         {
@@ -402,9 +410,14 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
       }
       // Handle setup tool
       if (request.params.name === SETUP_TOOL_NAME) {
+        const memoryRemote = request.params.arguments?.memoryRemote;
+        if (memoryRemote !== undefined && typeof memoryRemote !== 'boolean') {
+          throw new McpError(ErrorCode.InvalidParams, 'memoryRemote must be true or false');
+        }
         try {
           const result = await performSetup(SERVER_DIR, {
             autoLaunchClient: this.autoLaunchClient,
+            memoryRemote,
           });
           return {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

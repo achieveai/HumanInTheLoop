@@ -309,7 +309,9 @@ Work history is retained under the configured HITL home. The journal requires a 
 
 ### `setup`
 
-Takes no parameters. Once the MCP server is running, checks/backfills its configuration and normally finds and launches the tray client. With `--no-auto-launch-client`, the client step is skipped. Run `hitl init` first if configuration is missing; the server cannot start far enough to expose `setup` without it.
+Once the MCP server is running, checks/backfills its configuration and normally finds and launches the tray client. With `--no-auto-launch-client`, the client step is skipped. Run `hitl init` first if configuration is missing; the server cannot start far enough to expose `setup` without it.
+
+Optional `memoryRemote` (boolean): `true` syncs agent memory with your other machines, encrypted, over `<topicId>-memory`; `false` keeps it on this machine. It needs an `encryptionKey`, applies to this machine only, and takes effect when HITL sessions restart. `hitl memory remote on|off` does the same from a terminal.
 
 ## Blocking and host timeouts
 

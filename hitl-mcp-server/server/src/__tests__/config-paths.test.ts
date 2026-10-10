@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtempSync, rmSync, readFileSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
-import { saveConfig, getConfigPath, loadConfig, generateDefaultConfig } from '../config.js';
+import { saveConfig, getConfigPath, loadConfig, generateDefaultConfig, setMemoryRemote } from '../config.js';
 
 /**
  * Where config.json lives, against the real filesystem.
@@ -66,6 +66,27 @@ describe('config path resolution', () => {
     // would follow whatever directory the process happened to start in.
     process.env.HITL_HOME = '';
     expect(() => getConfigPath()).toThrow(/HITL_HOME/);
+  });
+
+  it('turns memory sync between machines on and off, keeping keys it does not know', () => {
+    process.env.HITL_HOME = root;
+    const file = path.join(root, 'config.json');
+    writeFileSync(file, JSON.stringify({ topicId: 't', encryptionKey: 'ab'.repeat(32), laterSetting: 7 }));
+    const read = () => JSON.parse(readFileSync(file, 'utf-8')) as Record<string, unknown>;
+
+    setMemoryRemote(true);
+    expect(read()).toEqual({ topicId: 't', encryptionKey: 'ab'.repeat(32), laterSetting: 7, memoryRemote: true });
+    expect(loadConfig().memoryRemote).toBe(true);
+
+    setMemoryRemote(false);
+    expect(read()).toEqual({ topicId: 't', encryptionKey: 'ab'.repeat(32), laterSetting: 7 });
+  });
+
+  it('will not send memory to other machines without an encryption key', () => {
+    process.env.HITL_HOME = root;
+    writeFileSync(path.join(root, 'config.json'), JSON.stringify({ topicId: 't' }));
+    expect(() => setMemoryRemote(true)).toThrow(/encryptionKey/);
+    expect(loadConfig().memoryRemote).toBeUndefined();
   });
 
   it('falls back to the home directory when HITL_HOME is unset', () => {

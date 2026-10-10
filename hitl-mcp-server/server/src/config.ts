@@ -104,6 +104,21 @@ export function saveConfig(config: HitlConfig): void {
 }
 
 /**
+ * Turn memory sync with other machines on or off. Memory only leaves a
+ * machine encrypted, so turning it on needs an encryptionKey. Edits the file
+ * as written, so keys this version does not know survive.
+ */
+export function setMemoryRemote(on: boolean): void {
+  if (on && !loadConfig().encryptionKey) {
+    throw new Error('Memory only leaves this machine encrypted: add an encryptionKey to the HITL config first.');
+  }
+  const raw = JSON.parse(readFileSync(configFile(), 'utf-8')) as Record<string, unknown>;
+  if (on) raw.memoryRemote = true;
+  else delete raw.memoryRemote;
+  saveConfig(raw as unknown as HitlConfig);
+}
+
+/**
  * Get the path to the config file.
  */
 export function getConfigPath(): string {

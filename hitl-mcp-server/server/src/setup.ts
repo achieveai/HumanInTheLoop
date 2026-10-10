@@ -2,7 +2,7 @@ import { existsSync, chmodSync, accessSync, constants } from 'fs';
 import { execSync, spawn } from 'child_process';
 import { homedir, arch } from 'os';
 import path from 'path';
-import { saveConfig, generateDefaultConfig, getConfigPath } from './config.js';
+import { saveConfig, generateDefaultConfig, getConfigPath, setMemoryRemote } from './config.js';
 import { detectAutoBackgroundStatus, buildAutoBackgroundRemediationText } from './host-settings.js';
 
 /** Result of a single setup step. */
@@ -192,7 +192,7 @@ function buildNotFoundMessage(serverDir: string): string {
 
 /**
  * Perform the full HITL client setup:
- *   1. Ensure ~/.hitl/config.json exists
+ *   1. Ensure ~/.hitl/config.json exists, and turn memory sync between machines on or off when asked
  *   2. Non-fatal diagnostic: warn if the auto-background env guard isn't active
  *   3. Check if the client process is running
  *   4. Find and launch the client binary if needed
@@ -201,7 +201,7 @@ function buildNotFoundMessage(serverDir: string): string {
  */
 export async function performSetup(
   serverDir: string,
-  options: { autoLaunchClient?: boolean } = {}
+  options: { autoLaunchClient?: boolean; memoryRemote?: boolean } = {}
 ): Promise<SetupResult> {
   const steps: SetupStepResult[] = [];
   let overallSuccess = true;
@@ -221,6 +221,27 @@ export async function performSetup(
         step: 'config',
         status: 'error',
         message: `Failed to create config: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  // Lets an agent turn memory sync between machines on or off, without the `hitl` CLI.
+  if (options.memoryRemote !== undefined) {
+    try {
+      setMemoryRemote(options.memoryRemote);
+      steps.push({
+        step: 'memory-remote',
+        status: 'ok',
+        message: options.memoryRemote
+          ? 'Memory syncs with your other machines, encrypted. Turn it on on each machine, then restart HITL sessions.'
+          : 'Memory stays on this machine. Restart HITL sessions to apply.',
+      });
+    } catch (error) {
+      overallSuccess = false;
+      steps.push({
+        step: 'memory-remote',
+        status: 'error',
+        message: error instanceof Error ? error.message : String(error),
       });
     }
   }

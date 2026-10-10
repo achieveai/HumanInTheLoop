@@ -2,7 +2,7 @@
 
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
-import { loadConfig, saveConfig, generateDefaultConfig, getConfigPath } from './config.js';
+import { loadConfig, saveConfig, generateDefaultConfig, getConfigPath, setMemoryRemote } from './config.js';
 import { findClientBinary, launchClient } from './setup.js';
 import { applyAutoBackgroundSetting } from './host-settings.js';
 import { runStopHook } from './handoff-hook.js';
@@ -141,14 +141,13 @@ async function cmdMemory(args: string[]) {
 
 /** `hitl memory remote [on|off]`: turn syncing with other machines on or off, or show it. */
 function cmdMemoryRemote(setting: string | undefined) {
-  const config = loadConfig();
   if (setting === 'on' || setting === 'off') {
-    if (setting === 'on' && !config.encryptionKey) {
-      console.error('Memory only leaves this machine encrypted: add an encryptionKey to the HITL config first.');
+    try {
+      setMemoryRemote(setting === 'on');
+    } catch (err) {
+      console.error((err as Error).message);
       process.exit(1);
     }
-    const { memoryRemote: _, ...rest } = config;
-    saveConfig(setting === 'on' ? { ...rest, memoryRemote: true } : rest);
   } else if (setting !== undefined) {
     console.error(`Unknown setting: ${setting}. Use on or off.`);
     process.exit(1);

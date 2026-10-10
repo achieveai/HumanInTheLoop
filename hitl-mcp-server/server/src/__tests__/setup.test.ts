@@ -37,11 +37,13 @@ jest.unstable_mockModule('os', () => ({
 const mockGetConfigPath = jest.fn<() => string>();
 const mockGenerateDefaultConfig = jest.fn<() => Record<string, unknown>>();
 const mockSaveConfig = jest.fn<(config: unknown) => void>();
+const mockSetMemoryRemote = jest.fn<(on: boolean) => void>();
 jest.unstable_mockModule('../config.js', () => ({
   getConfigPath: mockGetConfigPath,
   generateDefaultConfig: mockGenerateDefaultConfig,
   saveConfig: mockSaveConfig,
   loadConfig: jest.fn(),
+  setMemoryRemote: mockSetMemoryRemote,
 }));
 
 // host-settings
@@ -246,6 +248,31 @@ describe('setup', () => {
       expect(mockExecSync).not.toHaveBeenCalled();
       expect(mockAccessSync).not.toHaveBeenCalled();
       expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('turns memory sync between machines on only when asked', async () => {
+      mockExistsSync.mockReturnValue(true);
+
+      const plain = await performSetup('/mock/server/dist', { autoLaunchClient: false });
+      expect(mockSetMemoryRemote).not.toHaveBeenCalled();
+      expect(plain.steps.find((s) => s.step === 'memory-remote')).toBeUndefined();
+
+      const result = await performSetup('/mock/server/dist', { autoLaunchClient: false, memoryRemote: true });
+      expect(mockSetMemoryRemote).toHaveBeenCalledWith(true);
+      expect(result.success).toBe(true);
+      expect(result.steps.find((s) => s.step === 'memory-remote')?.status).toBe('ok');
+    });
+
+    it('fails setup when memory sync cannot be turned on', async () => {
+      mockExistsSync.mockReturnValue(true);
+      mockSetMemoryRemote.mockImplementation(() => { throw new Error('add an encryptionKey first'); });
+
+      const result = await performSetup('/mock/server/dist', { autoLaunchClient: false, memoryRemote: true });
+
+      expect(result.success).toBe(false);
+      expect(result.steps.find((s) => s.step === 'memory-remote')).toEqual({
+        step: 'memory-remote', status: 'error', message: 'add an encryptionKey first',
+      });
     });
 
     it('reports config ok and client already running', async () => {
