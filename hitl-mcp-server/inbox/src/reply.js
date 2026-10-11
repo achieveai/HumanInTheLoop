@@ -303,6 +303,10 @@ export function createReplyActions({ invoke }) {
 
         onDismissMany: dismissMany,
 
+        /** Send text to the session behind `row`. Returns the message's id. */
+        onMessageAgent: (row, text) =>
+            invoke('send_agent_message', { sessionTag: row.sessionTag, text }),
+
         onRestoreMany: restoreMany,
 
         onRestore: row => {

@@ -69,6 +69,15 @@ export function resolveProjectKey(cwd: string, repo: RepoContext | null): string
   return process.env.CLAUDE_PROJECT_DIR ?? repo?.remoteUrl ?? cwd;
 }
 
+/**
+ * A session's address for messages from the human: the head of a hash of its
+ * raw id. Hooks get the raw id on stdin and the MCP server from its environment
+ * or `_meta`, so both derive the same tag without the raw id leaving the machine.
+ */
+export function sessionTag(rawSessionId: string): string {
+  return createHash('sha256').update(`hitl-session:${rawSessionId}`).digest('hex').slice(0, 12);
+}
+
 /** Last two `/`-joined path segments of `cwd`, tolerating either path separator. Never absolute (F-9). */
 function lastTwoSegments(cwd: string): string {
   const segments = cwd.split(/[\\/]/).filter(Boolean);
@@ -128,7 +137,9 @@ export function resolveSenderIdentity(
   sessionResolver: SessionNameResolver = defaultSessionNameResolver
 ): SenderIdentity {
   const sessionName = sessionResolver();
-  if (sessionName !== null) return { label: composeSessionLabel(cwd, sessionName), source: 'session' };
+  if (sessionName !== null) {
+    return { label: composeSessionLabel(cwd, sessionName), source: 'session', sessionTag: sessionTag(sessionName) };
+  }
 
   if (isLinkedWorktree(cwd)) {
     const branch = detectRepoContext(cwd)?.branch;

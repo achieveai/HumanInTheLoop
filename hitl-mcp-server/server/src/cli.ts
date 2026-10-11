@@ -6,6 +6,9 @@ import { loadConfig, saveConfig, generateDefaultConfig, getConfigPath, setMemory
 import { findClientBinary, launchClient } from './setup.js';
 import { applyAutoBackgroundSetting } from './host-settings.js';
 import { runStopHook } from './handoff-hook.js';
+import { releaseWaiterSlot, runMessagesHook, waitForMessages, hookSessionId, type HookResult } from './agent-hook.js';
+import { sendAgentMessage } from './agent-messages.js';
+import { sessionTag } from './identity.js';
 import { runSessionStartHook, syncFromCwd } from './memory/hook.js';
 import { importClaudeMemory } from './memory/import.js';
 import type { ReplicaHost } from './memory/sync.js';
@@ -26,6 +29,10 @@ Usage:
   hitl hook stop           Claude Code Stop hook: hand finished work to the Inbox
   hitl hook session-start --host <claude|codex|copilot>
                            Sync this repo's shared memory into the session
+  hitl hook messages --host <claude|codex|copilot> --event <hook event|wait>
+                           Hand the human's Inbox messages to this session
+  hitl send <session-tag> <text...>
+                           Send a message to one agent session
   hitl memory sync [--host <h>] [--cwd <dir>]
                            Sync the shared memory of the repo in <dir>
   hitl memory import [--dry-run]
@@ -54,6 +61,8 @@ async function main() {
       return cmdHook(args.slice(1));
     case 'memory':
       return cmdMemory(args.slice(1));
+    case 'send':
+      return cmdSend(args.slice(1));
     case 'help':
     case '--help':
     case '-h':
@@ -102,8 +111,12 @@ async function cmdHook(args: string[]) {
     if (output) process.stdout.write(output);
     return;
   }
+  if (args[0] === 'messages') {
+    finishHook(await messagesHook(stdin, hostFlag(args, 'claude')!, flag(args, 'event') ?? ''));
+    return;
+  }
   if (args[0] !== 'stop') {
-    console.error(`Unknown hook: ${args[0] ?? '(none)'}. Supported: stop, session-start`);
+    console.error(`Unknown hook: ${args[0] ?? '(none)'}. Supported: stop, session-start, messages`);
     process.exit(1);
   }
   const output = runStopHook(stdin);
@@ -114,6 +127,46 @@ async function cmdHook(args: string[]) {
     if (cwd) await withinMs(syncFromCwd(cwd, 'claude').catch(() => null), 5000);
   } catch {
     // Memory sync never changes the Stop decision.
+  }
+}
+
+/** `hitl hook messages`. Never fails the host's hook: no config means nothing to deliver. */
+async function messagesHook(stdin: string, host: ReplicaHost, event: string): Promise<HookResult> {
+  if (event === 'SessionEnd') {
+    const id = hookSessionId(stdin);
+    if (id) releaseWaiterSlot(sessionTag(id));
+    return { exitCode: 0 };
+  }
+  let config;
+  try {
+    config = loadConfig();
+  } catch {
+    return { exitCode: 0 };
+  }
+  if (event === 'wait') return waitForMessages(stdin, config);
+  // A hook that runs on every tool call must never hold the agent up for long.
+  return (await withinMs(runMessagesHook(stdin, host, event, config), 8000)) ?? { exitCode: 0 };
+}
+
+function finishHook(result: HookResult): void {
+  if (result.stdout) process.stdout.write(result.stdout);
+  if (result.stderr) process.stderr.write(result.stderr);
+  process.exitCode = result.exitCode;
+}
+
+/** `hitl send <tag> <text...>`: the CLI twin of Inbox's compose box. */
+async function cmdSend(args: string[]) {
+  const [to, ...words] = args;
+  if (!to || !words.length) {
+    console.error('Usage: hitl send <session-tag> <text...>');
+    process.exit(1);
+  }
+  try {
+    const sent = await sendAgentMessage(loadConfig(), to, words.join(' '));
+    console.log(`Sent ${sent.messageId} to ${to}.`);
+  } catch (err) {
+    console.error(`Could not send: ${(err as Error).message}`);
+    process.exit(1);
   }
 }
 

@@ -181,13 +181,21 @@ fn since_param(last_event_ts: Option<u64>, elapsed_secs: u64) -> String {
 /// First polls cached messages to find pending (unanswered) questions,
 /// then subscribes to live messages going forward.
 pub async fn subscribe_loop(sink: &impl NtfySink, status: &ConnectionStatus) {
-    let config = match load_config() {
+    subscribe_topic_loop(sink, status, "").await
+}
+
+/// [`subscribe_loop`] on a sibling topic, `<topicId><suffix>` — such as
+/// `-agents`, where the Inbox's messages to agents travel. Same key, same
+/// decryption, same sink; only the URL differs.
+pub async fn subscribe_topic_loop(sink: &impl NtfySink, status: &ConnectionStatus, suffix: &str) {
+    let mut config = match load_config() {
         Ok(c) => c,
         Err(e) => {
             log::error!("HITL config error: {}", e);
             return;
         }
     };
+    config.topic_id.push_str(suffix);
 
     let base_url = format!(
         "{}/{}",

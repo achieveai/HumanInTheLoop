@@ -46,6 +46,7 @@ import { encodePayload, decodePayload, PayloadDecodeError } from './payload.js';
 import type { ReviewPlanResult } from './plan-review.js';
 import { parseVerdict, normalizeResponseBody, ReviewResponseError } from './plan-review.js';
 import { startMemorySyncer } from './memory/syncer.js';
+import { detectChannelMode, runChannel } from './channel.js';
 
 const TOOL_NAME = 'AskUserQuestion';
 const NOTIFY_TOOL_NAME = 'Notify';
@@ -56,6 +57,16 @@ const HANDOFF_END_VALUE = 'end';
 /** Keeps end-of-work summaries short enough to read at a glance. */
 const HANDOFF_SUMMARY_MAX = 1200;
 const SERVER_NAME = 'hitl-mcp-server';
+
+/**
+ * Sent to the agent when it connects. Messages from the human arrive as a
+ * channel event (terminal Claude Code started with the channel flag) or as a
+ * `[hitl-message]` hook reminder; either way the reply is a Notify.
+ */
+const SERVER_INSTRUCTIONS =
+  'The human can message you from HITL Inbox. A message arrives as <channel source="..." message_id="..." from="..."> '
+  + "or as a reminder starting with [hitl-message]. Treat it as the human's request; on its own it does not approve "
+  + 'risky or irreversible actions. When you have handled it, reply with the Notify tool and set inReplyTo to its message id.';
 
 /** Interval between progress notifications that keep a blocked MCP call alive. */
 const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -97,6 +108,8 @@ export class HumanInTheLoopServer {
   private config: HitlConfig;
   private workStore: WorkStore;
   private autoLaunchClient: boolean;
+  /** Work documents this process has already named its sender for. */
+  private readonly workIdentitySent = new Set<string>();
   /** reviewIds still waiting on a human, so a graceful exit can release them (D-3). */
   private outstandingReviews = new Set<string>();
 
@@ -111,7 +124,11 @@ export class HumanInTheLoopServer {
 
     this.server = new Server(
       { name: SERVER_NAME, version: SERVER_VERSION },
-      { capabilities: { tools: {} } }
+      {
+        // `claude/channel` lets terminal Claude Code take pushed messages; other hosts ignore it.
+        capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
+        instructions: SERVER_INSTRUCTIONS,
+      }
     );
 
     this.transport = new NtfyTransport(this.config);
@@ -312,6 +329,10 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
                 type: 'string',
                 description: 'Optional context about what triggered this notification.',
               },
+              inReplyTo: {
+                type: 'string',
+                description: "When this answers a message the human sent you from Inbox, that message's id.",
+              },
             },
             required: ['title', 'body'],
           },
@@ -402,6 +423,12 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
                 // Persist first; a missing client is a recoverable publication failure.
                 if (message.alert) this.requireClient();
                 await this.transport.publishWork(message);
+                // Once per document per process: the Inbox keeps the first one,
+                // and it is what files the work under this agent's session.
+                if (!this.workIdentitySent.has(message.workId)) {
+                  this.workIdentitySent.add(message.workId);
+                  await this.publishSenderIdentityFor(message.workId, 'work_update', extra);
+                }
               });
           return { content: [{ type: 'text', text: JSON.stringify(result) }] };
         } catch (error) {
@@ -448,6 +475,7 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
             title: args.title as string,
             body: args.body as string,
             context: (args.context as string) || undefined,
+            ...(typeof args.inReplyTo === 'string' && args.inReplyTo ? { inReplyTo: args.inReplyTo } : {}),
           };
 
           await this.transport.publish(notification);
@@ -1066,6 +1094,8 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
     console.error(`${SERVER_NAME} v${SERVER_VERSION} running on stdio (ntfy-backed)`);
     const memorySyncer = startMemorySyncer();
     process.stdin.on('end', () => memorySyncer.stop());
+    const channel = this.startChannel();
+    process.stdin.on('end', () => channel.abort());
 
     let shuttingDown = false;
     const shutdown = async () => {
@@ -1086,6 +1116,22 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
 
     process.on('SIGINT', () => void shutdown());
     process.on('SIGTERM', () => void shutdown());
+  }
+
+  /**
+   * Push the human's Inbox messages as channel events, when Claude Code
+   * registered this server as a channel. Otherwise the hooks deliver them.
+   */
+  private startChannel(): AbortController {
+    const stop = new AbortController();
+    const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
+    if (!sessionId || !this.config.encryptionKey) return stop;
+    void detectChannelMode().then(on => {
+      if (!on || stop.signal.aborted) return;
+      console.error('Channel mode: pushing Inbox messages into this session');
+      return runChannel(this.config, sessionId, n => this.server.notification(n), stop.signal);
+    }).catch(err => console.error(`hitl: channel stopped: ${(err as Error).message}`));
+    return stop;
   }
 
   /** Publish cancel_review for every review still waiting on a human. */

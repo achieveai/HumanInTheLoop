@@ -8,7 +8,7 @@
 //! its connection is private), and a projection that is a function of its
 //! inputs is worth more here than one query saved.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use hitl_store::{fold, Event, MessageState};
 use serde::Serialize;
@@ -43,6 +43,7 @@ fn glyph_for(msg_type: &str) -> &'static str {
         "notification" | "work_update" => "!",
         "plan_review" => "▤",
         "handoff" => "✓",
+        "agent_message" => "→",
         _ => "·",
     }
 }
@@ -54,7 +55,7 @@ fn glyph_for(msg_type: &str) -> &'static str {
 /// is nothing truthful to put in one.
 fn request_event(events: &[Event]) -> Option<&Event> {
     hitl_store::events::latest_work_event(events).or_else(|| events.iter()
-        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review" | "handoff")))
+        .find(|e| matches!(e.msg_type.as_str(), "question" | "notification" | "plan_review" | "handoff" | "agent_message")))
 }
 
 /// The one line that identifies a message (spec §7.1).
@@ -76,6 +77,15 @@ fn title_of(request: &Event) -> String {
             }
         }
         "notification" | "work_update" | "handoff" => request.field("title"),
+        // The message itself: its first line, cut like a context snippet.
+        "agent_message" => request.field("text").map(|text| {
+            let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+            let mut out: String = first.chars().take(80).collect();
+            if first.chars().count() > 80 || text.trim() != first {
+                out.push('…');
+            }
+            out
+        }),
         _ => request.field("displayPath"),
     };
     title.unwrap_or_else(|| "(untitled)".to_string())
@@ -236,6 +246,9 @@ pub struct MessageRow {
     pub content_hash: Option<String>,
     pub session_key: Option<String>,
     pub session_label: Option<String>,
+    /// Where a message to this row's session goes, once any of its messages
+    /// carried a tag. The detail pane offers a compose box only with one.
+    pub session_tag: Option<String>,
     pub project_key: String,
     pub unattributed: bool,
 }
@@ -283,6 +296,7 @@ fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
             content_hash: content_hash_of(request),
             session_key: identity.as_ref().map(|i| i.session_key.clone()),
             session_label: identity.as_ref().map(|i| i.session_label.clone()),
+            session_tag: None,
             project_key: identity
                 .as_ref()
                 .map(|i| i.project_key.clone())
@@ -293,6 +307,81 @@ fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
         last_event_at,
         identity,
     })
+}
+
+/// Every subject in the log, with messages sent from the Inbox joined to the
+/// session they went to.
+///
+/// An `agent_message` names its session only by `to`, a session tag, so it
+/// borrows the identity of a subject whose sender published that tag. Its
+/// status is the Inbox's own: `sent`, or `replied` once a notification names
+/// it in `inReplyTo`. It never reads as pending: nothing waits on you.
+fn build_subjects(events: &[Event], now: u64) -> Vec<Subject> {
+    let mut subjects: Vec<Subject> = group_by_subject(events)
+        .values()
+        .filter_map(|e| build_subject(e, now))
+        .collect();
+
+    // Newest tag per session, and newest identity per tag.
+    let mut tags: HashMap<String, (u64, String)> = HashMap::new();
+    let mut by_tag: HashMap<String, (u64, Identity)> = HashMap::new();
+    for subject in &subjects {
+        let Some(id) = &subject.identity else { continue };
+        let Some(tag) = &id.session_tag else { continue };
+        let at = subject.last_event_at;
+        let newest = tags.entry(id.session_key.clone()).or_insert((0, tag.clone()));
+        if at >= newest.0 {
+            *newest = (at, tag.clone());
+        }
+        let newest = by_tag.entry(tag.clone()).or_insert((0, id.clone()));
+        if at >= newest.0 {
+            *newest = (at, id.clone());
+        }
+    }
+
+    // The first reply to each message, in ntfy order.
+    let mut replies: HashMap<String, &Event> = HashMap::new();
+    for event in events.iter().filter(|e| e.msg_type == "notification") {
+        let Some(to) = event.field("inReplyTo") else { continue };
+        let first = replies.entry(to).or_insert(event);
+        if (event.ntfy_time, &event.ntfy_id) < (first.ntfy_time, &first.ntfy_id) {
+            *first = event;
+        }
+    }
+
+    for subject in &mut subjects {
+        if subject.row.msg_type == "agent_message" {
+            let to = events
+                .iter()
+                .find(|e| e.message_id == subject.row.message_id && e.msg_type == "agent_message")
+                .and_then(|e| e.field("to"));
+            if let Some((_, id)) = to.as_ref().and_then(|tag| by_tag.get(tag)) {
+                subject.row.session_key = Some(id.session_key.clone());
+                subject.row.session_label = Some(id.session_label.clone());
+                subject.row.project_key = id.project_key.clone();
+                subject.row.unattributed = false;
+                subject.identity = Some(id.clone());
+            }
+            let status = match replies.get(&subject.row.message_id) {
+                Some(reply) => {
+                    subject.row.responded_at = Some(reply.ntfy_time);
+                    subject.row.response_id = Some(reply.message_id.clone());
+                    subject.last_event_at = subject.last_event_at.max(reply.ntfy_time);
+                    "replied"
+                }
+                None => "sent",
+            };
+            subject.row.status = status.to_string();
+            subject.folded_status = status.to_string();
+        }
+        subject.row.session_tag = subject
+            .row
+            .session_key
+            .as_ref()
+            .and_then(|key| tags.get(key))
+            .map(|(_, tag)| tag.clone());
+    }
+    subjects
 }
 
 /// Group a flat event log by the subject each event is about.
@@ -331,6 +420,8 @@ pub struct SessionRow {
     pub last_event_at: u64,
     /// Shown by default: active within [`RECENT_WINDOW_SECS`] or waiting on you.
     pub recent: bool,
+    /// Where a message to this session goes; see [`MessageRow::session_tag`].
+    pub session_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -400,10 +491,7 @@ impl Counters {
 
 /// Build the agent tree (spec §6).
 pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
-    let subjects: Vec<Subject> = group_by_subject(events)
-        .values()
-        .filter_map(|e| build_subject(e, now))
-        .collect();
+    let subjects = build_subjects(events, now);
 
     // project -> session -> counters. `""` is the session slot of the
     // Unattributed node, which never renders a session row.
@@ -411,10 +499,14 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
     // The newest label per session: a session that switched branch shows the
     // branch it is on now.
     let mut labels: BTreeMap<String, (u64, String)> = BTreeMap::new();
+    let mut session_tags: BTreeMap<String, String> = BTreeMap::new();
     let mut total = Counters::default();
 
     for subject in &subjects {
         total.add(subject);
+        if let (Some(key), Some(tag)) = (&subject.row.session_key, &subject.row.session_tag) {
+            session_tags.insert(key.clone(), tag.clone());
+        }
         let (project, session) = match &subject.identity {
             Some(id) => {
                 let newest = labels.entry(id.session_key.clone()).or_insert((0, String::new()));
@@ -455,6 +547,7 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
                         .map(|(_, label)| label.clone())
                         .unwrap_or_else(|| session_key.clone()),
                     scope_key: format!("session:{session_key}"),
+                    session_tag: session_tags.remove(&session_key),
                     session_key,
                     project_key: project_key.clone(),
                     state: state.as_str(),
@@ -641,9 +734,8 @@ pub struct MessageList {
 pub fn build_list(events: &[Event], scope_key: Option<&str>, filter: Option<&str>, now: u64) -> MessageList {
     let scope = parse_scope(scope_key);
 
-    let mut rows: Vec<MessageRow> = group_by_subject(events)
-        .values()
-        .filter_map(|e| build_subject(e, now))
+    let mut rows: Vec<MessageRow> = build_subjects(events, now)
+        .into_iter()
         // "All agents" is the default view, so it keeps to recent work. A
         // project or session picked from the tree shows its whole history.
         .filter(|subject| scope != Scope::All || subject.is_recent(now))
@@ -1672,6 +1764,7 @@ mod tests {
                 "recent",
                 "scopeKey",
                 "sessionKey",
+                "sessionTag",
                 "state"
             ]
         );
@@ -1707,6 +1800,7 @@ mod tests {
                 "responseId",
                 "sessionKey",
                 "sessionLabel",
+                "sessionTag",
                 "status",
                 "title",
                 "unattributed",
@@ -1779,5 +1873,95 @@ mod tests {
             build_list(&events, Some(tree.scope_key), Some("all"), NOW).messages.len() as u32,
             tree.total_messages
         );
+    }
+
+    fn tagged_identity(id: &str, at: u64, label: &str, tag: &str) -> Event {
+        ev(
+            &format!("ntfy-{id}-ident"),
+            at,
+            &format!(
+                r#"{{"type":"sender_identity","forMessageId":"{id}","forType":"question",
+                     "sender":{{"label":"{label}","source":"session","sessionTag":"{tag}"}}}}"#
+            ),
+        )
+    }
+
+    fn sent(id: &str, at: u64, to: &str, text: &str) -> Event {
+        ev(
+            &format!("ntfy-{id}"),
+            at,
+            &format!(r#"{{"type":"agent_message","messageId":"{id}","to":"{to}","text":"{text}","from":"Kay9"}}"#),
+        )
+    }
+
+    fn reply_to(id: &str, at: u64, in_reply_to: &str) -> Event {
+        ev(
+            &format!("ntfy-{id}"),
+            at,
+            &format!(r#"{{"type":"notification","messageId":"{id}","title":"Done","inReplyTo":"{in_reply_to}"}}"#),
+        )
+    }
+
+    const TAG: &str = "0123456789ab";
+
+    #[test]
+    fn a_message_to_an_agent_sits_under_its_session_as_sent() {
+        let events = vec![
+            question("q-1", NOW - HOUR, "Hitl_MCP"),
+            tagged_identity("q-1", NOW - HOUR, "Hitl_MCP · master · a3f2", TAG),
+            sent("m-1", NOW - MINUTE, TAG, r"check the build\nthen report"),
+        ];
+        let list = build_list(&events, Some("session:Hitl_MCP · a3f2"), Some("all"), NOW);
+        let row = list.messages.iter().find(|r| r.message_id == "m-1").expect("sent row");
+        assert_eq!(row.msg_type, "agent_message");
+        assert_eq!(row.status, "sent");
+        assert_eq!(row.title, "check the build…");
+        assert_eq!(row.session_tag.as_deref(), Some(TAG));
+        assert!(!Filter::NeedsYou.admits(row));
+
+        let tree = build_tree(&events, NOW);
+        let session = &tree.projects[0].sessions[0];
+        assert_eq!(session.session_tag.as_deref(), Some(TAG));
+        // Only the question waits on you; the message you sent does not.
+        assert_eq!(session.pending_count, 1);
+    }
+
+    #[test]
+    fn a_reply_naming_the_message_turns_it_replied() {
+        let events = vec![
+            question("q-1", NOW - HOUR, "Hitl_MCP"),
+            tagged_identity("q-1", NOW - HOUR, "Hitl_MCP · master · a3f2", TAG),
+            sent("m-1", NOW - 2 * MINUTE, TAG, "hi"),
+            reply_to("n-1", NOW - MINUTE, "m-1"),
+        ];
+        let row = build_list(&events, None, Some("all"), NOW)
+            .messages
+            .into_iter()
+            .find(|r| r.message_id == "m-1")
+            .unwrap();
+        assert_eq!(row.status, "replied");
+        assert_eq!(row.response_id.as_deref(), Some("n-1"));
+    }
+
+    #[test]
+    fn a_work_update_with_a_sender_sits_under_its_session_with_the_tag() {
+        let work = serde_json::json!({"type":"work_update","messageId":"wu-1","timestamp":1,"workId":"w-1","revision":1,"title":"Build","body":"Progress","alert":false,"document":{"workId":"w-1","title":"Build","goal":"Goal","rootTaskId":"root","revision":1,"updatedAt":1,"changes":[],"tasks":[{"taskId":"root","parentTaskId":null,"revision":1,"owner":"lead","reportedBy":"lead","status":"in_progress","completed":[],"learnings":[],"current":null,"remaining":[],"blockers":[],"reportedAt":1}]}});
+        let events = vec![
+            ev("ntfy-wu-1", NOW - MINUTE, &work.to_string()),
+            tagged_identity("w-1", NOW - MINUTE, "Hitl_MCP · master · a3f2", TAG),
+        ];
+        let list = build_list(&events, Some("session:Hitl_MCP · a3f2"), Some("all"), NOW);
+        let row = list.messages.iter().find(|r| r.title == "Build").expect("work row in the session");
+        assert!(!row.unattributed);
+        assert_eq!(row.session_tag.as_deref(), Some(TAG));
+        assert_eq!(build_tree(&events, NOW).projects[0].sessions[0].session_tag.as_deref(), Some(TAG));
+    }
+
+    #[test]
+    fn a_message_to_an_unknown_tag_is_unattributed() {
+        let events = vec![sent("m-1", NOW - MINUTE, TAG, "hi")];
+        let row = &build_list(&events, None, Some("all"), NOW).messages[0];
+        assert!(row.unattributed);
+        assert_eq!(row.session_tag, None);
     }
 }

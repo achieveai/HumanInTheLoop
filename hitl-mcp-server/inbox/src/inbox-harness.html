@@ -66,7 +66,7 @@
                     //
                     // `window.__REPLIES` lets a test pin the id (to match a
                     // fixture row's `responseId`) or make a publish fail.
-                    if (cmd === 'submit_answer' || cmd === 'dismiss_notification') {
+                    if (cmd === 'submit_answer' || cmd === 'dismiss_notification' || cmd === 'send_agent_message') {
                         return reply(cmd, `resp-${window.__INVOCATIONS.length}`);
                     }
                     if (cmd === 'submit_plan_review') {
@@ -200,6 +200,7 @@
                 <button class="dismiss-bulk-status" type="button" aria-label="Dismiss Undo">Dismiss</button>
             </div>
             <div class="message-list" id="message-list"></div>
+            <div class="list-compose" id="list-compose" aria-label="Message the picked agent"></div>
         </section>
         <section class="pane pane-detail" id="pane-detail" aria-label="Detail"></section>
         <button class="pane-handle" id="pane-handle-1" aria-label="Resize agents" role="separator"

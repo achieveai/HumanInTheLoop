@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use hitl_store::{Event, Store};
 use hitl_transport::ntfy::review::{AckWaiters, OutstandingReviews};
-use hitl_transport::ntfy::subscribe::subscribe_loop;
+use hitl_transport::ntfy::subscribe::{subscribe_loop, subscribe_topic_loop};
 use hitl_transport::status::ConnectionStatus;
 use tauri::{Emitter, Manager};
 
@@ -262,7 +262,13 @@ fn start_services(
                 }
             }),
         );
-        subscribe_loop(&sink, &ConnectionStatus::default()).await;
+        // The second loop records the messages you send to agents
+        // (`<topicId>-agents`), so they show as rows and can turn `replied`.
+        let (main, agents) = (ConnectionStatus::default(), ConnectionStatus::default());
+        tokio::join!(
+            subscribe_loop(&sink, &main),
+            subscribe_topic_loop(&sink, &agents, reply::AGENTS_TOPIC_SUFFIX),
+        );
     });
 }
 
@@ -373,6 +379,7 @@ pub fn run() {
             get_message,
             get_body,
             reply::submit_answer,
+            reply::send_agent_message,
             reply::dismiss_notification,
             reply::dismiss_notifications,
             reply::restore_notifications,

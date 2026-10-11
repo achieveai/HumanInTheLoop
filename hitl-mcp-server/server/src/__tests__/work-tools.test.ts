@@ -5,7 +5,7 @@ import path from 'path';
 import { HumanInTheLoopServer } from '../mcp-server.js';
 import { decrypt } from '../crypto.js';
 
-test('MCP exposes tools, publishes encrypted full snapshot and reads durable state', async () => {
+test('MCP exposes tools, publishes encrypted full snapshot with its sender and reads durable state', async () => {
   const previousHome = process.env.HITL_HOME;
   const home = mkdtempSync(path.join(tmpdir(), 'hitl-work-tools-'));
   process.env.HITL_HOME = home;
@@ -45,10 +45,15 @@ test('MCP exposes tools, publishes encrypted full snapshot and reads durable sta
     expect(result).toMatchObject({ saved: true, published: true });
     const message = JSON.parse(decrypt(bodies[0], key));
     expect(message).toMatchObject({ type: 'work_update', alert: false, document: result.document });
+    // The sender is named once per document, so the Inbox files it under this agent.
+    expect(JSON.parse(decrypt(bodies[1], key))).toMatchObject({ type: 'sender_identity', forMessageId: 'w', forType: 'work_update', sender: { label: expect.any(String) } });
     expect(await call('ReadWork', { workId: 'w' })).toEqual({document: result.document});
+    await call('UpdateWork', { workId: 'w', updateId: 'u2', expectedRevision: result.document.revision, task: { taskId: 'root', parentTaskId: null, owner: 'agent', reportedBy: 'agent', status: 'in_progress', completed: [], learnings: [], current: null, remaining: [], blockers: [] } });
+    expect(bodies.slice(2).map(b => JSON.parse(decrypt(b, key)).type)).toEqual(['work_update']);
     await expect(call('UpdateWork', { workId: 'w' })).rejects.toThrow(/updateId/);
     bodies.length = 0;
     await call('UpdateWork', { workId: 'large', updateId: 'large', expectedRevision: 0, title: 'Large', goal: 'Goal', summary: 'x'.repeat(3900), task: { taskId: 'root', parentTaskId: null, owner: 'agent', reportedBy: 'agent', status: 'pending', completed: [], learnings: [], current: null, remaining: [], blockers: [] } });
+    expect(JSON.parse(decrypt(bodies.pop()!, key))).toMatchObject({ type: 'sender_identity', forMessageId: 'large' });
     expect(bodies.length).toBeGreaterThan(1);
     const chunks = bodies.map(b => JSON.parse(b));
     expect(chunks.every(c => c.type === 'chunk')).toBe(true);

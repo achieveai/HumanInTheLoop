@@ -242,6 +242,65 @@ pub async fn submit_answer(
     Ok(response_id)
 }
 
+/// The topic suffix messages to agents travel on: `<topicId>-agents`, kept off
+/// the main topic so a session's listener reads only these.
+pub const AGENTS_TOPIC_SUFFIX: &str = "-agents";
+
+/// The MCP server's single-message limit (`CHUNK_THRESHOLD_BYTES`). Agent
+/// messages are never chunked, so a longer one is refused here rather than
+/// published and dropped.
+const AGENT_MESSAGE_MAX_BYTES: usize = 3900;
+
+fn is_session_tag(tag: &str) -> bool {
+    tag.len() == 12 && tag.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The sealed `agent_message` for `to`, ready to publish as-is.
+///
+/// Always encrypted: the MCP server ignores a plaintext one, because anyone who
+/// knows the topic could otherwise talk to your agents.
+fn seal_agent_message(config: &HitlConfig, message_id: &str, to: &str, text: &str, now: u64) -> Result<String, String> {
+    let key = config
+        .encryption_key
+        .as_deref()
+        .filter(|key| !key.trim().is_empty())
+        .ok_or("Messages to agents are always encrypted: add an encryption key to the HITL config first.")?;
+    if !is_session_tag(to) {
+        return Err("This session cannot take messages yet: its agent needs a HITL server that sends a session tag.".into());
+    }
+    if text.trim().is_empty() {
+        return Err("The message is empty.".into());
+    }
+    let body = serde_json::json!({
+        "type": "agent_message",
+        "messageId": message_id,
+        "timestamp": now,
+        "to": to,
+        "text": text,
+        "from": config.device_name,
+    });
+    let sealed = hitl_transport::crypto::encrypt(&body.to_string(), key)?;
+    if sealed.len() > AGENT_MESSAGE_MAX_BYTES {
+        return Err("The message is too long. Keep it under about 2,000 characters.".into());
+    }
+    Ok(sealed)
+}
+
+/// Send the human's message to one agent session. Returns its `messageId`,
+/// which the agent quotes as `inReplyTo` when it answers.
+#[tauri::command]
+pub async fn send_agent_message(session_tag: String, text: String) -> Result<String, String> {
+    let mut config = load_config().map_err(|e| e.to_string())?;
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let sealed = seal_agent_message(&config, &message_id, &session_tag, &text, now_millis())?;
+    config.topic_id.push_str(AGENTS_TOPIC_SUFFIX);
+    // Already sealed, so published as-is.
+    hitl_transport::ntfy::publish::publish_message(&config, &sealed, false)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(message_id)
+}
+
 /// Dismiss a notification (spec §8.1). Returns the dismissal's `messageId`.
 ///
 /// The row is not deleted anywhere. Every device folds this event into status
@@ -540,6 +599,31 @@ mod tests {
             config,
             client: reqwest::Client::new(),
         }
+    }
+
+    const AGENT_KEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TAG: &str = "0123456789ab";
+
+    #[test]
+    fn an_agent_message_is_sealed_with_the_key_in_the_server_shape() {
+        let sealed = seal_agent_message(&config(Some(AGENT_KEY)), "m-1", TAG, "check the build", 7).unwrap();
+        let envelope: serde_json::Value = serde_json::from_str(&sealed).unwrap();
+        let opened: serde_json::Value =
+            serde_json::from_str(&hitl_transport::crypto::decrypt_value(&envelope, AGENT_KEY).unwrap()).unwrap();
+        assert_eq!(opened["type"], "agent_message");
+        assert_eq!(opened["messageId"], "m-1");
+        assert_eq!(opened["to"], TAG);
+        assert_eq!(opened["text"], "check the build");
+        assert_eq!(opened["from"], "test laptop");
+    }
+
+    #[test]
+    fn an_agent_message_needs_a_key_a_tag_text_and_one_ntfy_message() {
+        let keyed = config(Some(AGENT_KEY));
+        assert!(seal_agent_message(&config(None), "m", TAG, "hi", 0).unwrap_err().contains("encrypted"));
+        assert!(seal_agent_message(&keyed, "m", "Hitl_MCP · a3f2", "hi", 0).unwrap_err().contains("session tag"));
+        assert!(seal_agent_message(&keyed, "m", TAG, "  ", 0).unwrap_err().contains("empty"));
+        assert!(seal_agent_message(&keyed, "m", TAG, &"x".repeat(3000), 0).unwrap_err().contains("too long"));
     }
 
     #[test]

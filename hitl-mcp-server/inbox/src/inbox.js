@@ -15,6 +15,7 @@ import {
     renderTypeFilterBar,
     TYPES,
 } from './pane-list.js';
+import { listComposer } from './render-agent-message.js';
 import { createReplyActions } from './reply.js';
 import { createConnectionSettings } from './settings.js';
 
@@ -39,6 +40,7 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         actionErrorDialog,
         listActions,
         bulkStatus,
+        listCompose,
     } = elements;
 
     /** Pending local settlements layered over the latest authoritative rows. */
@@ -108,6 +110,8 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         selectedStatus: null,
     };
     let latestList = null;
+    /** Who the box under the list is addressed to; it is rebuilt only when that changes. */
+    let composeTarget;
     let visibleMessages = [];
 
     function statusAdmits(message, filter) {
@@ -628,6 +632,7 @@ export function createInbox({ invoke, elements, onError = console.error, actions
             selectedScope: state.scopeKey,
             onSelect: selectScope,
         });
+        renderListCompose(tree);
 
         const list = await invoke('list_messages', {
             sessionKey: state.scopeKey,
@@ -722,6 +727,30 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         return promise.catch(onError);
     }
 
+    /**
+     * The box under the list messages the agent picked in the tree. Rebuilt
+     * only when the target moves, so a refresh never eats half-typed text.
+     */
+    function renderListCompose(tree) {
+        if (!listCompose) return;
+        const session = tree.projects?.flatMap(project => project.sessions ?? [])
+            .find(row => row.scopeKey === state.scopeKey) ?? null;
+        const target = session ? `${session.scopeKey}|${session.sessionTag ?? ''}` : '';
+        if (target === composeTarget) return;
+        composeTarget = target;
+        listCompose.replaceChildren(listComposer(session, actions.onMessageAgent && sendFromList));
+    }
+
+    /**
+     * A message you send never needs you, so under `Needs you` — the usual
+     * default for an agent — it would vanish. Show the whole thread instead.
+     */
+    async function sendFromList(row, text) {
+        const id = await actions.onMessageAgent(row, text);
+        if (state.filter !== 'all') selectFilter('all');
+        return id;
+    }
+
     function selectScope(scopeKey) {
         state.scopeKey = scopeKey;
         // A different agent is a different question about what needs you, so
@@ -813,6 +842,7 @@ async function main() {
             listActions: document.getElementById('list-actions'),
             bulkStatus: document.getElementById('bulk-status'),
             messageList: document.getElementById('message-list'),
+            listCompose: document.getElementById('list-compose'),
             detail: document.getElementById('pane-detail'),
             actionErrorDialog: document.getElementById('action-error-dialog'),
         },

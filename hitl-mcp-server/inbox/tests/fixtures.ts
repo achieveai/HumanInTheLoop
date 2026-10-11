@@ -49,6 +49,8 @@ export interface MessageRow {
   contentHash: string | null;
   sessionKey: string | null;
   sessionLabel: string | null;
+  /** Where a message to this row's session goes; absent on older senders. */
+  sessionTag?: string | null;
   projectKey: string;
   unattributed: boolean;
 }
@@ -64,6 +66,7 @@ export interface SessionRow {
   messageCount: number;
   lastEventAt: number;
   recent: boolean;
+  sessionTag?: string;
 }
 
 export interface ProjectNode {

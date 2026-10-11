@@ -452,6 +452,16 @@ body {
     color: #822727;
 }
 
+.status-pill--sent {
+    background: #e9d8fd;
+    color: #553c9a;
+}
+
+.status-pill--replied {
+    background: #c6f6d5;
+    color: #22543d;
+}
+
 .status-pill-verdict {
     font-weight: 400;
     opacity: 0.85;
@@ -693,6 +703,106 @@ body {
     font-size: 12px;
     margin-top: 12px;
     padding: 8px 10px;
+}
+
+/* --- message an agent --- */
+
+.agent-message-to {
+    color: #718096;
+    font-size: 12px;
+    margin: 0 0 8px;
+}
+
+.agent-message-text {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    margin-bottom: 12px;
+}
+
+.detail-compose {
+    border-top: 1px solid #e2e8f0;
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 24px 12px;
+}
+
+.detail-compose-to {
+    color: #718096;
+    font-size: 12px;
+}
+
+.detail-compose-text {
+    border: 1px solid #cbd5e0;
+    border-radius: 6px;
+    font: inherit;
+    font-size: 13px;
+    padding: 8px 10px;
+    resize: vertical;
+}
+
+.detail-compose-bar {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.detail-compose-bar .button {
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 8px 16px;
+}
+
+.detail-compose-bar .button-primary {
+    background: #4c51bf;
+    color: white;
+}
+
+.detail-compose-bar .button:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.detail-compose-status {
+    color: #718096;
+    flex: 1;
+    font-size: 12px;
+    margin: 0;
+}
+
+.detail-compose-status--error {
+    color: #c53030;
+}
+
+[data-layout='phone'] .detail-compose {
+    padding: 10px 16px 12px;
+}
+
+/* The box under the list for the agent picked in the tree. */
+.list-compose {
+    flex: 0 0 auto;
+}
+
+.list-compose .detail-compose {
+    background: #f7fafc;
+    padding: 10px 16px 12px;
+}
+
+.list-compose-hint {
+    border-top: 1px solid #e2e8f0;
+    color: #718096;
+    font-size: 12px;
+    margin: 0;
+    padding: 10px 16px;
+}
+
+.detail-compose-text:disabled {
+    background: #edf2f7;
+    cursor: not-allowed;
 }
 
 /* One transport-failure surface for every reply renderer. */

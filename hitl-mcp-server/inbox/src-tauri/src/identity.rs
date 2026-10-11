@@ -36,6 +36,9 @@ pub struct Identity {
     /// tree does not repeat the project name on every child (spec §6).
     pub session_label: String,
     pub project_key: String,
+    /// The session's address for messages from the Inbox (`sessionTag`), on
+    /// senders new enough to publish one.
+    pub session_tag: Option<String>,
 }
 
 /// The sender label carried by, or attached to, one subject's events.
@@ -72,6 +75,18 @@ pub fn sender_info(events: &[Event]) -> Option<(String, Option<String>)> {
             };
             Some((text("label")?, text("source")))
         }
+        _ => None,
+    })
+}
+
+/// The `sessionTag` a subject's sender published, if any — what a message
+/// from the Inbox is addressed to.
+pub fn sender_tag(events: &[Event]) -> Option<String> {
+    events.iter().find_map(|e| match e.msg_type.as_str() {
+        "plan_review" | "sender_identity" => e.json().get("sender")?.get("sessionTag")?
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         _ => None,
     })
 }
@@ -146,6 +161,7 @@ pub fn resolve(request: &Event, events: &[Event]) -> Option<Identity> {
         session_label: session_label_under(&label, &project_key),
         project_key,
         session_key,
+        session_tag: sender_tag(events),
     })
 }
 
@@ -202,6 +218,7 @@ mod tests {
                 session_key: "Hitl_MCP · a3f2".to_string(),
                 session_label: "master · a3f2".to_string(),
                 project_key: "Hitl_MCP".to_string(),
+                session_tag: None,
             })
         );
     }

@@ -128,6 +128,7 @@ Launch Inbox separately; `hitl client` launches the popup/tray app.
 - Read a message in the reading pane. Answer questions or mark notifications as read.
 - Use the mark-all-read action for notifications. Undo is available for bulk read changes.
 - Change the pane layout or put the reading pane beside/below the list.
+- Message an agent: click it in the agent list and type in the box under its messages (**To: <session>**). The box under an open message works too. Sent messages show under the session as **sent**, then **replied** once the agent answers. An agent on an older HITL shows the box disabled, with the reason.
 
 For reviews, select text in the formatted plan and choose **Comment on selection**, or select lines in **Source**. Comments retain raw-file line numbers, not visual wrapped-line numbers.
 
@@ -257,6 +258,19 @@ Sends a notification to all devices and **returns immediately** — it does not 
 | `title` | ✅ | Short title (e.g. "Build Complete") |
 | `body` | ✅ | Notification body text; supports markdown |
 | `context` | ❌ | What triggered this notification |
+| `inReplyTo` | ❌ | The id of a message the human sent you; marks it **replied** in Inbox |
+
+### Messages from the human
+
+You can message a running agent from Inbox or with `hitl send <session-tag> <text>`. Messages always travel encrypted on `<topicId>-agents`; plaintext ones are ignored. Each session's address is a 12-character tag derived from its session id.
+
+How the agent receives it:
+
+- **Claude Code, any app:** the hitl plugin's hooks hand it over after a tool call or at the next prompt. A background Stop hook wakes an idle session.
+- **Claude Code in a terminal, with channels:** start `claude --dangerously-load-development-channels server:hitl`. The message arrives as a channel event straight away. Set `HITL_CHANNEL=0|1` to override detection.
+- **Codex and Copilot CLI:** the same hooks deliver it after a tool call or hold the agent at its stop. They cannot wake an idle session.
+
+The agent replies with `Notify` and `inReplyTo`. A message is guidance, not approval for risky actions.
 
 ### `UpdateWork` and `ReadWork`
 
@@ -336,6 +350,8 @@ Cancellation is honoured either way: when the host cancels a request, the server
 | `hitl config set-topic <id>` | Change only the topic ID |
 | `hitl test` | Send a real test question to the configured topic |
 | `hitl client` | Launch the tray client, not Inbox |
+| `hitl send <session-tag> <text>` | Send an encrypted message to one agent session |
+| `hitl hook messages --host <h> --event <e>` | Deliver waiting messages from a hook (used by the hitl plugin) |
 | `hitl claude-code install` | Register HITL in Claude Code's user scope and adjust its global backgrounding setting |
 | `hitl help` | Show CLI help |
 

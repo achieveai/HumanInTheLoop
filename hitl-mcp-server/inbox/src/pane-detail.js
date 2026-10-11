@@ -37,6 +37,7 @@ import { renderNotification } from './render-notification.js';
 import { renderQuestion } from './render-question.js';
 import { renderHandoff } from './render-handoff.js';
 import { renderReview } from './render-review.js';
+import { composeBox, renderAgentMessage } from './render-agent-message.js';
 
 function panel(container, className, title, note) {
     container.textContent = '';
@@ -115,16 +116,20 @@ export function createDetailPane({ container, invoke, onError = console.error, a
             return;
         }
 
+        if (detail.row.msgType === 'agent_message') {
+            shown(detail.row, renderAgentMessage(container, detail));
+            return;
+        }
         if (detail.row.msgType === 'notification') {
-            remember(detail.row, renderNotification(container, detail, actions));
+            shown(detail.row, renderNotification(container, detail, actions));
             return;
         }
         if (detail.row.msgType === 'handoff') {
-            remember(detail.row, renderHandoff(container, detail, actions));
+            shown(detail.row, renderHandoff(container, detail, actions));
             return;
         }
         if (detail.row.msgType !== 'plan_review') {
-            remember(detail.row, renderQuestion(container, detail, actions));
+            shown(detail.row, renderQuestion(container, detail, actions));
             return;
         }
 
@@ -157,7 +162,14 @@ export function createDetailPane({ container, invoke, onError = console.error, a
             if (token !== generation) return;
         }
 
-        remember(detail.row, renderReview(container, detail, body, actions, draft));
+        shown(detail.row, renderReview(container, detail, body, actions, draft));
+    }
+
+    /** A renderer has painted `row`: remember it, and offer to message its session. */
+    function shown(row, controller) {
+        remember(row, controller);
+        const compose = composeBox(row, actions.onMessageAgent);
+        if (compose) container.querySelector('.detail-root')?.appendChild(compose);
     }
 
     function remember(row, controller) {

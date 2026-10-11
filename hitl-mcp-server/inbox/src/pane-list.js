@@ -31,6 +31,7 @@ export const TYPES = [
     { key: 'question', label: 'Questions' },
     { key: 'plan_review', label: 'Review plans' },
     { key: 'handoff', label: 'Handoffs' },
+    { key: 'agent_message', label: 'Sent' },
 ];
 
 /** Work shares notification transport but has its own display family. */

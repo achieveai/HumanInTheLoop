@@ -57,6 +57,8 @@ export interface SenderIdentity {
   /** Display label, e.g. "Kay9 - work-item/1-reviewplan". Never an absolute path (F-9). */
   label: string;
   source: SenderIdentitySource;
+  /** Address for messages to this session (see `sessionTag`); only on `session` identities. */
+  sessionTag?: string;
 }
 
 // -----------------------------------------------------------
@@ -158,6 +160,22 @@ export interface NotificationMessage extends BaseMessage {
   body: string;
   /** Optional context about what triggered this notification */
   context?: string;
+  /** messageId of the `agent_message` this notification answers. Absent on ordinary notifications. */
+  inReplyTo?: string;
+}
+
+/**
+ * The human's message to one agent session. Published on `<topic>-agents`,
+ * always encrypted, never chunked. Not part of any union: it never travels on
+ * the main topic.
+ */
+export interface AgentMessage extends BaseMessage {
+  type: 'agent_message';
+  /** Session tag of the recipient. */
+  to: string;
+  text: string;
+  /** Device that sent it. */
+  from: string;
 }
 
 /** Published by a client when user dismisses a notification. */
@@ -193,9 +211,9 @@ export interface RestoreNotificationMessage extends BaseMessage {
  */
 export interface SenderIdentityMessage {
   type: 'sender_identity';
-  /** messageId of the question/notification this decorates. */
+  /** messageId of the question/notification this decorates; workId for a work document. */
   forMessageId: string;
-  forType: 'question' | 'notification' | 'handoff';
+  forType: 'question' | 'notification' | 'handoff' | 'work_update';
   sender: SenderIdentity;
 }
 
