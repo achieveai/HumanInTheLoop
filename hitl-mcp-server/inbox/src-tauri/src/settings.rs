@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInput {
+    pub ntfy_url: String,
     pub topic_id: String,
+    /// Blank on an edit keeps the saved key, so the phone never has to show it.
     pub encryption_key: String,
 }
 
@@ -16,6 +18,8 @@ pub struct ConnectionSettings {
     pub mobile: bool,
     pub configured: bool,
     pub topic_id: Option<String>,
+    /// Mobile only: the one place it can be edited. Desktop keeps it private.
+    pub ntfy_url: Option<String>,
 }
 
 fn config_path(dir: &Path) -> std::path::PathBuf {
@@ -23,8 +27,23 @@ fn config_path(dir: &Path) -> std::path::PathBuf {
 }
 
 fn recovery_error() -> String {
-    "Stored connection settings are unreadable or invalid. Reset or reinstall the app, then try again."
-        .to_string()
+    "Stored connection settings are unreadable or invalid. Enter them again to repair them.".to_string()
+}
+
+/// The server as typed, without a trailing slash. HTTPS only: the phone talks
+/// to it over networks you do not control.
+fn normalize_url(url: &str) -> Result<String, String> {
+    let url = url.trim().trim_end_matches('/');
+    let host = url.strip_prefix("https://").unwrap_or("");
+    if host.is_empty()
+        || url.len() > 200
+        || host
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'?' | b'#' | b'@'))
+    {
+        return Err("Server must be an https:// address, such as https://ntfy.sh.".to_string());
+    }
+    Ok(url.to_string())
 }
 
 fn validate(input: &ConnectionInput) -> Result<(), String> {
@@ -59,6 +78,7 @@ pub fn load_public_at(dir: &Path, mobile: bool) -> Result<ConnectionSettings, St
             mobile,
             configured: false,
             topic_id: None,
+            ntfy_url: None,
         });
     }
 
@@ -66,10 +86,12 @@ pub fn load_public_at(dir: &Path, mobile: bool) -> Result<ConnectionSettings, St
     let config: HitlConfig = serde_json::from_str(&contents).map_err(|_| recovery_error())?;
     if mobile {
         let input = ConnectionInput {
+            ntfy_url: config.ntfy_url.clone(),
             topic_id: config.topic_id.clone(),
             encryption_key: config.encryption_key.clone().ok_or_else(recovery_error)?,
         };
         validate(&input).map_err(|_| recovery_error())?;
+        normalize_url(&input.ntfy_url).map_err(|_| recovery_error())?;
     } else if config.topic_id.is_empty() {
         // Desktop preserves the transport's existing cleartext configuration
         // contract: a topic is required, while encryption remains optional.
@@ -80,41 +102,38 @@ pub fn load_public_at(dir: &Path, mobile: bool) -> Result<ConnectionSettings, St
         mobile,
         configured: true,
         topic_id: Some(config.topic_id),
+        ntfy_url: mobile.then_some(config.ntfy_url),
     })
 }
 
-pub fn save_at(dir: &Path, input: ConnectionInput) -> Result<(), String> {
-    validate(&input)?;
-    std::fs::create_dir_all(dir)
-        .map_err(|error| format!("Could not create settings directory: {error}"))?;
-
+/// Save the connection. Returns whether it changed, so the caller knows to
+/// reconnect. Fields this screen does not own (device name, sound) are kept.
+pub fn save_at(dir: &Path, mut input: ConnectionInput) -> Result<bool, String> {
     let path = config_path(dir);
-    if path.exists() {
-        let contents = std::fs::read_to_string(&path).map_err(|_| recovery_error())?;
-        let existing: HitlConfig =
-            serde_json::from_str(&contents).map_err(|_| recovery_error())?;
-        if !existing.topic_id.is_empty() && existing.topic_id != input.topic_id {
-            return Err(
-                "Changing topics is not supported yet. Reset or reinstall the app first."
-                    .to_string(),
-            );
+    // An unreadable file is what a full re-entry repairs, so it is replaced
+    // rather than refused. Only a readable one can lend its key to an edit.
+    let existing: Option<HitlConfig> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok());
+    if input.encryption_key.is_empty() {
+        if let Some(key) = existing.as_ref().and_then(|c| c.encryption_key.clone()) {
+            input.encryption_key = key;
         }
-        if existing.encryption_key.as_deref() != Some(input.encryption_key.as_str()) {
-            return Err(
-                "Changing the encryption key is not supported yet. Reset or reinstall the app first."
-                    .to_string(),
-            );
-        }
-        // The running subscriber loaded this exact connection once. Leaving
-        // the document untouched preserves all unrelated desktop fields.
-        return Ok(());
+    }
+    let ntfy_url = normalize_url(&input.ntfy_url)?;
+    validate(&input)?;
+
+    let mut config = existing.clone().unwrap_or_default();
+    config.ntfy_url = ntfy_url;
+    config.topic_id = input.topic_id;
+    config.encryption_key = Some(input.encryption_key);
+    let same = |a: &HitlConfig| serde_json::to_value(a).ok() == serde_json::to_value(&config).ok();
+    if existing.as_ref().is_some_and(same) {
+        return Ok(false);
     }
 
-    let config = HitlConfig {
-        topic_id: input.topic_id,
-        encryption_key: Some(input.encryption_key),
-        ..HitlConfig::default()
-    };
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("Could not create settings directory: {error}"))?;
     let json = serde_json::to_string_pretty(&config)
         .map_err(|error| format!("Could not encode connection settings: {error}"))?;
     let temporary = dir.join(format!(".config-{}.tmp", uuid::Uuid::new_v4()));
@@ -124,7 +143,7 @@ pub fn save_at(dir: &Path, input: ConnectionInput) -> Result<(), String> {
         let _ = std::fs::remove_file(temporary);
         return Err(format!("Could not save connection settings: {error}"));
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -141,6 +160,7 @@ mod tests {
 
     fn valid_input() -> ConnectionInput {
         ConnectionInput {
+            ntfy_url: "https://ntfy.example.test".to_string(),
             topic_id: "phone-topic_123".to_string(),
             encryption_key: "ab".repeat(32),
         }
@@ -236,7 +256,7 @@ mod tests {
         let error = load_public_at(&dir, true).unwrap_err();
 
         assert!(
-            error.contains("reset") || error.contains("reinstall"),
+            error.contains("repair"),
             "{error}"
         );
         std::fs::remove_dir_all(dir).unwrap();
@@ -259,39 +279,73 @@ mod tests {
         let error = load_public_at(&dir, false).unwrap_err();
 
         assert!(
-            error.contains("reset") || error.contains("reinstall"),
+            error.contains("repair"),
             "{error}"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn changing_an_existing_topic_is_rejected_with_reset_guidance() {
-        let dir = temp_dir("topic-change");
-        save_at(&dir, valid_input()).unwrap();
-        let mut changed = valid_input();
-        changed.topic_id = "different-topic".to_string();
+    fn the_server_must_be_https() {
+        for ntfy_url in ["", "http://ntfy.example.test", "ntfy.example.test", "https://", "https://a b", "https://x?y"] {
+            let mut input = valid_input();
+            input.ntfy_url = ntfy_url.to_string();
+            assert!(save_at(&temp_dir("bad-url"), input).is_err(), "accepted {ntfy_url:?}");
+        }
+    }
 
-        let error = save_at(&dir, changed).unwrap_err();
-        assert!(
-            error.contains("reinstall") || error.contains("reset"),
-            "{error}"
-        );
+    #[test]
+    fn mobile_shows_the_server_it_saved_without_a_trailing_slash() {
+        let dir = temp_dir("url");
+        let mut input = valid_input();
+        input.ntfy_url = "https://ntfy.example.test/".to_string();
+        assert!(save_at(&dir, input).unwrap());
 
+        let public = load_public_at(&dir, true).unwrap();
+        assert_eq!(public.ntfy_url.as_deref(), Some("https://ntfy.example.test"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn changing_an_existing_key_is_rejected_instead_of_splitting_live_services() {
-        let dir = temp_dir("key-change");
+    fn server_topic_and_key_can_all_change_later() {
+        let dir = temp_dir("change");
         save_at(&dir, valid_input()).unwrap();
-        let mut changed = valid_input();
-        changed.encryption_key = "cd".repeat(32);
+        let changed = ConnectionInput {
+            ntfy_url: "https://other.example.test".to_string(),
+            topic_id: "different-topic".to_string(),
+            encryption_key: "cd".repeat(32),
+        };
+        assert!(save_at(&dir, changed).unwrap(), "a change reports changed");
 
-        let error = save_at(&dir, changed).unwrap_err();
-        assert!(error.contains("reinstall") || error.contains("reset"), "{error}");
-
+        let saved: HitlConfig =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        assert_eq!(saved.ntfy_url, "https://other.example.test");
+        assert_eq!(saved.topic_id, "different-topic");
+        assert_eq!(saved.encryption_key, Some("cd".repeat(32)));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_blank_key_on_an_edit_keeps_the_saved_key() {
+        let dir = temp_dir("keep-key");
+        save_at(&dir, valid_input()).unwrap();
+        let mut edit = valid_input();
+        edit.encryption_key = String::new();
+        assert!(!save_at(&dir, edit.clone()).unwrap(), "nothing changed");
+
+        edit.topic_id = "moved-topic".to_string();
+        assert!(save_at(&dir, edit).unwrap());
+        let saved: HitlConfig =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+        assert_eq!(saved.encryption_key, Some("ab".repeat(32)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_blank_key_on_first_setup_is_refused() {
+        let mut input = valid_input();
+        input.encryption_key = String::new();
+        assert!(save_at(&temp_dir("first-blank"), input).is_err());
     }
 
     #[test]
@@ -346,12 +400,10 @@ mod tests {
             .unwrap();
 
             let error = load_public_at(&dir, true).unwrap_err();
-            assert!(error.contains("reset") || error.contains("reinstall"), "{error}");
-            let save_error = save_at(&dir, valid_input()).unwrap_err();
-            assert!(
-                save_error.contains("reset") || save_error.contains("reinstall"),
-                "{save_error}"
-            );
+            assert!(error.contains("repair"), "{error}");
+            // Entering the connection again repairs it.
+            assert!(save_at(&dir, valid_input()).unwrap());
+            assert!(load_public_at(&dir, true).unwrap().configured);
             std::fs::remove_dir_all(dir).unwrap();
         }
     }
@@ -369,12 +421,15 @@ mod tests {
             }
 
             let error = load_public_at(&dir, true).unwrap_err();
-            assert!(error.contains("reset") || error.contains("reinstall"), "{error}");
-            let save_error = save_at(&dir, valid_input()).unwrap_err();
-            assert!(
-                save_error.contains("reset") || save_error.contains("reinstall"),
-                "{save_error}"
-            );
+            assert!(error.contains("repair"), "{error}");
+            if as_directory {
+                // Nothing can be written over a directory; the save says so.
+                assert!(save_at(&dir, valid_input()).is_err());
+            } else {
+                // Entering the connection again repairs it.
+                assert!(save_at(&dir, valid_input()).unwrap());
+                assert!(load_public_at(&dir, true).unwrap().configured);
+            }
             std::fs::remove_dir_all(dir).unwrap();
         }
     }

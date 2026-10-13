@@ -75,7 +75,10 @@
     <dialog class="connection-dialog" id="connection-dialog" aria-labelledby="connection-title">
         <form>
             <h2 id="connection-title">Connect Inbox</h2>
-            <p class="connection-intro">Enter the topic and encryption key from your HITL configuration.</p>
+            <p class="connection-intro">Enter the server, topic and encryption key from your HITL configuration.</p>
+            <label for="connection-url">Server</label>
+            <input id="connection-url" name="ntfyUrl" type="url" inputmode="url" value="https://ntfy.sh"
+                   autocomplete="off" spellcheck="false" required>
             <label for="connection-topic">Topic ID</label>
             <input id="connection-topic" name="topicId" autocomplete="off" required>
             <label for="connection-key">Encryption key</label>

@@ -48,8 +48,43 @@ test('valid settings save closes setup, clears the secret, and starts the Inbox 
   const calls = await page.evaluate(() => (window as any).__SETTINGS_CALLS);
   expect(calls.at(-1)).toEqual({
     command: 'save_connection_settings',
-    args: { topicId: 'phone-topic_123', encryptionKey: 'ab'.repeat(32) },
+    args: { ntfyUrl: 'https://ntfy.sh', topicId: 'phone-topic_123', encryptionKey: 'ab'.repeat(32) },
   });
+});
+
+test('first setup sends the server typed and needs a key', async ({ page }) => {
+  await install(page, { mobile: true, configured: false, topicId: null });
+  await expect(page.getByLabel('Encryption key')).toHaveAttribute('required', '');
+  await page.getByLabel('Server').fill('https://ntfy.example.test');
+  await page.getByLabel('Topic ID').fill('phone-topic');
+  await page.getByLabel('Encryption key').fill('ab'.repeat(32));
+  await page.getByRole('button', { name: 'Save connection' }).click();
+
+  const calls = await page.evaluate(() => (window as any).__SETTINGS_CALLS);
+  expect(calls.at(-1).args.ntfyUrl).toBe('https://ntfy.example.test');
+});
+
+test('editing a saved connection shows server and topic, and a blank key keeps the old one', async ({ page }) => {
+  await install(page, { mobile: true, configured: true, topicId: 'phone-topic', ntfyUrl: 'https://ntfy.example.test' });
+  await page.getByRole('button', { name: 'Connection settings' }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'Connect Inbox' });
+  await expect(dialog).toBeVisible();
+  await expect(page.getByLabel('Server')).toHaveValue('https://ntfy.example.test');
+  await expect(page.getByLabel('Topic ID')).toHaveValue('phone-topic');
+  await expect(page.getByLabel('Encryption key')).toHaveValue('');
+  await expect(page.getByLabel('Encryption key')).toHaveAttribute('placeholder', 'Leave blank to keep the current key');
+
+  await page.getByLabel('Topic ID').fill('moved-topic');
+  await page.getByRole('button', { name: 'Save connection' }).click();
+  await expect(dialog).not.toBeVisible();
+  const calls = await page.evaluate(() => (window as any).__SETTINGS_CALLS);
+  expect(calls.at(-1)).toEqual({
+    command: 'save_connection_settings',
+    args: { ntfyUrl: 'https://ntfy.example.test', topicId: 'moved-topic', encryptionKey: '' },
+  });
+  // The Inbox was already running; an edit does not start it twice.
+  expect(await page.evaluate(() => (window as any).__CONFIGURED)).toBe(1);
 });
 
 test('failed save preserves entered values and announces an inline error', async ({ page }) => {

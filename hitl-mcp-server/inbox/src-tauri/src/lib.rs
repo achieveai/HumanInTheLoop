@@ -60,6 +60,7 @@ fn database_path() -> Result<std::path::PathBuf, String> {
 #[derive(Default)]
 struct ServiceLifecycle {
     started: AtomicBool,
+    tasks: Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
 }
 
 impl ServiceLifecycle {
@@ -67,6 +68,19 @@ impl ServiceLifecycle {
         self.started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    fn track(&self, task: tauri::async_runtime::JoinHandle<()>) {
+        self.tasks.lock().unwrap_or_else(|p| p.into_inner()).push(task);
+    }
+
+    /// Stop every service task, so the next `begin` starts them on a changed
+    /// connection. The subscribers read the config once, when they start.
+    fn stop(&self) {
+        for task in self.tasks.lock().unwrap_or_else(|p| p.into_inner()).drain(..) {
+            task.abort();
+        }
+        self.started.store(false, Ordering::Release);
     }
 }
 
@@ -248,9 +262,9 @@ fn start_services(
     }
 
     let (body_jobs, body_queue) = tokio::sync::mpsc::unbounded_channel();
-    tauri::async_runtime::spawn(catch_up(store.clone()));
-    tauri::async_runtime::spawn(capture::run(store.clone(), body_queue, pending.clone()));
-    tauri::async_runtime::spawn(async move {
+    lifecycle.track(tauri::async_runtime::spawn(catch_up(store.clone())));
+    lifecycle.track(tauri::async_runtime::spawn(capture::run(store.clone(), body_queue, pending.clone())));
+    lifecycle.track(tauri::async_runtime::spawn(async move {
         let notify = handle.clone();
         let sink = InboxSink::new(
             store,
@@ -269,7 +283,7 @@ fn start_services(
             subscribe_loop(&sink, &main),
             subscribe_topic_loop(&sink, &agents, reply::AGENTS_TOPIC_SUFFIX),
         );
-    });
+    }));
 }
 
 #[tauri::command]
@@ -286,6 +300,7 @@ fn save_connection_settings(
     pending: tauri::State<'_, Arc<Pending>>,
     lifecycle: tauri::State<'_, Arc<ServiceLifecycle>>,
     settings_lock: tauri::State<'_, Mutex<()>>,
+    ntfy_url: String,
     topic_id: String,
     encryption_key: String,
 ) -> Result<(), String> {
@@ -296,13 +311,18 @@ fn save_connection_settings(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = hitl_transport::paths::hitl_dir()?;
-    settings::save_at(
+    let changed = settings::save_at(
         &dir,
         settings::ConnectionInput {
+            ntfy_url,
             topic_id,
             encryption_key,
         },
     )?;
+    // A first save starts the services; an edit reconnects them.
+    if changed {
+        lifecycle.stop();
+    }
     start_services(
         app,
         store.inner().clone(),
@@ -476,6 +496,18 @@ mod tests {
             .count();
         assert_eq!(winners, 1);
         assert!(!lifecycle.begin());
+    }
+
+    #[test]
+    fn a_changed_connection_stops_the_services_so_they_restart() {
+        let lifecycle = ServiceLifecycle::default();
+        assert!(lifecycle.begin());
+        let task = tauri::async_runtime::spawn(std::future::pending::<()>());
+        lifecycle.track(task);
+
+        lifecycle.stop();
+        assert!(lifecycle.tasks.lock().unwrap().is_empty());
+        assert!(lifecycle.begin(), "a stopped lifecycle starts again");
     }
 
     #[test]

@@ -1,12 +1,31 @@
-/** Owns first-run connection setup without knowing how the Inbox renders. */
+/**
+ * Owns the connection settings without knowing how the Inbox renders: first-run
+ * setup, and later edits on Android. An edit may leave the key blank to keep
+ * the saved one, so the phone never has to show it.
+ */
 export function createConnectionSettings({ invoke, dialog, openButton, onConfigured }) {
     const form = dialog?.querySelector('form');
+    const server = dialog?.querySelector('#connection-url');
     const topic = dialog?.querySelector('#connection-topic');
     const key = dialog?.querySelector('#connection-key');
     const error = dialog?.querySelector('.connection-error');
     const cancel = dialog?.querySelector('.connection-cancel');
     let required = false;
     let started = false;
+    let configured = false;
+
+    /** Once saved, a blank key means "keep it". */
+    function markConfigured(value) {
+        configured = value;
+        if (!key) return;
+        key.required = !configured;
+        key.placeholder = configured ? 'Leave blank to keep the current key' : '';
+    }
+
+    function fill({ topicId, ntfyUrl }) {
+        if (topicId && topic) topic.value = topicId;
+        if (ntfyUrl && server) server.value = ntfyUrl;
+    }
 
     function startOnce() {
         if (started) return;
@@ -14,10 +33,10 @@ export function createConnectionSettings({ invoke, dialog, openButton, onConfigu
         onConfigured();
     }
 
-    function open({ mustConfigure = false, topicId = null, errorMessage = '' } = {}) {
+    function open({ mustConfigure = false, topicId = null, ntfyUrl = null, errorMessage = '' } = {}) {
         if (!dialog) return;
         required = mustConfigure;
-        if (topicId !== null && topic) topic.value = topicId;
+        fill({ topicId, ntfyUrl });
         if (cancel) cancel.hidden = required;
         if (error) error.textContent = errorMessage;
         if (!dialog.open) dialog.showModal();
@@ -37,13 +56,14 @@ export function createConnectionSettings({ invoke, dialog, openButton, onConfigu
             return;
         }
 
+        markConfigured(Boolean(settings.configured));
         if (!settings.mobile || settings.configured) {
-            if (settings.topicId && topic) topic.value = settings.topicId;
+            fill(settings);
             if (!settings.mobile && openButton) openButton.hidden = true;
             startOnce();
             return;
         }
-        open({ mustConfigure: true, topicId: settings.topicId });
+        open({ mustConfigure: true, topicId: settings.topicId, ntfyUrl: settings.ntfyUrl });
     }
 
     form?.addEventListener('submit', async event => {
@@ -53,10 +73,12 @@ export function createConnectionSettings({ invoke, dialog, openButton, onConfigu
         if (submit) submit.disabled = true;
         try {
             await invoke('save_connection_settings', {
-                topicId: topic?.value ?? '',
-                encryptionKey: key?.value ?? '',
+                ntfyUrl: server?.value.trim() ?? '',
+                topicId: topic?.value.trim() ?? '',
+                encryptionKey: key?.value.trim() ?? '',
             });
             required = false;
+            markConfigured(true);
             if (key) key.value = '';
             dialog.close();
             startOnce();
@@ -74,7 +96,7 @@ export function createConnectionSettings({ invoke, dialog, openButton, onConfigu
         if (key) key.value = '';
         if (error) error.textContent = '';
     });
-    openButton?.addEventListener('click', () => open({ topicId: topic?.value ?? null }));
+    openButton?.addEventListener('click', () => open());
 
     return { initialize, open };
 }

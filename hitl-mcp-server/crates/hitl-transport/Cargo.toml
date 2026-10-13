@@ -24,5 +24,11 @@ httpdate = "1"
 # of which a transport that must stay mobile-compilable has any use for.
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { workspace = true, features = ["default-tls"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+reqwest = { workspace = true, features = ["rustls-tls"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "rt-multi-thread", "test-util"] }
