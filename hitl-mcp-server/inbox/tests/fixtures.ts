@@ -51,6 +51,10 @@ export interface MessageRow {
   sessionLabel: string | null;
   /** Where a message to this row's session goes; absent on older senders. */
   sessionTag?: string | null;
+  /** The agent's own name for its session, once it called NameSession. */
+  sessionName?: string;
+  objective?: string;
+  formerNames?: string[];
   projectKey: string;
   unattributed: boolean;
 }
@@ -67,6 +71,9 @@ export interface SessionRow {
   lastEventAt: number;
   recent: boolean;
   sessionTag?: string;
+  sessionName?: string;
+  objective?: string;
+  formerNames?: string[];
 }
 
 export interface ProjectNode {

@@ -77,7 +77,9 @@ describe('version sync', () => {
     // The guard above only helps for files it has been told about, so a new
     // crate or app can reintroduce the drift by simply not being listed. Walk
     // the tree instead and fail on anything carrying a version we do not check.
-    const skip = new Set(['node_modules', 'target', 'dist', '.git']);
+    // `gen` is Tauri's generated mobile project; an Android build copies
+    // tauri.conf.json into it (git-ignored).
+    const skip = new Set(['node_modules', 'target', 'dist', '.git', 'gen']);
     const found: string[] = [];
 
     const walk = (dir: string) => {

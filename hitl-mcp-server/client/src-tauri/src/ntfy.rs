@@ -686,7 +686,7 @@ mod tests {
     use hitl_transport::payload::PayloadError;
 
     fn a_sender(label: &str) -> SenderInfo {
-        SenderInfo { label: label.to_string(), source: "worktree".to_string() }
+        SenderInfo { label: label.to_string(), source: "worktree".to_string(), ..Default::default() }
     }
 
     // --- Sender identity dispatch decision (Task 6) ---

@@ -32,12 +32,12 @@
 // inline review comment — is left exactly as the reader left it. Re-rendering
 // would be one line shorter and would throw all of it away.
 
-import { el } from './detail-shell.js';
+import { el, sessionLine } from './detail-shell.js';
 import { renderNotification } from './render-notification.js';
 import { renderQuestion } from './render-question.js';
 import { renderHandoff } from './render-handoff.js';
 import { renderReview } from './render-review.js';
-import { composeBox, renderAgentMessage } from './render-agent-message.js';
+import { composeBox, relabelCompose, renderAgentMessage } from './render-agent-message.js';
 
 function panel(container, className, title, note) {
     container.textContent = '';
@@ -261,11 +261,27 @@ export function createDetailPane({ container, invoke, onError = console.error, a
         painted.controller.applyRow(message);
     }
 
+    /**
+     * The selected message's agent renamed its session. Patched in place, not
+     * re-rendered, so an answer being typed survives.
+     */
+    function rename(message) {
+        if (!painted || painted.messageId !== message.messageId) return;
+        const header = container.querySelector('.detail-header');
+        if (!header) return;
+        const line = sessionLine(message);
+        const current = header.querySelector('.detail-session');
+        if (current && line) current.replaceWith(line);
+        else if (current) current.remove();
+        else if (line) header.querySelector('.detail-meta')?.after(line);
+        relabelCompose(container, message);
+    }
+
     function clear() {
         generation += 1;
         empty();
     }
 
     empty();
-    return { show, update, clear, park, restore, discard };
+    return { show, update, rename, clear, park, restore, discard };
 }

@@ -249,8 +249,36 @@ pub struct MessageRow {
     /// Where a message to this row's session goes, once any of its messages
     /// carried a tag. The detail pane offers a compose box only with one.
     pub session_tag: Option<String>,
+    #[serde(flatten)]
+    pub naming: Naming,
     pub project_key: String,
     pub unattributed: bool,
+}
+
+/// What the agent named its session, on every row of that session. Empty
+/// until it calls `NameSession`; the label is shown instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Naming {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub former_names: Vec<String>,
+}
+
+impl Naming {
+    fn for_tag(names: &HashMap<String, identity::SessionName>, tag: Option<&String>) -> Self {
+        match tag.and_then(|t| names.get(t)) {
+            Some(n) => Naming {
+                session_name: Some(n.name.clone()),
+                objective: Some(n.objective.clone()).filter(|o| !o.is_empty()),
+                former_names: n.former.clone(),
+            },
+            None => Naming::default(),
+        }
+    }
 }
 
 /// One subject, resolved. Internal: the shape both panes are derived from.
@@ -297,6 +325,7 @@ fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
             session_key: identity.as_ref().map(|i| i.session_key.clone()),
             session_label: identity.as_ref().map(|i| i.session_label.clone()),
             session_tag: None,
+            naming: Naming::default(),
             project_key: identity
                 .as_ref()
                 .map(|i| i.project_key.clone())
@@ -339,6 +368,8 @@ fn build_subjects(events: &[Event], now: u64) -> Vec<Subject> {
         }
     }
 
+    let names = identity::session_names(events);
+
     // The first reply to each message, in ntfy order.
     let mut replies: HashMap<String, &Event> = HashMap::new();
     for event in events.iter().filter(|e| e.msg_type == "notification") {
@@ -380,6 +411,7 @@ fn build_subjects(events: &[Event], now: u64) -> Vec<Subject> {
             .as_ref()
             .and_then(|key| tags.get(key))
             .map(|(_, tag)| tag.clone());
+        subject.row.naming = Naming::for_tag(&names, subject.row.session_tag.as_ref());
     }
     subjects
 }
@@ -422,6 +454,8 @@ pub struct SessionRow {
     pub recent: bool,
     /// Where a message to this session goes; see [`MessageRow::session_tag`].
     pub session_tag: Option<String>,
+    #[serde(flatten)]
+    pub naming: Naming,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -500,12 +534,14 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
     // branch it is on now.
     let mut labels: BTreeMap<String, (u64, String)> = BTreeMap::new();
     let mut session_tags: BTreeMap<String, String> = BTreeMap::new();
+    let mut namings: BTreeMap<String, Naming> = BTreeMap::new();
     let mut total = Counters::default();
 
     for subject in &subjects {
         total.add(subject);
         if let (Some(key), Some(tag)) = (&subject.row.session_key, &subject.row.session_tag) {
             session_tags.insert(key.clone(), tag.clone());
+            namings.insert(key.clone(), subject.row.naming.clone());
         }
         let (project, session) = match &subject.identity {
             Some(id) => {
@@ -548,6 +584,7 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
                         .unwrap_or_else(|| session_key.clone()),
                     scope_key: format!("session:{session_key}"),
                     session_tag: session_tags.remove(&session_key),
+                    naming: namings.remove(&session_key).unwrap_or_default(),
                     session_key,
                     project_key: project_key.clone(),
                     state: state.as_str(),
@@ -1955,6 +1992,51 @@ mod tests {
         assert!(!row.unattributed);
         assert_eq!(row.session_tag.as_deref(), Some(TAG));
         assert_eq!(build_tree(&events, NOW).projects[0].sessions[0].session_tag.as_deref(), Some(TAG));
+    }
+
+    fn renamed(id: &str, at: u64, tag: &str, name: &str) -> Event {
+        ev(
+            &format!("ntfy-{id}"),
+            at,
+            &format!(
+                r#"{{"type":"sender_identity","forMessageId":"{id}","forType":"session_name",
+                     "sender":{{"label":"Hitl_MCP · master · a3f2","source":"session","sessionTag":"{tag}",
+                                "sessionName":"{name}","objective":"Goal of {name}"}}}}"#
+            ),
+        )
+    }
+
+    #[test]
+    fn a_rename_after_the_last_message_relabels_the_session_and_its_rows() {
+        let events = vec![
+            question("q-1", NOW - 3 * MINUTE, "Hitl_MCP"),
+            tagged_identity("q-1", NOW - 3 * MINUTE, "Hitl_MCP · master · a3f2", TAG),
+            renamed("s-1", NOW - 2 * MINUTE, TAG, "Android build"),
+            renamed("s-2", NOW - MINUTE, TAG, "Session names"),
+        ];
+        let tree = build_tree(&events, NOW);
+        // The bare renames belong to no message: still one session, one message.
+        assert_eq!(tree.total_messages, 1);
+        let session = &tree.projects[0].sessions[0];
+        assert_eq!(session.naming.session_name.as_deref(), Some("Session names"));
+        assert_eq!(session.naming.objective.as_deref(), Some("Goal of Session names"));
+        assert_eq!(session.naming.former_names, ["Android build"]);
+
+        let row = &build_list(&events, None, Some("all"), NOW).messages[0];
+        assert_eq!(row.naming, session.naming);
+        let json = serde_json::to_value(row).unwrap();
+        assert_eq!(json["sessionName"], "Session names");
+        assert_eq!(json["formerNames"][0], "Android build");
+    }
+
+    #[test]
+    fn an_unnamed_session_carries_no_name_fields() {
+        let events = vec![
+            question("q-1", NOW - MINUTE, "Hitl_MCP"),
+            tagged_identity("q-1", NOW - MINUTE, "Hitl_MCP · master · a3f2", TAG),
+        ];
+        let json = serde_json::to_value(&build_tree(&events, NOW).projects[0].sessions[0]).unwrap();
+        assert!(json.get("sessionName").is_none() && json.get("formerNames").is_none());
     }
 
     #[test]

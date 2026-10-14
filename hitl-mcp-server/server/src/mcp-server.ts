@@ -5,6 +5,7 @@ import { WORK_TOOLS } from './work-tools.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
+  type CallToolRequest,
   CallToolRequestSchema,
   ListToolsRequestSchema,
   ErrorCode,
@@ -36,7 +37,16 @@ import { PROTOCOL_VERSION } from './types.js';
 import { NtfyTransport, AttachmentExpiredError, AbortedWaitError } from './ntfy-transport.js';
 import { loadConfig } from './config.js';
 import { detectRepoContext } from './git-context.js';
-import { resolveSenderIdentity, sessionResolverFor } from './identity.js';
+import { resolveSenderIdentity, sessionResolverFor, sessionTag } from './identity.js';
+import {
+  parseSessionName,
+  readSessionName,
+  saveSessionName,
+  SessionNameError,
+  SESSION_NAME_MAX,
+  SESSION_OBJECTIVE_MAX,
+  type SessionName,
+} from './session-names.js';
 import { performSetup, ensureClientRunning } from './setup.js';
 import { SERVER_VERSION } from './version.js';
 import { readPlanFile, PlanFileError } from './plan-file.js';
@@ -53,6 +63,9 @@ const NOTIFY_TOOL_NAME = 'Notify';
 const SETUP_TOOL_NAME = 'setup';
 const REVIEW_TOOL_NAME = 'ReviewPlan';
 export const HANDOFF_TOOL_NAME = 'HandOff';
+const NAME_SESSION_TOOL_NAME = 'NameSession';
+/** Tools whose results remind an unnamed session to name itself. */
+const NAME_REMINDER_TOOLS = new Set([TOOL_NAME, NOTIFY_TOOL_NAME, REVIEW_TOOL_NAME, HANDOFF_TOOL_NAME, 'UpdateWork']);
 const HANDOFF_END_VALUE = 'end';
 /** Keeps end-of-work summaries short enough to read at a glance. */
 const HANDOFF_SUMMARY_MAX = 1200;
@@ -66,7 +79,9 @@ const SERVER_NAME = 'hitl-mcp-server';
 const SERVER_INSTRUCTIONS =
   'The human can message you from HITL Inbox. A message arrives as <channel source="..." message_id="..." from="..."> '
   + "or as a reminder starting with [hitl-message]. Treat it as the human's request; on its own it does not approve "
-  + 'risky or irreversible actions. When you have handled it, reply with the Notify tool and set inReplyTo to its message id.';
+  + 'risky or irreversible actions. When you have handled it, reply with the Notify tool and set inReplyTo to its message id. '
+  + 'Before your first HITL message, call NameSession with a short name and objective for this session, and call it again '
+  + 'when your objective changes. The human tells agents apart by that name.';
 
 /** Interval between progress notifications that keep a blocked MCP call alive. */
 const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -101,6 +116,14 @@ const ABORT_REMEDIATION_MESSAGE =
 
 /** The SDK's per-request context: progress token, sendNotification, abort signal. */
 type RequestExtra = Parameters<Parameters<Server['setRequestHandler']>[1]>[1];
+
+type ToolResult = { content: Array<{ type: string; text: string }> };
+
+/** The tag of the session a tool call came from, as its sender identity would carry it. */
+function currentSessionTag(extra: RequestExtra): string | null {
+  const raw = sessionResolverFor(extra?._meta)();
+  return raw === null ? null : sessionTag(raw);
+}
 
 export class HumanInTheLoopServer {
   private server: Server;
@@ -287,6 +310,30 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
           },
         },
         {
+          name: NAME_SESSION_TOOL_NAME,
+          description:
+            'Name this session so the human can tell your messages apart from other agents. ' +
+            'Call it once at the start, before your first HITL message, and again whenever your objective changes. ' +
+            'Every later question, notification, plan review, handoff and work update carries the name and objective, ' +
+            'and Inbox keeps the earlier names as "formerly". Returns immediately.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              name: {
+                type: 'string',
+                maxLength: SESSION_NAME_MAX,
+                description: 'What you are doing, in 2-5 words (e.g. "Inbox repaint fix"). Not the repo or branch name; the human already sees those.',
+              },
+              objective: {
+                type: 'string',
+                maxLength: SESSION_OBJECTIVE_MAX,
+                description: 'One sentence: the goal of this session and what done looks like.',
+              },
+            },
+            required: ['name', 'objective'],
+          },
+        },
+        {
           name: SETUP_TOOL_NAME,
           description:
             'Set up the HITL (Human-in-the-Loop) client on this machine. ' +
@@ -413,228 +460,278 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
       ],
     }));
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-      if (request.params.name === 'UpdateWork' || request.params.name === 'ReadWork') {
-        try {
-          const args = request.params.arguments ?? {};
-          const result = request.params.name === 'ReadWork'
-            ? { document: this.workStore.read(args.workId as string) }
-            : await this.workStore.update(args, async message => {
-                // Persist first; a missing client is a recoverable publication failure.
-                if (message.alert) this.requireClient();
-                await this.transport.publishWork(message);
-                // Once per document per process: the Inbox keeps the first one,
-                // and it is what files the work under this agent's session.
-                if (!this.workIdentitySent.has(message.workId)) {
-                  this.workIdentitySent.add(message.workId);
-                  await this.publishSenderIdentityFor(message.workId, 'work_update', extra);
-                }
-              });
-          return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-        } catch (error) {
-          throw new McpError(error instanceof WorkValidationError ? ErrorCode.InvalidParams : ErrorCode.InternalError, describeError(error));
-        }
-      }
-      // Handle setup tool
-      if (request.params.name === SETUP_TOOL_NAME) {
-        const memoryRemote = request.params.arguments?.memoryRemote;
-        if (memoryRemote !== undefined && typeof memoryRemote !== 'boolean') {
-          throw new McpError(ErrorCode.InvalidParams, 'memoryRemote must be true or false');
-        }
-        try {
-          const result = await performSetup(SERVER_DIR, {
-            autoLaunchClient: this.autoLaunchClient,
-            memoryRemote,
-          });
-          return {
-            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-          };
-        } catch (error) {
-          throw new McpError(
-            ErrorCode.InternalError,
-            `Setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`
-          );
-        }
-      }
+    this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) =>
+      this.withNameReminder(request.params.name, extra, await this.callTool(request, extra))
+    );
+  }
 
-      // Handle notify tool (fire-and-forget)
-      if (request.params.name === NOTIFY_TOOL_NAME) {
-        const args = request.params.arguments as Record<string, unknown>;
-
-        if (!args.title || !args.body) {
-          throw new McpError(ErrorCode.InvalidParams, 'Missing required parameters: title and body');
-        }
-
-        try {
-          this.requireClient();
-
-          const notification: NotificationMessage = {
-            type: 'notification',
-            messageId: uuidv4(),
-            timestamp: Date.now(),
-            title: args.title as string,
-            body: args.body as string,
-            context: (args.context as string) || undefined,
-            ...(typeof args.inReplyTo === 'string' && args.inReplyTo ? { inReplyTo: args.inReplyTo } : {}),
-          };
-
-          await this.transport.publish(notification);
-          await this.publishSenderIdentityFor(notification.messageId, 'notification', extra);
-
-          return {
-            content: [{ type: 'text', text: JSON.stringify({ success: true, messageId: notification.messageId }) }],
-          };
-        } catch (error) {
-          throw new McpError(
-            ErrorCode.InternalError,
-            `Failed to send notification: ${error instanceof Error ? error.message : 'Unknown error'}`
-          );
-        }
-      }
-
-      if (request.params.name === REVIEW_TOOL_NAME) {
-        return await this.handleReviewPlan(request.params.arguments as Record<string, unknown>, extra);
-      }
-
-      if (request.params.name === HANDOFF_TOOL_NAME) {
-        return await this.handleHandOff(request.params.arguments as Record<string, unknown>, extra);
-      }
-
-      if (request.params.name !== TOOL_NAME) {
-        throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${request.params.name}`);
-      }
-
-      const args = request.params.arguments as Record<string, unknown>;
-
-      const hasSingleQuestion = args.question && Array.isArray(args.options) && args.options.length > 0;
-      const hasBatchQuestions = Array.isArray(args.questions) && (args.questions as unknown[]).length > 0;
-
-      if (!args.context) {
-        throw new McpError(ErrorCode.InvalidParams, 'Missing required parameter: context');
-      }
-      if (!hasSingleQuestion && !hasBatchQuestions) {
-        throw new McpError(
-          ErrorCode.InvalidParams,
-          'Provide either question+options for a single question, or a questions array for batch mode'
-        );
-      }
-
+  private async callTool(request: CallToolRequest, extra: RequestExtra): Promise<ToolResult> {
+    if (request.params.name === NAME_SESSION_TOOL_NAME) {
+      return await this.handleNameSession(request.params.arguments, extra);
+    }
+    if (request.params.name === 'UpdateWork' || request.params.name === 'ReadWork') {
       try {
-        // Auto-launch client if not running. Must precede publish: with no
-        // timeout, publishing to a topic nobody reads blocks forever (A-10).
-        this.requireClient();
-
-        const repo = detectRepoContext();
-
-        const mapOption = (opt: { label?: string; value?: string; description?: string; preview?: string }) => ({
-          label: opt.label || opt.value || '',
-          // Backfill value from label when the LLM omits it (agents habitually
-          // call this tool like the built-in AskUserQuestion, which has no
-          // `value` field). Symmetric with the label fallback above. Without
-          // this, JSON.stringify drops the undefined `value` key and older
-          // clients fail to deserialize the whole message, silently dropping
-          // the popup.
-          value: opt.value ?? opt.label ?? '',
-          description: opt.description,
-          preview: opt.preview,
+        const args = request.params.arguments ?? {};
+        const result = request.params.name === 'ReadWork'
+          ? { document: this.workStore.read(args.workId as string) }
+          : await this.workStore.update(args, async message => {
+              // Persist first; a missing client is a recoverable publication failure.
+              if (message.alert) this.requireClient();
+              await this.transport.publishWork(message);
+              // Once per document per process: the Inbox keeps the first one,
+              // and it is what files the work under this agent's session.
+              if (!this.workIdentitySent.has(message.workId)) {
+                this.workIdentitySent.add(message.workId);
+                await this.publishSenderIdentityFor(message.workId, 'work_update', extra);
+              }
+            });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      } catch (error) {
+        throw new McpError(error instanceof WorkValidationError ? ErrorCode.InvalidParams : ErrorCode.InternalError, describeError(error));
+      }
+    }
+    // Handle setup tool
+    if (request.params.name === SETUP_TOOL_NAME) {
+      const memoryRemote = request.params.arguments?.memoryRemote;
+      if (memoryRemote !== undefined && typeof memoryRemote !== 'boolean') {
+        throw new McpError(ErrorCode.InvalidParams, 'memoryRemote must be true or false');
+      }
+      try {
+        const result = await performSetup(SERVER_DIR, {
+          autoLaunchClient: this.autoLaunchClient,
+          memoryRemote,
         });
-
-        const batchQuestions = hasBatchQuestions
-          ? (args.questions as Array<Partial<SubQuestion> & Pick<SubQuestion, 'options'>>).map((sq) => ({
-              question: sq.question || sq.header || 'Please choose an option:',
-              header: sq.header,
-              options: sq.options.map(mapOption),
-              allowMultiple: sq.allowMultiple ?? false,
-              allowOther: sq.allowOther ?? true,
-            }))
-          : undefined;
-
-        const questionMsg: QuestionMessage = {
-          type: 'question',
-          messageId: uuidv4(),
-          timestamp: Date.now(),
-          repo,
-          context: args.context as string,
-          // For batch mode these are placeholders; client uses questions array instead
-          question: hasBatchQuestions ? '' : (args.question as string),
-          options: hasBatchQuestions
-            ? []
-            : (args.options as Array<{ label: string; value: string; description?: string; preview?: string }>).map(mapOption),
-          allowMultiple: hasBatchQuestions ? false : (args.allowMultiple as boolean) !== false,
-          allowOther: hasBatchQuestions ? true : (args.allowOther as boolean) !== false,
-          questions: batchQuestions,
-        };
-
-        const answer = await this.publishQuestionAndWait(questionMsg, extra);
-
-        // Strip (RECOMMENDED) markers from values
-        const stripRecommended = (v: string) => v.replace(/\s*\(RECOMMENDED\)\s*/gi, '').trim();
-
-        // Handle batch response
-        if (answer.subAnswers && answer.subAnswers.length > 0) {
-          const cleanedAnswers: SubAnswer[] = answer.subAnswers.map((sa) => ({
-            ...sa,
-            selectedValues: sa.selectedValues.map(stripRecommended),
-          }));
-          const batchResult: HitlToolResponse = {
-            success: true,
-            timestamp: answer.timestamp,
-            respondedFrom: answer.respondedFrom,
-            responseType: 'selection',
-            answers: cleanedAnswers,
-          };
-          return {
-            content: [{ type: 'text', text: JSON.stringify(batchResult, null, 2) }],
-          };
-        }
-
-        const result: HitlToolResponse = {
-          success: true,
-          timestamp: answer.timestamp,
-          respondedFrom: answer.respondedFrom,
-          responseType: 'none',
-        };
-
-        if (answer.skipped) {
-          result.skipped = true;
-          result.response = 'User skipped this question';
-          result.responseType = 'skipped';
-        } else {
-          const cleanedValues = answer.selectedValues.map(stripRecommended);
-
-          if (cleanedValues.length > 0) {
-            result.selectedValues = questionMsg.allowMultiple ? cleanedValues : cleanedValues[0];
-          }
-
-          if (answer.otherText && answer.otherText !== '') {
-            result.context = answer.otherText;
-          }
-
-          if (cleanedValues.length > 0 && result.context) {
-            result.responseType = 'selection_with_context';
-          } else if (cleanedValues.length > 0) {
-            result.responseType = 'selection';
-          } else if (result.context) {
-            result.responseType = 'context_only';
-          }
-        }
-
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
       } catch (error) {
-        console.error('Dialog error:', error);
-
-        if (error instanceof AbortedWaitError) {
-          throw new McpError(ErrorCode.InternalError, ABORT_REMEDIATION_MESSAGE);
-        }
-
         throw new McpError(
           ErrorCode.InternalError,
-          `Failed to get human response: ${error instanceof Error ? error.message : 'Unknown error'}`
+          `Setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`
         );
       }
-    });
+    }
+
+    // Handle notify tool (fire-and-forget)
+    if (request.params.name === NOTIFY_TOOL_NAME) {
+      const args = request.params.arguments as Record<string, unknown>;
+
+      if (!args.title || !args.body) {
+        throw new McpError(ErrorCode.InvalidParams, 'Missing required parameters: title and body');
+      }
+
+      try {
+        this.requireClient();
+
+        const notification: NotificationMessage = {
+          type: 'notification',
+          messageId: uuidv4(),
+          timestamp: Date.now(),
+          title: args.title as string,
+          body: args.body as string,
+          context: (args.context as string) || undefined,
+          ...(typeof args.inReplyTo === 'string' && args.inReplyTo ? { inReplyTo: args.inReplyTo } : {}),
+        };
+
+        await this.transport.publish(notification);
+        await this.publishSenderIdentityFor(notification.messageId, 'notification', extra);
+
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ success: true, messageId: notification.messageId }) }],
+        };
+      } catch (error) {
+        throw new McpError(
+          ErrorCode.InternalError,
+          `Failed to send notification: ${error instanceof Error ? error.message : 'Unknown error'}`
+        );
+      }
+    }
+
+    if (request.params.name === REVIEW_TOOL_NAME) {
+      return await this.handleReviewPlan(request.params.arguments as Record<string, unknown>, extra);
+    }
+
+    if (request.params.name === HANDOFF_TOOL_NAME) {
+      return await this.handleHandOff(request.params.arguments as Record<string, unknown>, extra);
+    }
+
+    if (request.params.name !== TOOL_NAME) {
+      throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${request.params.name}`);
+    }
+
+    const args = request.params.arguments as Record<string, unknown>;
+
+    const hasSingleQuestion = args.question && Array.isArray(args.options) && args.options.length > 0;
+    const hasBatchQuestions = Array.isArray(args.questions) && (args.questions as unknown[]).length > 0;
+
+    if (!args.context) {
+      throw new McpError(ErrorCode.InvalidParams, 'Missing required parameter: context');
+    }
+    if (!hasSingleQuestion && !hasBatchQuestions) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'Provide either question+options for a single question, or a questions array for batch mode'
+      );
+    }
+
+    try {
+      // Auto-launch client if not running. Must precede publish: with no
+      // timeout, publishing to a topic nobody reads blocks forever (A-10).
+      this.requireClient();
+
+      const repo = detectRepoContext();
+
+      const mapOption = (opt: { label?: string; value?: string; description?: string; preview?: string }) => ({
+        label: opt.label || opt.value || '',
+        // Backfill value from label when the LLM omits it (agents habitually
+        // call this tool like the built-in AskUserQuestion, which has no
+        // `value` field). Symmetric with the label fallback above. Without
+        // this, JSON.stringify drops the undefined `value` key and older
+        // clients fail to deserialize the whole message, silently dropping
+        // the popup.
+        value: opt.value ?? opt.label ?? '',
+        description: opt.description,
+        preview: opt.preview,
+      });
+
+      const batchQuestions = hasBatchQuestions
+        ? (args.questions as Array<Partial<SubQuestion> & Pick<SubQuestion, 'options'>>).map((sq) => ({
+            question: sq.question || sq.header || 'Please choose an option:',
+            header: sq.header,
+            options: sq.options.map(mapOption),
+            allowMultiple: sq.allowMultiple ?? false,
+            allowOther: sq.allowOther ?? true,
+          }))
+        : undefined;
+
+      const questionMsg: QuestionMessage = {
+        type: 'question',
+        messageId: uuidv4(),
+        timestamp: Date.now(),
+        repo,
+        context: args.context as string,
+        // For batch mode these are placeholders; client uses questions array instead
+        question: hasBatchQuestions ? '' : (args.question as string),
+        options: hasBatchQuestions
+          ? []
+          : (args.options as Array<{ label: string; value: string; description?: string; preview?: string }>).map(mapOption),
+        allowMultiple: hasBatchQuestions ? false : (args.allowMultiple as boolean) !== false,
+        allowOther: hasBatchQuestions ? true : (args.allowOther as boolean) !== false,
+        questions: batchQuestions,
+      };
+
+      const answer = await this.publishQuestionAndWait(questionMsg, extra);
+
+      // Strip (RECOMMENDED) markers from values
+      const stripRecommended = (v: string) => v.replace(/\s*\(RECOMMENDED\)\s*/gi, '').trim();
+
+      // Handle batch response
+      if (answer.subAnswers && answer.subAnswers.length > 0) {
+        const cleanedAnswers: SubAnswer[] = answer.subAnswers.map((sa) => ({
+          ...sa,
+          selectedValues: sa.selectedValues.map(stripRecommended),
+        }));
+        const batchResult: HitlToolResponse = {
+          success: true,
+          timestamp: answer.timestamp,
+          respondedFrom: answer.respondedFrom,
+          responseType: 'selection',
+          answers: cleanedAnswers,
+        };
+        return {
+          content: [{ type: 'text', text: JSON.stringify(batchResult, null, 2) }],
+        };
+      }
+
+      const result: HitlToolResponse = {
+        success: true,
+        timestamp: answer.timestamp,
+        respondedFrom: answer.respondedFrom,
+        responseType: 'none',
+      };
+
+      if (answer.skipped) {
+        result.skipped = true;
+        result.response = 'User skipped this question';
+        result.responseType = 'skipped';
+      } else {
+        const cleanedValues = answer.selectedValues.map(stripRecommended);
+
+        if (cleanedValues.length > 0) {
+          result.selectedValues = questionMsg.allowMultiple ? cleanedValues : cleanedValues[0];
+        }
+
+        if (answer.otherText && answer.otherText !== '') {
+          result.context = answer.otherText;
+        }
+
+        if (cleanedValues.length > 0 && result.context) {
+          result.responseType = 'selection_with_context';
+        } else if (cleanedValues.length > 0) {
+          result.responseType = 'selection';
+        } else if (result.context) {
+          result.responseType = 'context_only';
+        }
+      }
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+      };
+    } catch (error) {
+      console.error('Dialog error:', error);
+
+      if (error instanceof AbortedWaitError) {
+        throw new McpError(ErrorCode.InternalError, ABORT_REMEDIATION_MESSAGE);
+      }
+
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to get human response: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  /**
+   * NameSession: save the name and objective this session's messages carry,
+   * then send them on their own so Inbox shows them before the next message.
+   */
+  private async handleNameSession(args: Record<string, unknown> | undefined, extra: RequestExtra): Promise<ToolResult> {
+    let named: SessionName;
+    try {
+      named = parseSessionName(args);
+    } catch (err) {
+      if (err instanceof SessionNameError) throw new McpError(ErrorCode.InvalidParams, err.message);
+      throw err;
+    }
+    const tag = currentSessionTag(extra);
+    if (!tag) throw new McpError(ErrorCode.InternalError, 'This host names no session, so there is nothing to name.');
+    const previous = readSessionName(tag);
+    try {
+      saveSessionName(tag, named);
+    } catch (err) {
+      throw new McpError(ErrorCode.InternalError, `Could not save the session name: ${describeError(err)}`);
+    }
+    await this.publishSenderIdentityFor(uuidv4(), 'session_name', extra);
+    const result = { success: true, name: named.name, objective: named.objective, ...(previous ? { previousName: previous.name } : {}) };
+    return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+  }
+
+  /**
+   * End a HITL tool result with one line about the session's name: a nudge to
+   * name it while it has none, and on HandOff a check that the objective still
+   * holds. A second content block, so the result's JSON stays parseable.
+   */
+  private withNameReminder(tool: string, extra: RequestExtra, result: ToolResult): ToolResult {
+    if (this.config.identityEnabled === false || !NAME_REMINDER_TOOLS.has(tool)) return result;
+    const tag = currentSessionTag(extra);
+    const named = tag ? readSessionName(tag) : null;
+    let reminder: string | null = null;
+    if (!named) {
+      reminder = `This session has no name yet. Call ${NAME_SESSION_TOOL_NAME} with a short name and objective, so the human can tell your messages apart.`;
+    } else if (tool === HANDOFF_TOOL_NAME) {
+      reminder = `This session is "${named.name}": ${named.objective}. If the next work changes that, call ${NAME_SESSION_TOOL_NAME} again.`;
+    }
+    return reminder ? { ...result, content: [...result.content, { type: 'text', text: reminder }] } : result;
   }
 
   /**

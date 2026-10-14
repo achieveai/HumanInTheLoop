@@ -59,6 +59,10 @@ export interface SenderIdentity {
   source: SenderIdentitySource;
   /** Address for messages to this session (see `sessionTag`); only on `session` identities. */
   sessionTag?: string;
+  /** What the agent named this session with `NameSession`, once it has. */
+  sessionName?: string;
+  /** The session's objective, given with its name. */
+  objective?: string;
 }
 
 // -----------------------------------------------------------
@@ -211,9 +215,13 @@ export interface RestoreNotificationMessage extends BaseMessage {
  */
 export interface SenderIdentityMessage {
   type: 'sender_identity';
-  /** messageId of the question/notification this decorates; workId for a work document. */
+  /**
+   * messageId of the question/notification this decorates; workId for a work
+   * document. For `session_name` it names no message: it is the session's new
+   * name on its own, sent when the agent calls `NameSession`.
+   */
   forMessageId: string;
-  forType: 'question' | 'notification' | 'handoff' | 'work_update';
+  forType: 'question' | 'notification' | 'handoff' | 'work_update' | 'session_name';
   sender: SenderIdentity;
 }
 

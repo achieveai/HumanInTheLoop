@@ -74,6 +74,18 @@ export function senderBadge(sender) {
     return badge;
 }
 
+/** The agent's own name for its session, its objective, and earlier names. */
+export function sessionLine(row) {
+    if (!row.sessionName) return null;
+    const line = el('p', 'detail-session');
+    line.appendChild(el('strong', 'detail-session-name', row.sessionName));
+    if (row.objective) line.appendChild(el('span', 'detail-session-objective', row.objective));
+    if (row.formerNames?.length) {
+        line.appendChild(el('span', 'detail-session-former', `Formerly: ${row.formerNames.join(' · ')}`));
+    }
+    return line;
+}
+
 /**
  * The block every renderer opens with.
  *
@@ -107,6 +119,9 @@ export function detailHeader(detail, kicker) {
     when.dateTime = String(row.createdAt);
     meta.appendChild(when);
     header.appendChild(meta);
+
+    const session = sessionLine(row);
+    if (session) header.appendChild(session);
 
     const closed = closedLine(row);
     if (closed) header.appendChild(closed);

@@ -70,8 +70,10 @@ function updatePreviewPanel(panelId, markdown) {
  */
 export function renderSenderBadge(dialogContainer, sender) {
     if (!sender?.label) return;
-    const label = escapeHtml(sender.label);
-    const badgeHtml = `<span class="badge badge-sender" title="${label}">${label}</span>`;
+    // A session the agent named leads with that name; the label moves to hover.
+    const text = escapeHtml(sender.sessionName || sender.label);
+    const hover = escapeHtml([sender.objective, sender.label].filter(Boolean).join('\n'));
+    const badgeHtml = `<span class="badge badge-sender" title="${hover}">${text}</span>`;
 
     let metaRow = dialogContainer.querySelector('.meta-row');
     if (!metaRow) {

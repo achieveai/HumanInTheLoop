@@ -84,7 +84,7 @@ mod tests {
     // retrievable later, not just remembered as "seen".
 
     fn a_sender(label: &str) -> SenderInfo {
-        SenderInfo { label: label.to_string(), source: "worktree".to_string() }
+        SenderInfo { label: label.to_string(), source: "worktree".to_string(), ..Default::default() }
     }
 
     #[test]

@@ -26,7 +26,7 @@ function el(tag, className, text) {
  * composes one, it hands back whatever the tree was given. That is what keeps
  * the two commands from having to agree on a string format twice.
  */
-function agentRow({ kind, scopeKey, glyph, name, state, pending, lastEventAt, now }, options) {
+function agentRow({ kind, scopeKey, glyph, name, label, hint, state, pending, lastEventAt, now }, options) {
     const row = el('div', `agent-row agent-row--${kind}`);
     row.dataset.scopeKey = scopeKey;
     row.setAttribute('role', 'button');
@@ -41,7 +41,12 @@ function agentRow({ kind, scopeKey, glyph, name, state, pending, lastEventAt, no
     if (state) mark.title = state;
     row.appendChild(mark);
 
-    row.appendChild(el('span', 'agent-name', name));
+    const nameEl = el('span', 'agent-name', name);
+    // A named session keeps its branch and id as small text, so two sessions
+    // on one branch still differ.
+    if (label) nameEl.appendChild(el('span', 'agent-label', label));
+    if (hint) nameEl.title = hint;
+    row.appendChild(nameEl);
 
     if (pending > 0) row.appendChild(el('span', 'agent-pending', String(pending)));
 
@@ -78,7 +83,7 @@ function visibleTree(tree, query, selectedScope) {
     for (const project of tree.projects) {
         const projectHit = q !== '' && matches(project.name);
         const sessions = project.sessions.filter(session => {
-            if (q) return projectHit || matches(session.label);
+            if (q) return projectHit || [session.label, session.sessionName, session.objective, ...(session.formerNames ?? [])].some(matches);
             const shown = session.recent !== false || session.scopeKey === selectedScope;
             if (!shown) hidden++;
             return shown;
@@ -89,6 +94,18 @@ function visibleTree(tree, query, selectedScope) {
         if (shown) projects.push({ ...project, sessions });
     }
     return { projects, hidden };
+}
+
+/** Hover text for a session row: its objective, label and earlier names. */
+export function sessionHint(session) {
+    if (!session.sessionName) return undefined;
+    const lines = [session.objective, session.label, formerly(session.formerNames)];
+    return lines.filter(Boolean).join('\n');
+}
+
+/** "Formerly: A · B", newest first, or '' when a session was never renamed. */
+export function formerly(names) {
+    return names?.length ? `Formerly: ${names.join(' · ')}` : '';
 }
 
 /** The last tree and options per container, so typing a query can redraw. */
@@ -139,7 +156,9 @@ function drawTree(container, body, query) {
                 kind: 'session',
                 scopeKey: session.scopeKey,
                 glyph: session.glyph,
-                name: session.label,
+                name: session.sessionName || session.label,
+                label: session.sessionName ? session.label : undefined,
+                hint: sessionHint(session),
                 state: session.state,
                 pending: session.pendingCount,
                 lastEventAt: session.lastEventAt,

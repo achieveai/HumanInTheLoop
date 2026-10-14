@@ -845,7 +845,11 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     const badges = [];
     if (msg.repo?.name) badges.push(`<span class="badge"><span class="badge-icon">📁</span> ${escapeHtml(msg.repo.name)}</span>`);
     if (msg.repo?.branch) badges.push(`<span class="badge"><span class="badge-icon">🌿</span> ${escapeHtml(msg.repo.branch)}</span>`);
-    if (msg.sender?.label) badges.push(`<span class="badge badge-sender" title="${escapeHtml(msg.sender.label)}">${escapeHtml(msg.sender.label)}</span>`);
+    if (msg.sender?.label) {
+        // A session the agent named leads with that name; the label moves to hover.
+        const hover = [msg.sender.objective, msg.sender.label].filter(Boolean).join('\n');
+        badges.push(`<span class="badge badge-sender" title="${escapeHtml(hover)}">${escapeHtml(msg.sender.sessionName || msg.sender.label)}</span>`);
+    }
     badges.push(`<span class="badge badge-rev">${msg.isNewPlan ? 'New plan' : `Revision ${escapeHtml(String(msg.revision ?? 1))}`}</span>`);
 
     container.innerHTML = `

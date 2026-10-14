@@ -163,7 +163,7 @@ Defaults are `inbox.db` and `archive.db` under the state directory. Treat databa
 
 ## MCP Tools
 
-The server exposes `AskUserQuestion`, `ReviewPlan`, `Notify`, `UpdateWork`, `ReadWork`, and `setup`.
+The server exposes `NameSession`, `AskUserQuestion`, `ReviewPlan`, `Notify`, `UpdateWork`, `ReadWork`, and `setup`.
 
 ### `AskUserQuestion`
 
@@ -271,6 +271,17 @@ How the agent receives it:
 - **Codex and Copilot CLI:** the same hooks deliver it after a tool call or hold the agent at its stop. They cannot wake an idle session.
 
 The agent replies with `Notify` and `inReplyTo`. A message is guidance, not approval for risky actions.
+
+### `NameSession`
+
+Names the session so the human can tell agents apart. Call it before the first HITL message, and again when the objective changes. Returns immediately.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `name` | ✅ | What the agent is doing, in 2-5 words, at most 40 characters |
+| `objective` | ✅ | One sentence on the goal, at most 200 characters |
+
+Every later question, notification, plan review, handoff and work update carries the name and objective. The name is saved under `<HITL_HOME>/agent-inbox/<session-tag>/`, so a resumed session keeps it. Inbox shows the name first, the repo, branch and id as small text, and earlier names as "Formerly". Picking an agent in Inbox adds a **Rename** button that asks the agent to rename itself. Until a session is named, tool results end with a one-line reminder.
 
 ### `UpdateWork` and `ReadWork`
 

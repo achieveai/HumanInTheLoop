@@ -13,6 +13,8 @@ const KICKER = 'Message to agent';
 
 /** Who a message goes to, in the words the agent tree uses. */
 function sessionName(row) {
+    // The agent's own name for itself says more than its branch.
+    if (row.sessionName) return row.sessionName;
     if (!row.sessionLabel) return 'this session';
     // Outside a repo the label is the whole name and is its own project.
     return row.sessionLabel === row.projectKey ? row.sessionLabel : `${row.projectKey} · ${row.sessionLabel}`;
@@ -47,6 +49,9 @@ export function composeBox(row, onMessageAgent) {
     return buildCompose(row, onMessageAgent);
 }
 
+/** The Rename button's message, split where the caret goes. */
+const RENAME_REQUEST = ['Rename this session to "', '". Call NameSession with that name, and update the objective if it changed.'];
+
 const PICK_HINT = 'Pick an agent to message it.';
 const NO_TAG = 'Restart this agent to message it (its HITL is older).';
 
@@ -57,13 +62,31 @@ const NO_TAG = 'Restart this agent to message it (its HITL is older).';
  */
 export function listComposer(session, onMessageAgent) {
     if (!session) return el('p', 'list-compose-hint', PICK_HINT);
-    const target = {
+    return buildCompose(listTarget(session), session.sessionTag ? onMessageAgent : null, NO_TAG);
+}
+
+/** Readdress the list box after the agent renamed itself, keeping what was typed. */
+export function relabelListComposer(container, session) {
+    if (session) relabelCompose(container, listTarget(session));
+}
+
+/** Readdress the compose box in `container` to `row`'s session, keeping what was typed. */
+export function relabelCompose(container, row) {
+    const form = container.querySelector('form.detail-compose');
+    if (!form) return;
+    const name = sessionName(row);
+    form.setAttribute('aria-label', `Message ${name}`);
+    form.querySelector('.detail-compose-to').textContent = `To: ${name}`;
+}
+
+function listTarget(session) {
+    return {
         sessionTag: session.sessionTag,
         sessionLabel: session.label,
+        sessionName: session.sessionName,
         projectKey: session.projectKey,
         messageId: 'list',
     };
-    return buildCompose(target, session.sessionTag ? onMessageAgent : null, NO_TAG);
 }
 
 /** The form itself; with no `onMessageAgent` it is disabled and says `reason`. */
@@ -98,6 +121,20 @@ function buildCompose(row, onMessageAgent, reason) {
     text.addEventListener('input', () => {
         send.disabled = !text.value.trim();
     });
+
+    // Renaming goes through the agent, so its own NameSession call stays the
+    // one record of names. The request is plain text you can see and edit.
+    const rename = el('button', 'button', 'Rename');
+    rename.type = 'button';
+    rename.title = 'Ask the agent to rename its session';
+    rename.addEventListener('click', () => {
+        const [before, after] = RENAME_REQUEST;
+        text.value = before + after;
+        text.focus();
+        text.setSelectionRange(before.length, before.length);
+        send.disabled = false;
+    });
+    bar.insertBefore(rename, send);
     // Ctrl+Enter sends, like the "Other" field in a question.
     text.addEventListener('keydown', event => {
         if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) form.requestSubmit();

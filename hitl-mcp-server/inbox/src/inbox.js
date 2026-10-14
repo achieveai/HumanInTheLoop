@@ -15,7 +15,7 @@ import {
     renderTypeFilterBar,
     TYPES,
 } from './pane-list.js';
-import { listComposer } from './render-agent-message.js';
+import { listComposer, relabelListComposer } from './render-agent-message.js';
 import { createReplyActions } from './reply.js';
 import { createConnectionSettings } from './settings.js';
 
@@ -23,6 +23,11 @@ import { createConnectionSettings } from './settings.js';
 const CHANGED_EVENT = 'inbox-changed';
 const CHANGE_QUIET_MS = 100;
 const CHANGE_MAXIMUM_MS = 500;
+
+/** What a row says about its session's name, to tell when the agent renamed it. */
+function namingOf(row) {
+    return JSON.stringify([row.sessionName, row.objective, row.formerNames]);
+}
 
 /**
  * `panes` is the pane-visibility state from layout.js. It is optional because
@@ -661,6 +666,9 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         const snapshotChanged = selected?.work?.snapshotMessageId !== previousSelected?.work?.snapshotMessageId;
         // Forward revision-bearing rows even after a failed detail fetch so a
         // later refresh can retry; the detail pane skips an unchanged snapshot.
+        if (selected && previousSelected && namingOf(selected) !== namingOf(previousSelected)) {
+            detailPane.rename(selected);
+        }
         if (selected && (selected.status !== state.selectedStatus || snapshotChanged
             || (selected.msgType === 'notification' && selected.badges?.revision))) {
             state.selectedStatus = selected.status;
@@ -736,7 +744,10 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         const session = tree.projects?.flatMap(project => project.sessions ?? [])
             .find(row => row.scopeKey === state.scopeKey) ?? null;
         const target = session ? `${session.scopeKey}|${session.sessionTag ?? ''}` : '';
-        if (target === composeTarget) return;
+        if (target === composeTarget) {
+            relabelListComposer(listCompose, session);
+            return;
+        }
         composeTarget = target;
         listCompose.replaceChildren(listComposer(session, actions.onMessageAgent && sendFromList));
     }

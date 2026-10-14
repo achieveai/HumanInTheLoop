@@ -73,8 +73,10 @@ function renderNotifications() {
  */
 function renderSenderBadgeHtml(sender) {
     if (!sender?.label) return '';
-    const label = escapeHtml(sender.label);
-    return `<span class="badge badge-sender" title="${label}">${label}</span>`;
+    // A session the agent named leads with that name; the label moves to hover.
+    const text = escapeHtml(sender.sessionName || sender.label);
+    const hover = escapeHtml([sender.objective, sender.label].filter(Boolean).join('\n'));
+    return `<span class="badge badge-sender" title="${hover}">${text}</span>`;
 }
 
 function addNotificationCard(notification, previousCard = null) {

@@ -20,6 +20,8 @@
 //! `NotificationMessage` carries no `repo` at all, which is precisely why the
 //! label fallback has to exist rather than being a nicety.
 
+use std::collections::HashMap;
+
 use hitl_store::Event;
 
 /// The separator `composeSessionLabel` joins a session-tier label with.
@@ -89,6 +91,48 @@ pub fn sender_tag(events: &[Event]) -> Option<String> {
             .map(str::to_string),
         _ => None,
     })
+}
+
+/// What an agent called its session with `NameSession`, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionName {
+    pub name: String,
+    pub objective: String,
+    /// Earlier names, most recent first, without repeats or the current one.
+    pub former: Vec<String>,
+}
+
+/// Every named session's name, by session tag.
+///
+/// Read from every sender the log carries, not just one subject's: a session
+/// renamed after its last message must relabel its older rows too, and a bare
+/// `session_name` identity belongs to no message at all.
+pub fn session_names(events: &[Event]) -> HashMap<String, SessionName> {
+    let mut named: Vec<(&Event, String, String, String)> = events
+        .iter()
+        .filter(|e| matches!(e.msg_type.as_str(), "plan_review" | "sender_identity"))
+        .filter_map(|e| {
+            let sender = e.json().get("sender")?.clone();
+            let text = |key: &str| sender.get(key).and_then(|v| v.as_str()).map(|s| s.trim().to_string());
+            let tag = text("sessionTag").filter(|s| !s.is_empty())?;
+            let name = text("sessionName").filter(|s| !s.is_empty())?;
+            Some((e, tag, name, text("objective").unwrap_or_default()))
+        })
+        .collect();
+    named.sort_by(|a, b| (a.0.ntfy_time, &a.0.ntfy_id).cmp(&(b.0.ntfy_time, &b.0.ntfy_id)));
+
+    let mut names: HashMap<String, SessionName> = HashMap::new();
+    for (_, tag, name, objective) in named {
+        let entry = names.entry(tag).or_default();
+        if !entry.name.is_empty() && entry.name != name {
+            let previous = std::mem::take(&mut entry.name);
+            entry.former.retain(|n| *n != previous && *n != name);
+            entry.former.insert(0, previous);
+        }
+        entry.name = name;
+        entry.objective = objective;
+    }
+    names
 }
 
 /// The repo name a request event advertises, if any.
@@ -199,6 +243,38 @@ mod tests {
                      "sender":{{"label":"{label}","source":"session"}}}}"#
             ),
         )
+    }
+
+    fn named(ntfy_time: u64, name: &str, objective: &str) -> Event {
+        Event {
+            ntfy_time,
+            ntfy_id: format!("n-{ntfy_time}"),
+            ..event(
+                "sender_identity",
+                &format!(
+                    r#"{{"type":"sender_identity","forMessageId":"x","forType":"session_name",
+                         "sender":{{"label":"L","source":"session","sessionTag":"abc123abc123",
+                                    "sessionName":"{name}","objective":"{objective}"}}}}"#
+                ),
+            )
+        }
+    }
+
+    #[test]
+    fn the_newest_name_wins_and_earlier_ones_become_former_names() {
+        // Out of arrival order on purpose: ntfy time decides, not log order.
+        let events = vec![named(30, "Session names", "Name agents."), named(10, "Android build", "Build the APK."),
+                          named(20, "Inbox fix", "Fix it."), named(25, "Android build", "Again.")];
+        let names = session_names(&events);
+        let got = &names["abc123abc123"];
+        assert_eq!(got.name, "Session names");
+        assert_eq!(got.objective, "Name agents.");
+        assert_eq!(got.former, ["Android build", "Inbox fix"]);
+    }
+
+    #[test]
+    fn a_sender_without_a_name_names_nothing() {
+        assert!(session_names(&[identity_event("Hitl_MCP · master · a3f2")]).is_empty());
     }
 
     #[test]

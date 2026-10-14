@@ -389,6 +389,12 @@ pub struct SenderInfo {
     /// "session" | "worktree" | "path".
     #[serde(default)]
     pub source: String,
+    /// What the agent named its session with `NameSession`, once it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+    /// The session's objective, given with its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
 }
 
 /// The gzipped body of a plan_review message.
@@ -1201,6 +1207,21 @@ mod tests {
         assert_eq!(msg.for_type, "question");
         assert_eq!(msg.sender.label, "Kay9 - work-item/1");
         assert_eq!(msg.sender.source, "worktree");
+    }
+
+    /// The tray re-serializes the sender into its windows, so a field this
+    /// struct drops never reaches the dialog.
+    #[test]
+    fn sender_info_carries_the_session_name_through_a_round_trip() {
+        let raw = r#"{"label":"Hitl_MCP · master · a3f2","source":"session",
+            "sessionName":"Inbox repaint fix","objective":"Stop the flicker."}"#;
+        let sender: SenderInfo = serde_json::from_str(raw).unwrap();
+        let json = serde_json::to_value(&sender).unwrap();
+        assert_eq!(json["sessionName"], "Inbox repaint fix");
+        assert_eq!(json["objective"], "Stop the flicker.");
+
+        let unnamed = serde_json::to_value(SenderInfo { label: "L".into(), ..Default::default() }).unwrap();
+        assert!(unnamed.get("sessionName").is_none());
     }
 
     /// Decoration only — a payload missing every field but `type` must still

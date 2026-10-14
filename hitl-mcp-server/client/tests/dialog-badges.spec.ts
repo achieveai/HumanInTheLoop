@@ -59,6 +59,15 @@ test.describe('Sender badge on the dialog window', () => {
     expect(style.whiteSpace).toBe('nowrap');
   });
 
+  test('leads with the name the agent gave its session, label and objective on hover', async ({ page }) => {
+    const sender = { ...SENDER, sessionName: 'Session names', objective: 'Let agents name sessions.' };
+    await page.goto(fixtureUrl(baseQuestion({ sender })));
+
+    const badge = page.locator('.badge-sender');
+    await expect(badge).toHaveText('Session names');
+    await expect(badge).toHaveAttribute('title', `Let agents name sessions.\n${SENDER.label}`);
+  });
+
   test('renders no badge when the question carries no sender', async ({ page }) => {
     await page.goto(fixtureUrl(baseQuestion()));
     await expect(page.locator('.badge-sender')).toHaveCount(0);
