@@ -37,7 +37,7 @@ import { renderNotification } from './render-notification.js';
 import { renderQuestion } from './render-question.js';
 import { renderHandoff } from './render-handoff.js';
 import { renderReview } from './render-review.js';
-import { composeBox, relabelCompose, renderAgentMessage } from './render-agent-message.js';
+import { renderAgentMessage } from './render-agent-message.js';
 
 function panel(container, className, title, note) {
     container.textContent = '';
@@ -117,19 +117,19 @@ export function createDetailPane({ container, invoke, onError = console.error, a
         }
 
         if (detail.row.msgType === 'agent_message') {
-            shown(detail.row, renderAgentMessage(container, detail));
+            remember(detail.row, renderAgentMessage(container, detail));
             return;
         }
         if (detail.row.msgType === 'notification') {
-            shown(detail.row, renderNotification(container, detail, actions));
+            remember(detail.row, renderNotification(container, detail, actions));
             return;
         }
         if (detail.row.msgType === 'handoff') {
-            shown(detail.row, renderHandoff(container, detail, actions));
+            remember(detail.row, renderHandoff(container, detail, actions));
             return;
         }
         if (detail.row.msgType !== 'plan_review') {
-            shown(detail.row, renderQuestion(container, detail, actions));
+            remember(detail.row, renderQuestion(container, detail, actions));
             return;
         }
 
@@ -162,14 +162,7 @@ export function createDetailPane({ container, invoke, onError = console.error, a
             if (token !== generation) return;
         }
 
-        shown(detail.row, renderReview(container, detail, body, actions, draft));
-    }
-
-    /** A renderer has painted `row`: remember it, and offer to message its session. */
-    function shown(row, controller) {
-        remember(row, controller);
-        const compose = composeBox(row, actions.onMessageAgent);
-        if (compose) container.querySelector('.detail-root')?.appendChild(compose);
+        remember(detail.row, renderReview(container, detail, body, actions, draft));
     }
 
     function remember(row, controller) {
@@ -274,7 +267,6 @@ export function createDetailPane({ container, invoke, onError = console.error, a
         if (current && line) current.replaceWith(line);
         else if (current) current.remove();
         else if (line) header.querySelector('.detail-meta')?.after(line);
-        relabelCompose(container, message);
     }
 
     function clear() {

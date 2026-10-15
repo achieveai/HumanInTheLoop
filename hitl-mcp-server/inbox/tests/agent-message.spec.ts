@@ -45,12 +45,17 @@ const sends = (page: Page) => page.evaluate(() => (window as any).__INVOCATIONS
   .map((call: any) => call.args));
 
 test.describe('Messages to agents', () => {
-  test('the compose box sends to the session of the open message', async ({ page }) => {
+  test('the reading pane has no compose box; you message from the list', async ({ page }) => {
     await open(page);
     await page.locator('.message-row[data-message-id="n-1"]').click();
+    await expect(page.locator('.detail-root')).toHaveAttribute('data-message-id', 'n-1');
+    await expect(page.locator('#pane-detail .detail-compose')).toHaveCount(0);
+  });
 
-    const compose = page.locator('.detail-compose');
-    await expect(compose.locator('.detail-compose-to')).toHaveText('To: Hitl_MCP · master · a3f2');
+  test('the list box trims and sends, then clears', async ({ page }) => {
+    await open(page);
+    await page.locator('.agent-row[data-scope-key="session:Hitl_MCP · a3f2"]').click();
+    const compose = page.locator('#list-compose');
     const send = compose.getByRole('button', { name: 'Send' });
     await expect(send).toBeDisabled();
 
@@ -67,22 +72,16 @@ test.describe('Messages to agents', () => {
     await page.evaluate(() => {
       (window as any).__REPLIES = { send_agent_message: { __error: 'offline' } };
     });
-    await page.locator('.message-row[data-message-id="n-1"]').click();
+    await page.locator('.agent-row[data-scope-key="session:Hitl_MCP · a3f2"]').click();
 
-    const text = page.locator('.detail-compose textarea');
+    const box = page.locator('#list-compose');
+    const text = box.locator('textarea');
     await text.fill('hello');
     await text.press('Control+Enter');
 
-    await expect(page.locator('.detail-compose-status')).toHaveText('Not sent. offline');
+    await expect(box.locator('.detail-compose-status')).toHaveText('Not sent. offline');
     await expect(text).toHaveValue('hello');
-    await expect(page.locator('.detail-compose').getByRole('button', { name: 'Send' })).toBeEnabled();
-  });
-
-  test('a session without a tag offers no compose box', async ({ page }) => {
-    await open(page);
-    await page.locator('.message-row[data-message-id="n-2"]').click();
-    await expect(page.locator('.detail-root')).toHaveAttribute('data-message-id', 'n-2');
-    await expect(page.locator('.detail-compose')).toHaveCount(0);
+    await expect(box.getByRole('button', { name: 'Send' })).toBeEnabled();
   });
 
   test('a sent message shows its text and that the agent replied', async ({ page }) => {
@@ -93,16 +92,14 @@ test.describe('Messages to agents', () => {
     await expect(page.locator('.detail-kicker')).toHaveText('Message to agent');
     await expect(page.locator('.agent-message-text')).toHaveText('check the build\nthen report');
     await expect(page.locator('.detail-retained')).toContainText('The agent replied');
-    // Follow-ups go to the same session.
-    await expect(page.locator('.detail-compose-to')).toHaveText('To: Hitl_MCP · master · a3f2');
   });
 
   test('a session outside a repo is named once', async ({ page }) => {
     await page.goto('/inbox-harness.html');
     const to = await page.evaluate(async () => {
-      const { composeBox } = await import('./render-agent-message.js');
-      const row = { messageId: 'n-9', sessionTag: '0123456789ab', projectKey: 'scratchpad/spike · 90eb', sessionLabel: 'scratchpad/spike · 90eb' };
-      return composeBox(row, () => Promise.resolve('id')).querySelector('.detail-compose-to').textContent;
+      const { listComposer } = await import('./render-agent-message.js');
+      const session = { sessionTag: '0123456789ab', projectKey: 'scratchpad/spike · 90eb', label: 'scratchpad/spike · 90eb' };
+      return listComposer(session, () => Promise.resolve('id')).querySelector('.detail-compose-to').textContent;
     });
     expect(to).toBe('To: scratchpad/spike · 90eb');
   });

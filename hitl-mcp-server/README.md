@@ -128,7 +128,7 @@ Launch Inbox separately; `hitl client` launches the popup/tray app.
 - Read a message in the reading pane. Answer questions or mark notifications as read.
 - Use the mark-all-read action for notifications. Undo is available for bulk read changes.
 - Change the pane layout or put the reading pane beside/below the list.
-- Message an agent: click it in the agent list and type in the box under its messages (**To: <session>**). The box under an open message works too. Sent messages show under the session as **sent**, then **replied** once the agent answers. An agent on an older HITL shows the box disabled, with the reason.
+- Message an agent: click it in the agent list and type in the box under its messages (**To: <session>**). Sent messages show under the session as **sent**, then **replied** once the agent answers. An agent on an older HITL shows the box disabled, with the reason.
 
 For reviews, select text in the formatted plan and choose **Comment on selection**, or select lines in **Source**. Comments retain raw-file line numbers, not visual wrapped-line numbers.
 

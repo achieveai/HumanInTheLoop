@@ -81,7 +81,6 @@ test.describe('Session names', () => {
     await expect(line.locator('.detail-session-name')).toHaveText('Session names');
     await expect(line.locator('.detail-session-objective')).toHaveText('Let agents name their sessions.');
     await expect(line.locator('.detail-session-former')).toHaveText('Formerly: Android build · Inbox fix');
-    await expect(page.locator('.detail-compose .detail-compose-to')).toHaveText('To: Session names');
   });
 
   test('the list box follows a rename without losing what was typed', async ({ page }) => {
@@ -125,14 +124,13 @@ test.describe('Session names', () => {
     await expect(page.locator('#list-compose').getByRole('button', { name: 'Rename' })).toHaveCount(0);
   });
 
-  test('an open message follows a rename without losing what was typed', async ({ page }) => {
+  test('an open message follows a rename without being repainted', async ({ page }) => {
     const unnamed = message({ messageId: 'n-1', msgType: 'notification', title: 'Build done', sessionTag: TAG });
     await open(page, {}, unnamed);
     await page.locator('.message-row[data-message-id="n-1"]').click();
-    const detailBox = page.locator('#pane-detail .detail-compose');
     await expect(page.locator('.detail-session')).toHaveCount(0);
-    const text = detailBox.locator('textarea');
-    await text.fill('half typed');
+    // A repaint would replace this node and lose anything typed in it.
+    await page.locator('#pane-detail .detail-root').evaluate(root => { (root as any).__kept = true; });
 
     await page.evaluate(f => {
       (window as any).__INBOX_FIXTURE = f;
@@ -140,7 +138,6 @@ test.describe('Session names', () => {
     }, fixture(NAMING));
 
     await expect(page.locator('.detail-session-name')).toHaveText('Session names');
-    await expect(detailBox.locator('.detail-compose-to')).toHaveText('To: Session names');
-    await expect(text).toHaveValue('half typed');
+    expect(await page.locator('#pane-detail .detail-root').evaluate(root => (root as any).__kept)).toBe(true);
   });
 });

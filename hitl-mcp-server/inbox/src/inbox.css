@@ -778,10 +778,6 @@ body {
     color: #c53030;
 }
 
-[data-layout='phone'] .detail-compose {
-    padding: 10px 16px 12px;
-}
-
 /* The box under the list for the agent picked in the tree. */
 .list-compose {
     flex: 0 0 auto;

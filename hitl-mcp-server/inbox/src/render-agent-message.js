@@ -1,11 +1,10 @@
 // Pane 3 — messages you send to an agent.
 //
-// Three pieces. `renderAgentMessage` shows one you already sent: its text, and
-// whether the agent has replied (a Notify naming it in `inReplyTo`). The
-// compose box sits under the footer of any message whose session can take
-// messages, addressed to that session; `listComposer` puts the same box under
-// the list when an agent is picked in the tree. The server side delivers it on
-// the agent's next hook or channel push.
+// Two pieces. `renderAgentMessage` shows one you already sent: its text, and
+// whether the agent has replied (a Notify naming it in `inReplyTo`).
+// `listComposer` puts the compose box under the list when an agent is picked
+// in the tree; the reading pane has none. The server side delivers it on the
+// agent's next hook or channel push.
 
 import { detailHeader, el } from './detail-shell.js';
 
@@ -40,15 +39,6 @@ export function renderAgentMessage(container, detail) {
     return null;
 }
 
-/**
- * The compose box for `row`'s session, or `null` when it cannot take messages:
- * no session tag (an older HITL server) or no send handler.
- */
-export function composeBox(row, onMessageAgent) {
-    if (!row?.sessionTag || !onMessageAgent) return null;
-    return buildCompose(row, onMessageAgent);
-}
-
 /** The Rename button's message, split where the caret goes. */
 const RENAME_REQUEST = ['Rename this session to "', '". Call NameSession with that name, and update the objective if it changed.'];
 
@@ -71,7 +61,7 @@ export function relabelListComposer(container, session) {
 }
 
 /** Readdress the compose box in `container` to `row`'s session, keeping what was typed. */
-export function relabelCompose(container, row) {
+function relabelCompose(container, row) {
     const form = container.querySelector('form.detail-compose');
     if (!form) return;
     const name = sessionName(row);
