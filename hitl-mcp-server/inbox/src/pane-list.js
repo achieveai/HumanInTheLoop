@@ -243,6 +243,20 @@ function visibleSelectedAnchor(container, anyVisible = false) {
     };
 }
 
+/**
+ * Whether the reader is at the top: the first message at least partly in view.
+ * New messages then show instead of the list holding what is on screen still.
+ */
+function firstRowVisible(container) {
+    const first = container.querySelector('.message-row');
+    if (!first) return true;
+    return first.getBoundingClientRect().bottom > container.getBoundingClientRect().top;
+}
+
+function firstRowId(container) {
+    return container.querySelector('.message-row')?.dataset.messageId;
+}
+
 function restoreSelectedAnchor(container, anchor) {
     const selected = Array.from(container.querySelectorAll('.message-row'))
         .find(row => row.dataset.messageId === anchor.messageId);
@@ -412,7 +426,13 @@ function focusVirtual(state, index) {
 function renderVirtualList(container, list, options) {
     let state = virtualLists.get(container);
     const entering = !state;
-    const previousAnchor = entering && container.scrollTop > 0 ? visibleSelectedAnchor(container, true) : null;
+    // At the top, new messages show (see `firstRowVisible`). A virtual list
+    // mounts rows out of order, so its top comes from the offsets instead.
+    const atTop = entering ? firstRowVisible(container)
+        : !state.messages.length || container.scrollTop < state.offsets[1];
+    const previousFirst = entering ? firstRowId(container) : state.messages[0]?.messageId;
+    const newOnTop = atTop && list.messages[0]?.messageId !== previousFirst;
+    const previousAnchor = entering && !newOnTop && container.scrollTop > 0 ? visibleSelectedAnchor(container, true) : null;
     if (!state) {
         state = { container, messages: [], options: {}, offsets: [0], indices: new Map(),
             heights: new Map(), estimates: new Map(), width: container.clientWidth, frame: 0 };
@@ -459,9 +479,10 @@ function renderVirtualList(container, list, options) {
         state.resize.observe(container);
     }
     const sameScope = state.scopeKey === list.scopeKey && state.filter === list.filter;
-    const anchor = previousAnchor ? { id: previousAnchor.messageId, within: -previousAnchor.top }
+    const anchor = newOnTop ? null
+        : previousAnchor ? { id: previousAnchor.messageId, within: -previousAnchor.top }
         : sameScope ? virtualAnchor(state) : null;
-    const end = !entering && sameScope && atVirtualEnd(state);
+    const end = !newOnTop && !entering && sameScope && atVirtualEnd(state);
     const selectionChanged = !entering && state.options.selectedId !== options.selectedId;
     state.messages = list.messages; state.options = options;
     state.scopeKey = list.scopeKey; state.filter = list.filter;
@@ -488,7 +509,10 @@ export function renderMessageList(container, list, options = {}) {
         return;
     }
     const virtual = virtualLists.get(container);
-    const anchor = visibleSelectedAnchor(container, Boolean(virtual));
+    const atTop = virtual ? container.scrollTop < virtual.offsets[1] : firstRowVisible(container);
+    const previousFirst = virtual ? virtual.messages[0]?.messageId : firstRowId(container);
+    const newOnTop = atTop && list.messages[0]?.messageId !== previousFirst;
+    const anchor = newOnTop ? null : visibleSelectedAnchor(container, Boolean(virtual));
     if (virtual) {
         cancelAnimationFrame(virtual.frame);
         virtual.resize.disconnect();
@@ -502,6 +526,7 @@ export function renderMessageList(container, list, options = {}) {
     const nodes = list.messages.length ? list.messages.map(message => messageRow(message, options))
         : [el('p', 'list-empty', options.emptyText ?? emptyText(list))];
     reconcileMessageNodes(container, nodes);
+    if (newOnTop) container.scrollTop = 0;
     if (!anchor) return;
 
     restoreSelectedAnchor(container, anchor);
