@@ -63,6 +63,8 @@ export interface SenderIdentity {
   sessionName?: string;
   /** The session's objective, given with its name. */
   objective?: string;
+  /** The device name of the machine the agent runs on (`config.deviceName`). */
+  machine?: string;
 }
 
 // -----------------------------------------------------------

@@ -1544,6 +1544,17 @@ body {
     color: #4c51bf;
 }
 
+/* Which machine the agent runs on. */
+.message-machine {
+    flex-shrink: 0;
+    color: #2c7a7b;
+}
+
+.badge-machine {
+    background: #e6fffa;
+    color: #234e52;
+}
+
 .detail-session {
     display: flex;
     flex-wrap: wrap;

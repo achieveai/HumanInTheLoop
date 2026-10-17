@@ -79,7 +79,18 @@ describe('resolveSenderIdentity', () => {
     expect(resolveSenderIdentity(worktreeDir, 'Kay9', noSession)).toEqual({
       label: 'Kay9 - work-item/1-reviewplan',
       source: 'worktree',
+      machine: 'Kay9',
     });
+  });
+
+  it('names the machine on every tier, so Inbox can show where a message came from', () => {
+    const plainDir = path.join(root, 'machine-dir');
+    mkdirSync(plainDir, { recursive: true });
+
+    expect(resolveSenderIdentity(plainDir, 'Kay9', () => 'session-a').machine).toBe('Kay9');
+    expect(resolveSenderIdentity(plainDir, 'Kay9', noSession).machine).toBe('Kay9');
+    // No device name configured: say nothing rather than an empty machine.
+    expect(resolveSenderIdentity(plainDir, '', () => 'session-a')).not.toHaveProperty('machine');
   });
 
   it('falls back to the path tier for a non-worktree git repo (main working tree)', () => {

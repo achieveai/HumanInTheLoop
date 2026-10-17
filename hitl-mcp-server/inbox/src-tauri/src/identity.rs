@@ -41,6 +41,8 @@ pub struct Identity {
     /// The session's address for messages from the Inbox (`sessionTag`), on
     /// senders new enough to publish one.
     pub session_tag: Option<String>,
+    /// The machine the agent runs on, on senders new enough to publish it.
+    pub machine: Option<String>,
 }
 
 /// The sender label carried by, or attached to, one subject's events.
@@ -84,8 +86,17 @@ pub fn sender_info(events: &[Event]) -> Option<(String, Option<String>)> {
 /// The `sessionTag` a subject's sender published, if any — what a message
 /// from the Inbox is addressed to.
 pub fn sender_tag(events: &[Event]) -> Option<String> {
+    sender_field(events, "sessionTag")
+}
+
+/// The machine a subject's sender runs on, if its HITL publishes one.
+pub fn sender_machine(events: &[Event]) -> Option<String> {
+    sender_field(events, "machine")
+}
+
+fn sender_field(events: &[Event], key: &str) -> Option<String> {
     events.iter().find_map(|e| match e.msg_type.as_str() {
-        "plan_review" | "sender_identity" => e.json().get("sender")?.get("sessionTag")?
+        "plan_review" | "sender_identity" => e.json().get("sender")?.get(key)?
             .as_str()
             .filter(|s| !s.is_empty())
             .map(str::to_string),
@@ -206,6 +217,7 @@ pub fn resolve(request: &Event, events: &[Event]) -> Option<Identity> {
         project_key,
         session_key,
         session_tag: sender_tag(events),
+        machine: sender_machine(events),
     })
 }
 
@@ -295,8 +307,21 @@ mod tests {
                 session_label: "master · a3f2".to_string(),
                 project_key: "Hitl_MCP".to_string(),
                 session_tag: None,
+                machine: None,
             })
         );
+    }
+
+    #[test]
+    fn the_sender_names_its_machine() {
+        let q = question("Hitl_MCP");
+        let id = event(
+            "sender_identity",
+            r#"{"type":"sender_identity","forMessageId":"q-1","forType":"question",
+                "sender":{"label":"Hitl_MCP · master · a3f2","source":"session","machine":"Kay9"}}"#,
+        );
+        let events = vec![q.clone(), id];
+        assert_eq!(resolve(&q, &events).unwrap().machine.as_deref(), Some("Kay9"));
     }
 
     #[test]

@@ -193,6 +193,11 @@ function messageRow(message, { selectedId, onSelect } = {}) {
         if (message.objective) session.title = message.objective;
         meta.appendChild(session);
     }
+    if (message.machine) {
+        const machine = el('span', 'message-machine', `on ${message.machine}`);
+        machine.title = `The agent runs on ${message.machine}`;
+        meta.appendChild(machine);
+    }
     if (message.responder) {
         const responder = el('span', 'message-responder', message.responder);
         if (message.respondedAt) responder.title = formatAbsolute(message.respondedAt);
@@ -304,7 +309,7 @@ function reconcileMessageNodes(container, candidates) {
 function heightKind(message) {
     const b = message.badges ?? {};
     const hasBadges = message.work || b.repo || b.batchCount || b.revision || b.attachment || b.plaintext;
-    return `${Boolean(message.contextSnippet || message.responder || message.sessionName)}:${Boolean(hasBadges)}`;
+    return `${Boolean(message.contextSnippet || message.responder || message.sessionName || message.machine)}:${Boolean(hasBadges)}`;
 }
 
 function measureOffsets(state) {

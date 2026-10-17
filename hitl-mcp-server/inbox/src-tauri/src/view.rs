@@ -251,6 +251,9 @@ pub struct MessageRow {
     pub session_tag: Option<String>,
     #[serde(flatten)]
     pub naming: Naming,
+    /// The machine the sending agent runs on, once its sender says so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
     pub project_key: String,
     pub unattributed: bool,
 }
@@ -326,6 +329,7 @@ fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
             session_label: identity.as_ref().map(|i| i.session_label.clone()),
             session_tag: None,
             naming: Naming::default(),
+            machine: identity.as_ref().and_then(|i| i.machine.clone()),
             project_key: identity
                 .as_ref()
                 .map(|i| i.project_key.clone())
@@ -456,6 +460,9 @@ pub struct SessionRow {
     pub session_tag: Option<String>,
     #[serde(flatten)]
     pub naming: Naming,
+    /// The machine the session's newest attributed message came from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -535,6 +542,7 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
     let mut labels: BTreeMap<String, (u64, String)> = BTreeMap::new();
     let mut session_tags: BTreeMap<String, String> = BTreeMap::new();
     let mut namings: BTreeMap<String, Naming> = BTreeMap::new();
+    let mut machines: BTreeMap<String, (u64, String)> = BTreeMap::new();
     let mut total = Counters::default();
 
     for subject in &subjects {
@@ -548,6 +556,12 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
                 let newest = labels.entry(id.session_key.clone()).or_insert((0, String::new()));
                 if subject.last_event_at >= newest.0 {
                     *newest = (subject.last_event_at, id.session_label.clone());
+                }
+                if let Some(machine) = &id.machine {
+                    let newest = machines.entry(id.session_key.clone()).or_insert((0, String::new()));
+                    if subject.last_event_at >= newest.0 {
+                        *newest = (subject.last_event_at, machine.clone());
+                    }
                 }
                 (id.project_key.clone(), id.session_key.clone())
             }
@@ -585,6 +599,7 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
                     scope_key: format!("session:{session_key}"),
                     session_tag: session_tags.remove(&session_key),
                     naming: namings.remove(&session_key).unwrap_or_default(),
+                    machine: machines.remove(&session_key).map(|(_, machine)| machine),
                     session_key,
                     project_key: project_key.clone(),
                     state: state.as_str(),
@@ -2037,6 +2052,28 @@ mod tests {
         ];
         let json = serde_json::to_value(&build_tree(&events, NOW).projects[0].sessions[0]).unwrap();
         assert!(json.get("sessionName").is_none() && json.get("formerNames").is_none());
+    }
+
+    #[test]
+    fn rows_and_sessions_name_the_machine_the_agent_runs_on() {
+        let on_kay9 = ev(
+            "ntfy-q-1-ident",
+            NOW - MINUTE,
+            r#"{"type":"sender_identity","forMessageId":"q-1","forType":"question",
+                "sender":{"label":"Hitl_MCP · master · a3f2","source":"session","machine":"Kay9"}}"#,
+        );
+        let events = vec![question("q-1", NOW - MINUTE, "Hitl_MCP"), on_kay9];
+        let row = &build_list(&events, None, Some("all"), NOW).messages[0];
+        assert_eq!(serde_json::to_value(row).unwrap()["machine"], "Kay9");
+        assert_eq!(build_tree(&events, NOW).projects[0].sessions[0].machine.as_deref(), Some("Kay9"));
+
+        // An older sender names no machine; the field is left out.
+        let older = vec![
+            question("q-2", NOW - MINUTE, "Hitl_MCP"),
+            tagged_identity("q-2", NOW - MINUTE, "Hitl_MCP · master · a3f2", TAG),
+        ];
+        let row = &build_list(&older, None, Some("all"), NOW).messages[0];
+        assert!(serde_json::to_value(row).unwrap().get("machine").is_none());
     }
 
     #[test]

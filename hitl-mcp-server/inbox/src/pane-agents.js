@@ -83,7 +83,7 @@ function visibleTree(tree, query, selectedScope) {
     for (const project of tree.projects) {
         const projectHit = q !== '' && matches(project.name);
         const sessions = project.sessions.filter(session => {
-            if (q) return projectHit || [session.label, session.sessionName, session.objective, ...(session.formerNames ?? [])].some(matches);
+            if (q) return projectHit || [session.label, session.sessionName, session.objective, session.machine, ...(session.formerNames ?? [])].some(matches);
             const shown = session.recent !== false || session.scopeKey === selectedScope;
             if (!shown) hidden++;
             return shown;
@@ -96,11 +96,17 @@ function visibleTree(tree, query, selectedScope) {
     return { projects, hidden };
 }
 
-/** Hover text for a session row: its objective, label and earlier names. */
+/** Hover text for a session row: its objective, label, machine and earlier names. */
 export function sessionHint(session) {
-    if (!session.sessionName) return undefined;
-    const lines = [session.objective, session.label, formerly(session.formerNames)];
-    return lines.filter(Boolean).join('\n');
+    const lines = session.sessionName
+        ? [session.objective, session.label, onMachine(session.machine), formerly(session.formerNames)]
+        : [onMachine(session.machine)];
+    return lines.filter(Boolean).join('\n') || undefined;
+}
+
+/** "On Kay9", or '' when the sender's HITL is too old to say. */
+export function onMachine(machine) {
+    return machine ? `On ${machine}` : '';
 }
 
 /** "Formerly: A · B", newest first, or '' when a session was never renamed. */
@@ -157,7 +163,8 @@ function drawTree(container, body, query) {
                 scopeKey: session.scopeKey,
                 glyph: session.glyph,
                 name: session.sessionName || session.label,
-                label: session.sessionName ? session.label : undefined,
+                // The small grey text: the branch once named, and the machine.
+                label: [session.sessionName ? session.label : '', session.machine].filter(Boolean).join(' · ') || undefined,
                 hint: sessionHint(session),
                 state: session.state,
                 pending: session.pendingCount,

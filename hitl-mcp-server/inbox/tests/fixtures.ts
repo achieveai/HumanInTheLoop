@@ -55,6 +55,8 @@ export interface MessageRow {
   sessionName?: string;
   objective?: string;
   formerNames?: string[];
+  /** The machine the agent runs on; absent on older senders. */
+  machine?: string;
   projectKey: string;
   unattributed: boolean;
 }
@@ -74,6 +76,8 @@ export interface SessionRow {
   sessionName?: string;
   objective?: string;
   formerNames?: string[];
+  /** The machine the agent runs on; absent on older senders. */
+  machine?: string;
 }
 
 export interface ProjectNode {

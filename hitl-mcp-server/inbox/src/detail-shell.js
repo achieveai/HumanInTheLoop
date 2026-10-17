@@ -110,6 +110,11 @@ export function detailHeader(detail, kicker) {
     appendWorkBadges(meta, row.work);
     const badge = senderBadge(sender);
     if (badge) meta.appendChild(badge);
+    if (row.machine) {
+        const machine = el('span', 'badge badge-machine', `on ${row.machine}`);
+        machine.title = `The agent runs on ${row.machine}`;
+        meta.appendChild(machine);
+    }
     if (row.badges?.repo) meta.appendChild(el('span', 'badge badge-repo', row.badges.repo));
     if (row.badges?.revision) meta.appendChild(el('span', 'badge badge-revision', `r${row.badges.revision}`));
     if (row.badges?.plaintext === true) {

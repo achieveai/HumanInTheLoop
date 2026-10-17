@@ -395,6 +395,9 @@ pub struct SenderInfo {
     /// The session's objective, given with its name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub objective: Option<String>,
+    /// The device name of the machine the agent runs on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 /// The gzipped body of a plan_review message.
@@ -1214,11 +1217,12 @@ mod tests {
     #[test]
     fn sender_info_carries_the_session_name_through_a_round_trip() {
         let raw = r#"{"label":"Hitl_MCP · master · a3f2","source":"session",
-            "sessionName":"Inbox repaint fix","objective":"Stop the flicker."}"#;
+            "sessionName":"Inbox repaint fix","objective":"Stop the flicker.","machine":"Kay9"}"#;
         let sender: SenderInfo = serde_json::from_str(raw).unwrap();
         let json = serde_json::to_value(&sender).unwrap();
         assert_eq!(json["sessionName"], "Inbox repaint fix");
         assert_eq!(json["objective"], "Stop the flicker.");
+        assert_eq!(json["machine"], "Kay9");
 
         let unnamed = serde_json::to_value(SenderInfo { label: "L".into(), ..Default::default() }).unwrap();
         assert!(unnamed.get("sessionName").is_none());

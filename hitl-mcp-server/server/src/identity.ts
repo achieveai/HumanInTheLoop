@@ -127,7 +127,8 @@ function composeSessionLabel(cwd: string, sessionId: string): string {
  * Resolve a display-ready sender identity for an outgoing message, in
  * precedence order: session name override > linked-worktree branch > path
  * fallback. A session the agent named with `NameSession` also carries that
- * name and objective, read from the session's saved state.
+ * name and objective, read from the session's saved state. Every tier carries
+ * `machine`, so the human can tell which machine a message came from.
  *
  * Never reads `process.cwd()` or `os.hostname()` itself, so callers control
  * (and tests can mock) both `cwd` and `deviceName`; per-tool cwd rules live at
@@ -138,6 +139,7 @@ export function resolveSenderIdentity(
   deviceName: string,
   sessionResolver: SessionNameResolver = defaultSessionNameResolver
 ): SenderIdentity {
+  const machine = deviceName ? { machine: deviceName } : {};
   const sessionName = sessionResolver();
   if (sessionName !== null) {
     const tag = sessionTag(sessionName);
@@ -147,15 +149,16 @@ export function resolveSenderIdentity(
       source: 'session',
       sessionTag: tag,
       ...(named ? { sessionName: named.name, objective: named.objective } : {}),
+      ...machine,
     };
   }
 
   if (isLinkedWorktree(cwd)) {
     const branch = detectRepoContext(cwd)?.branch;
-    if (branch) return { label: `${deviceName} - ${branch}`, source: 'worktree' };
+    if (branch) return { label: `${deviceName} - ${branch}`, source: 'worktree', ...machine };
     // isLinkedWorktree true but no branch (race/edge case) — fall through rather
     // than emit a malformed label.
   }
 
-  return { label: `${deviceName} ${lastTwoSegments(cwd)}`, source: 'path' };
+  return { label: `${deviceName} ${lastTwoSegments(cwd)}`, source: 'path', ...machine };
 }
