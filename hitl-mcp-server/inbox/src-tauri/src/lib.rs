@@ -298,6 +298,7 @@ const SENDER_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// A desktop toast for one new event, when [`toast::Toaster`] says so.
 fn show_toast(handle: &tauri::AppHandle, event_time: u64, decrypted: &str) {
+    #[cfg(not(windows))]
     use tauri_plugin_notification::NotificationExt;
 
     let toaster = handle.state::<Arc<toast::Toaster>>().inner().clone();
@@ -327,7 +328,25 @@ fn show_toast(handle: &tauri::AppHandle, event_time: u64, decrypted: &str) {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
-        if let Err(error) = handle.notification().builder().title(toast.title()).body(toast.body).show() {
+        // Windows goes straight to the toast crate the plugin wraps: through
+        // notify-rust, every toast carries an empty subtitle line between the
+        // title and the text, and the banner showed the title alone.
+        #[cfg(windows)]
+        let shown = tauri_winrt_notification::Toast::new(&handle.config().identifier)
+            .title(&toast.title())
+            .text1(&toast.body)
+            .sound(None)
+            .show()
+            .map_err(|error| error.to_string());
+        #[cfg(not(windows))]
+        let shown = handle
+            .notification()
+            .builder()
+            .title(toast.title())
+            .body(toast.body)
+            .show()
+            .map_err(|error| error.to_string());
+        if let Err(error) = shown {
             log::warn!("could not show a desktop notification: {error}");
         }
     });

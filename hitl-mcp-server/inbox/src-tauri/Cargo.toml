@@ -38,6 +38,9 @@ env_logger = { version = "0.11", default-features = false, features = ["humantim
 # its own shortcut with these (see src/start_menu.rs). The same version Tauri
 # uses, so no second copy is built.
 [target.'cfg(windows)'.dependencies]
+# The toast crate the notification plugin wraps, called directly on Windows to
+# leave out the plugin's empty subtitle line (see show_toast in src/lib.rs).
+tauri-winrt-notification = "0.8"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Storage_EnhancedStorage",
