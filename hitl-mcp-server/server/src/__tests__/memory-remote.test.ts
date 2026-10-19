@@ -473,10 +473,13 @@ describe('RemoteSync', () => {
     write(b, 'new.md', 'recent\n');
     await tickAll(topic);
 
-    const back = machine('a', topic); // offline over 11 h, so it asks; b answers without old.md
+    // Offline over 11 h, so it asks; b answers without old.md. b only sees the request once its
+    // second is finished, so move the clock; and wait longer than the test, so back can only
+    // become ready by taking that answer, never by giving up on it.
+    const back = machine('a', topic, undefined, { snapshotWaitMs: 60_000 });
     back.start();
-    await until(() => back.ready);
     await settle(topic);
+    await until(() => back.ready);
     await tickAll(topic);
     await tickAll(topic);
     expect(topic.published.some(p => p.kind === 'snapshot_request' && p.from === back.device)).toBe(true);
