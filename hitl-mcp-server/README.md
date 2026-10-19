@@ -129,6 +129,7 @@ Launch Inbox separately; `hitl client` launches the popup/tray app.
 - Use the mark-all-read action for notifications. Undo is available for bulk read changes.
 - Change the pane layout or put the reading pane beside/below the list.
 - Message an agent: click it in the agent list and type in the box under its messages (**To: <session>**). Sent messages show under the session as **sent**, then **replied** once the agent answers. An agent on an older HITL shows the box disabled, with the reason.
+- Get a desktop notification (a Windows toast, or a macOS/Linux banner) for each new question, plan review, handoff, and notification. Work updates don't notify. Nothing shows while the Inbox window is focused, for messages more than 2 minutes old, or past 3 in 10 seconds (one summary instead). The title is the agent's session name. The bell (🔔/🔕) in the Inbox bar turns them off and on; the choice is saved in `<HITL_HOME>/inbox-settings.json`. Messages travel encrypted, but a toast shows the first line in plain text, and the OS may keep it in its notification history or show it on the lock screen. Turn the bell off if that matters on this machine.
 
 For reviews, select text in the formatted plan and choose **Comment on selection**, or select lines in **Source**. Comments retain raw-file line numbers, not visual wrapped-line numbers.
 

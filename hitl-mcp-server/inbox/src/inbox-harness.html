@@ -45,6 +45,18 @@
                         return Promise.resolve({ mobile: false, configured: true, topicId: null });
                     }
 
+                    // Desktop notifications: `window.__NOTIFICATIONS` holds the
+                    // saved switch, and a test can set it to an Error to make
+                    // the save fail.
+                    if (cmd === 'get_notifications_enabled') {
+                        return Promise.resolve(window.__NOTIFICATIONS ?? true);
+                    }
+                    if (cmd === 'set_notifications_enabled') {
+                        if (window.__NOTIFICATIONS instanceof Error) return Promise.reject(window.__NOTIFICATIONS);
+                        window.__NOTIFICATIONS = args.enabled;
+                        return Promise.resolve(args.enabled);
+                    }
+
                     if (cmd === 'list_sessions') {
                         return Promise.resolve(fixture.sessions ?? emptyTree());
                     }
@@ -177,6 +189,8 @@
         <button id="pane-cycle" aria-label="Collapse panes" title="Collapse panes (Ctrl+B)">◧</button>
         <button id="reading-pane-toggle" aria-label="Place reading pane below message list"
                 title="Place reading pane below message list">▥</button>
+        <button id="notifications-toggle" aria-pressed="true" aria-label="Desktop notifications"
+                title="Desktop notifications">🔔</button>
         <span class="inbox-bar-title">Inbox</span>
     </div>
     <div class="inbox-scrim" id="inbox-scrim"></div>

@@ -34,8 +34,9 @@ pub type SharedStore = Arc<Mutex<Store>>;
 /// and a slow one names the events responsible.
 const SLOW_EVENT: std::time::Duration = std::time::Duration::from_millis(20);
 
-/// Called once per genuinely new event, never on a replay.
-pub type OnChanged = Box<dyn Fn() + Send + Sync>;
+/// Called once per genuinely new event, never on a replay, with that event and
+/// its decrypted payload.
+pub type OnChanged = Box<dyn Fn(&NtfyEvent, &str) + Send + Sync>;
 
 pub struct InboxSink {
     store: SharedStore,
@@ -125,7 +126,7 @@ impl NtfySink for InboxSink {
         // bury the outliers it exists to find.
         let t = std::time::Instant::now();
         if self.record(event, decrypted) {
-            (self.changed)();
+            (self.changed)(event, decrypted);
         }
         let recorded = t.elapsed();
 
@@ -233,7 +234,7 @@ mod tests {
                 store.clone(),
                 waiters.clone(),
                 Queue::new(tx, pending.clone()),
-                Box::new(move || {
+                Box::new(move |_, _| {
                     counter.fetch_add(1, Ordering::SeqCst);
                 }),
             ),
@@ -304,7 +305,7 @@ mod tests {
             store,
             waiters,
             Queue::new(tx, pending),
-            Box::new(move || {
+            Box::new(move |_, _| {
                 counter.fetch_add(1, Ordering::SeqCst);
             }),
         );

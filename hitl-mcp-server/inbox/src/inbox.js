@@ -18,6 +18,7 @@ import {
 import { listComposer, relabelListComposer } from './render-agent-message.js';
 import { createReplyActions } from './reply.js';
 import { createConnectionSettings } from './settings.js';
+import { createNotificationToggle } from './notifications.js';
 
 /** Emitted by the Rust side when a genuinely new event lands. */
 const CHANGED_EVENT = 'inbox-changed';
@@ -877,6 +878,10 @@ async function main() {
         onConfigured: () => startInbox().catch(console.error),
     });
     await connection.initialize();
+    await createNotificationToggle({
+        invoke,
+        button: document.getElementById('notifications-toggle'),
+    }).initialize();
 }
 
 main().catch(console.error);

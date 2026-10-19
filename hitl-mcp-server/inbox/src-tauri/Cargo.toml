@@ -20,6 +20,9 @@ tauri-build = { version = "2", features = [] }
 # hitl-client is the process the MCP server auto-launches and the one that owns
 # the tray; a second tray icon for the same topic would be noise.
 tauri = { version = "2", features = [] }
+# Desktop toasts (Windows, macOS, Linux) and Android notifications for new
+# questions, reviews, handoffs and notifications; see src/toast.rs.
+tauri-plugin-notification = "~2.4"
 hitl-transport = { path = "../../crates/hitl-transport" }
 hitl-store = { path = "../../crates/hitl-store" }
 serde = { workspace = true }

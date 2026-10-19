@@ -25,11 +25,13 @@ async function open(page: Page, fixture: Fixture) {
 }
 
 async function commands(page: Page): Promise<string[]> {
-  // Connection setup is shell lifecycle, not a pane/body read. Keep these
-  // assertions scoped to the projection commands whose ordering they specify.
-  return page.evaluate(() => (window as any).__INVOCATIONS
+  // Connection setup and the notification switch are shell lifecycle, not a
+  // pane/body read. Keep these assertions scoped to the projection commands
+  // whose ordering they specify.
+  const shell = ['get_connection_settings', 'get_notifications_enabled'];
+  return page.evaluate(shell => (window as any).__INVOCATIONS
     .map((i: any) => i.cmd)
-    .filter((command: string) => command !== 'get_connection_settings'));
+    .filter((command: string) => !shell.includes(command)), shell);
 }
 
 async function deferReply(page: Page, command: string) {
