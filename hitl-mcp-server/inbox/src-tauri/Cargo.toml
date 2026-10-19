@@ -34,6 +34,20 @@ log = { workspace = true, features = ["std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
 
+# Windows pops a toast up only for an app on the Start menu; a bare exe adds
+# its own shortcut with these (see src/start_menu.rs). The same version Tauri
+# uses, so no second copy is built.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

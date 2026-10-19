@@ -11,6 +11,8 @@ mod reply;
 mod session;
 mod settings;
 mod sink;
+#[cfg(windows)]
+mod start_menu;
 mod toast;
 mod view;
 
@@ -353,8 +355,9 @@ fn set_notifications_enabled(
     Ok(enabled)
 }
 
-/// Android 13+ asks before an app may post notifications; desktops answer
-/// "granted" without asking anyone.
+/// Gets this OS ready to show toasts. Android 13+ asks before an app may post
+/// notifications; desktops answer "granted" without asking anyone. Windows
+/// pops toasts up only for an app on the Start menu (see `start_menu`).
 ///
 /// On a thread of its own: the Android prompt waits for the person to answer,
 /// and that must not hold up setup or a command on the main thread.
@@ -363,6 +366,17 @@ fn ask_to_notify(app: &tauri::AppHandle) {
 
     let app = app.clone();
     std::thread::spawn(move || {
+        #[cfg(windows)]
+        {
+            let config = app.config();
+            let product = config.product_name.as_deref().unwrap_or("HITL Inbox");
+            match start_menu::ensure_shortcut(product, &config.identifier) {
+                Ok(Some(lnk)) => log::info!("added {} so Windows shows the Inbox's toasts", lnk.display()),
+                Ok(None) => {}
+                Err(error) => log::warn!("toasts may arrive without a banner: {error}"),
+            }
+        }
+
         let notification = app.notification();
         match notification.permission_state() {
             Ok(PermissionState::Granted | PermissionState::Denied) => {}
