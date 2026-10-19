@@ -4,6 +4,7 @@ import { homedir, arch } from 'os';
 import path from 'path';
 import { saveConfig, generateDefaultConfig, getConfigPath, setMemoryRemote } from './config.js';
 import { detectAutoBackgroundStatus, buildAutoBackgroundRemediationText } from './host-settings.js';
+import { describeChatQuestions, setChatQuestions } from './chat-questions.js';
 
 /** Result of a single setup step. */
 export interface SetupStepResult {
@@ -245,6 +246,16 @@ export async function performSetup(
       });
     }
   }
+
+  // Agents ask through HITL, not the host's chat box: turn each installed
+  // host's built-in question tool off. Never fails setup; a file it can't
+  // change is a warning with what to set by hand.
+  const chatQuestions = setChatQuestions(false);
+  steps.push({
+    step: 'chat-questions',
+    status: chatQuestions.some(r => r.state === 'unknown') ? 'warning' : 'ok',
+    message: ['Built-in chat question tools (undo with "hitl chat-questions on"):', ...describeChatQuestions(chatQuestions)].join('\n'),
+  });
 
   // Step 2 (non-fatal diagnostic): warn if the auto-background env guard
   // isn't active, so a blocking HITL call can't get yanked into the

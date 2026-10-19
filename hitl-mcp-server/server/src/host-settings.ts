@@ -83,10 +83,10 @@ export interface ApplySettingsResult {
  * removed on failure so a full disk (or a failed rename) cannot leave debris
  * behind.
  */
-function writeAtomic(file: string, contents: string): void {
+export function writeAtomic(file: string, contents: string, mode?: number): void {
   const tmp = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
   try {
-    writeFileSync(tmp, contents, 'utf-8');
+    writeFileSync(tmp, contents, mode === undefined ? 'utf-8' : { encoding: 'utf-8', mode });
     renameSync(tmp, file);
   } catch (err) {
     try {

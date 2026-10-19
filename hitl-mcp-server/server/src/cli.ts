@@ -5,6 +5,7 @@ import { execFileSync } from 'child_process';
 import { loadConfig, saveConfig, generateDefaultConfig, getConfigPath, setMemoryRemote } from './config.js';
 import { findClientBinary, launchClient } from './setup.js';
 import { applyAutoBackgroundSetting } from './host-settings.js';
+import { chatQuestionsStatus, describeChatQuestions, setChatQuestions } from './chat-questions.js';
 import { runStopHook } from './handoff-hook.js';
 import { releaseWaiterSlot, runMessagesHook, waitForMessages, hookSessionId, type HookResult } from './agent-hook.js';
 import { sendAgentMessage } from './agent-messages.js';
@@ -26,6 +27,9 @@ Usage:
   hitl test                Send a test question through ntfy
   hitl client              Launch the HITL desktop client app
   hitl claude-code install Register HITL as a Claude Code MCP server (user scope)
+  hitl chat-questions off|on|status
+                           Turn Claude Code, Codex and Copilot's built-in chat question
+                           tool off (agents ask through HITL instead), back on, or show it
   hitl hook stop           Claude Code Stop hook: hand finished work to the Inbox
   hitl hook session-start --host <claude|codex|copilot>
                            Sync this repo's shared memory into the session
@@ -57,6 +61,8 @@ async function main() {
       return cmdClient();
     case 'claude-code':
       return cmdClaudeCode(args.slice(1));
+    case 'chat-questions':
+      return cmdChatQuestions(args.slice(1));
     case 'hook':
       return cmdHook(args.slice(1));
     case 'memory':
@@ -418,10 +424,26 @@ function cmdClaudeCodeInstall() {
   if (result.hostSetting.updated) {
     console.log(`Updated global host settings at ${result.hostSetting.path}`);
   }
+  if (result.success) {
+    console.log('Agents ask through HITL, not the chat box:');
+    for (const line of describeChatQuestions(setChatQuestions(false))) console.log(`  ${line}`);
+  }
   console.log(result.restartInstruction);
   if (!result.success) {
     process.exit(1);
   }
+}
+
+function cmdChatQuestions(args: string[]) {
+  const action = args[0];
+  if (action !== 'off' && action !== 'on' && action !== 'status') {
+    console.error(`Unknown chat-questions action: ${action ?? '(none)'}. Use off, on or status.`);
+    process.exit(1);
+  }
+  const results = action === 'status' ? chatQuestionsStatus() : setChatQuestions(action === 'on');
+  for (const line of describeChatQuestions(results)) console.log(line);
+  if (results.some(r => r.changed)) console.log('Start new agent sessions for this to take effect.');
+  if (action !== 'status' && results.some(r => r.state === 'unknown')) process.exit(1);
 }
 
 function cmdClaudeCode(args: string[]) {

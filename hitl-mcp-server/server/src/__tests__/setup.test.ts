@@ -61,6 +61,14 @@ jest.unstable_mockModule('../host-settings.js', () => ({
   AUTO_BACKGROUND_TARGET_VALUE: '0',
 }));
 
+// chat-questions: setup turns built-in question tools off; never touch real host files.
+type ChatResult = { host: string; file: string; state: string; changed?: boolean; note?: string };
+const mockSetChatQuestions = jest.fn<(on: boolean) => ChatResult[]>();
+jest.unstable_mockModule('../chat-questions.js', () => ({
+  setChatQuestions: mockSetChatQuestions,
+  describeChatQuestions: (results: ChatResult[]) => results.map(r => `${r.host}: ${r.state}`),
+}));
+
 // Dynamically import the module under test AFTER mocks are registered
 const { performSetup, isProcessRunning, findClientBinary, launchClient, ensureClientRunning } = await import('../setup.js');
 
@@ -77,6 +85,7 @@ describe('setup', () => {
       configuredForRestart: false,
     });
     mockBuildAutoBackgroundRemediationText.mockReturnValue('mock remediation text');
+    mockSetChatQuestions.mockReturnValue([{ host: 'claude', file: '/mock/home/.claude/settings.json', state: 'off' }]);
   });
 
   // ---- isProcessRunning ----
@@ -250,6 +259,19 @@ describe('setup', () => {
       expect(mockSpawn).not.toHaveBeenCalled();
     });
 
+    it('turns the built-in chat question tools off, and warns about a file it cannot change', async () => {
+      mockExistsSync.mockReturnValue(true);
+
+      const result = await performSetup('/mock/server/dist', { autoLaunchClient: false });
+      expect(mockSetChatQuestions).toHaveBeenCalledWith(false);
+      expect(result.steps.find((s) => s.step === 'chat-questions')).toMatchObject({ status: 'ok' });
+
+      mockSetChatQuestions.mockReturnValue([{ host: 'copilot', file: 'settings.json', state: 'unknown', note: 'by hand' }]);
+      const odd = await performSetup('/mock/server/dist', { autoLaunchClient: false });
+      expect(odd.success).toBe(true);
+      expect(odd.steps.find((s) => s.step === 'chat-questions')).toMatchObject({ status: 'warning' });
+    });
+
     it('turns memory sync between machines on only when asked', async () => {
       mockExistsSync.mockReturnValue(true);
 
@@ -288,7 +310,7 @@ describe('setup', () => {
       const result: SetupResult = await performSetup('/mock/server/dist');
 
       expect(result.success).toBe(true);
-      expect(result.steps).toHaveLength(3);
+      expect(result.steps).toHaveLength(4);
       expect(result.steps[0].status).toBe('ok');
       const clientStep = result.steps.find((s) => s.step === 'client');
       expect(clientStep?.status).toBe('already_running');

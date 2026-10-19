@@ -338,6 +338,8 @@ Once the MCP server is running, checks/backfills its configuration and normally 
 
 Optional `memoryRemote` (boolean): `true` syncs agent memory with your other machines, encrypted, over `<topicId>-memory`; `false` keeps it on this machine. It needs an `encryptionKey`, applies to this machine only, and takes effect when HITL sessions restart. `hitl memory remote on|off` does the same from a terminal.
 
+It also turns off each installed host's built-in chat question tool (Claude Code `AskUserQuestion`, Codex `request_user_input`, Copilot CLI `ask_user`), so agents ask through HITL. See `hitl chat-questions` below.
+
 ## Blocking and host timeouts
 
 `AskUserQuestion` and `ReviewPlan` block the agent until a human responds. How long they are *allowed* to block is decided by your MCP host, not by this server.
@@ -363,7 +365,8 @@ Cancellation is honoured either way: when the host cancels a request, the server
 | `hitl client` | Launch the tray client, not Inbox |
 | `hitl send <session-tag> <text>` | Send an encrypted message to one agent session |
 | `hitl hook messages --host <h> --event <e>` | Deliver waiting messages from a hook (used by the hitl plugin) |
-| `hitl claude-code install` | Register HITL in Claude Code's user scope and adjust its global backgrounding setting |
+| `hitl claude-code install` | Register HITL in Claude Code's user scope, adjust its global backgrounding setting, and turn chat questions off |
+| `hitl chat-questions off\|on\|status` | Turn the built-in chat question tool off in each installed host's user config (`~/.claude/settings.json` deny rule, `~/.codex/config.toml` `[tools.experimental_request_user_input] enabled = false`, `~/.copilot/settings.json` `"askUser": false`), back on, or show it. Backs up each changed file first; leaves a file it can't parse alone |
 | `hitl help` | Show CLI help |
 
 For local builds, replace `hitl` with `node server/dist/cli.js` from `hitl-mcp-server`.
