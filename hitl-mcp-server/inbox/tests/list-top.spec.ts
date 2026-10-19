@@ -33,9 +33,10 @@ async function arrive(page: Page, messages: ReturnType<typeof rows>, count = 2) 
   }, list({ messages: [...fresh, ...messages], filter: 'all', defaultFilter: 'all' }));
   // A long list mounts only what is on screen, so wait for the refresh itself.
   await expect.poll(lists).toBeGreaterThan(before);
-  await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  await frames(page);
 }
 
+const frames = (page: Page) => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
 const scrollTop = (page: Page) => page.locator('#message-list').evaluate(el => el.scrollTop);
 
 for (const [kind, count] of [['short', 30], ['long (virtual)', 260]] as const) {
@@ -72,6 +73,8 @@ for (const [kind, count] of [['short', 30], ['long (virtual)', 260]] as const) {
         const target = el.querySelector('[data-message-id="m-12"]') as HTMLElement;
         el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - 100;
       });
+      // The scroll repaints the list on the next frame; measure after it.
+      await frames(page);
       const before = await row.evaluate(r => r.getBoundingClientRect().top);
 
       await arrive(page, messages);
