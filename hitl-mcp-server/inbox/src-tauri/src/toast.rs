@@ -36,8 +36,10 @@ pub struct Toast {
     /// What happened: "asks", "finished", ...
     pub what: String,
     pub body: String,
-    /// The message whose sender would name this toast; `None` for a summary.
+    /// The message this toast is about, which a click opens; `None` for a summary.
     pub message_id: Option<String>,
+    /// Whether a `sender_identity` event still has to name [`Self::who`].
+    pub awaits_sender: bool,
 }
 
 impl Toast {
@@ -71,19 +73,15 @@ pub fn toast_for(payload: &str, event_time: u64, now: u64) -> Option<Toast> {
         "notification" => ("says", text("title").or(text("body")).unwrap_or("New notification")),
         _ => return None,
     };
+    let message_id = text("messageId").map(str::to_string);
     // A plan review carries its sender inline; everything else is named by a
-    // `sender_identity` event that follows it, so it keeps its id to wait for one.
+    // `sender_identity` event that follows it, so it waits for one.
     if let Some(name) = value.get("sender").and_then(name_of) {
-        return Some(Toast { who: name, what: verb.to_string(), body: one_line(line), message_id: None });
+        return Some(Toast { who: name, what: verb.to_string(), body: one_line(line), message_id, awaits_sender: false });
     }
     let who = value.get("repo").and_then(|repo| repo.get("name")).and_then(Value::as_str)
         .filter(|s| !s.is_empty()).unwrap_or("An agent");
-    Some(Toast {
-        who: who.to_string(),
-        what: verb.to_string(),
-        body: one_line(line),
-        message_id: text("messageId").map(str::to_string),
-    })
+    Some(Toast { who: who.to_string(), what: verb.to_string(), body: one_line(line), message_id, awaits_sender: true })
 }
 
 /// What an agent called its session, else its sender label.
@@ -187,6 +185,7 @@ impl Toaster {
             what: "More new messages".to_string(),
             body: "Several agents need you. Open the Inbox to see them all.".to_string(),
             message_id: None,
+            awaits_sender: false,
         })
     }
 }
@@ -252,20 +251,24 @@ mod tests {
     #[test]
     fn questions_reviews_handoffs_and_notifications_toast() {
         assert_eq!(toast_for(&question("Red or blue?"), NOW, NOW), Some(Toast {
-            who: "Hitl_MCP".into(), what: "asks".into(), body: "Red or blue?".into(), message_id: Some("q1".into()),
+            who: "Hitl_MCP".into(), what: "asks".into(), body: "Red or blue?".into(),
+            message_id: Some("q1".into()), awaits_sender: true,
         }));
         // A plan review names itself: its sender rides inline, so it waits for no one.
         let review = r#"{"type":"plan_review","messageId":"r","summary":"Ship 2.17","displayPath":"docs/plan.md",
             "sender":{"label":"Hitl_MCP · master · a3f2","source":"session","sessionName":"Release prep"}}"#;
         assert_eq!(toast_for(review, NOW, NOW), Some(Toast {
-            who: "Release prep".into(), what: "has a plan to review".into(), body: "Ship 2.17".into(), message_id: None,
+            who: "Release prep".into(), what: "has a plan to review".into(), body: "Ship 2.17".into(),
+            message_id: Some("r".into()), awaits_sender: false,
         }));
         let unnamed = r#"{"type":"plan_review","messageId":"r","summary":"","displayPath":"docs/plan.md"}"#;
         let toast = toast_for(unnamed, NOW, NOW).unwrap();
         assert_eq!((toast.title(), toast.body.as_str()), ("An agent has a plan to review".to_string(), "docs/plan.md"));
-        let handoff = r#"{"type":"handoff","title":"Inbox fix merged","summary":"x"}"#;
+        let handoff = r#"{"type":"handoff","messageId":"h1","title":"Inbox fix merged","summary":"x"}"#;
         let toast = toast_for(handoff, NOW, NOW).unwrap();
         assert_eq!((toast.title(), toast.body.as_str()), ("An agent finished".to_string(), "Inbox fix merged"));
+        // A click opens the message the toast is about.
+        assert_eq!(toast.message_id.as_deref(), Some("h1"));
         let note = r#"{"type":"notification","title":"Build done","body":"ok"}"#;
         assert_eq!(toast_for(note, NOW, NOW).unwrap().body, "Build done");
         // A batch question names its first sub-question.

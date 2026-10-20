@@ -36,6 +36,10 @@ use crate::view::{MessageList, SessionTree};
 /// finer-grained to send and nothing to keep in sync.
 const CHANGED_EVENT: &str = "inbox-changed";
 
+/// Emitted when a toast is clicked, with `{ messageId }`: the page selects
+/// that message, widening its filters if they hide it.
+const REVEAL_EVENT: &str = "inbox-reveal";
+
 /// One page of the log. The Inbox folds in memory, so this bounds how much is
 /// pulled per round trip, not how much it will look at.
 const PAGE_SIZE: usize = 5_000;
@@ -315,7 +319,7 @@ fn show_toast(handle: &tauri::AppHandle, event_time: u64, decrypted: &str) {
     };
     let handle = handle.clone();
     tauri::async_runtime::spawn(async move {
-        if let Some(id) = toast.message_id.clone() {
+        if let Some(id) = toast.message_id.clone().filter(|_| toast.awaits_sender) {
             let waited = std::time::Instant::now();
             loop {
                 if let Some(name) = toaster.sender_of(&id) {
@@ -331,11 +335,22 @@ fn show_toast(handle: &tauri::AppHandle, event_time: u64, decrypted: &str) {
         // Windows goes straight to the toast crate the plugin wraps: through
         // notify-rust, every toast carries an empty subtitle line between the
         // title and the text, and the banner showed the title alone.
+        //
+        // A click reaches this process while it runs, on the banner or in the
+        // notification centre; one on a toast left over from an earlier run
+        // does nothing.
         #[cfg(windows)]
         let shown = tauri_winrt_notification::Toast::new(&handle.config().identifier)
             .title(&toast.title())
             .text1(&toast.body)
             .sound(None)
+            .on_activated({
+                let (handle, message_id) = (handle.clone(), toast.message_id.clone());
+                move |_| {
+                    reveal(&handle, message_id.as_deref());
+                    Ok(())
+                }
+            })
             .show()
             .map_err(|error| error.to_string());
         #[cfg(not(windows))]
@@ -350,6 +365,32 @@ fn show_toast(handle: &tauri::AppHandle, event_time: u64, decrypted: &str) {
             log::warn!("could not show a desktop notification: {error}");
         }
     });
+}
+
+/// What clicking a toast does: bring the Inbox forward, then ask the page to
+/// open the toast's message. A summary toast has no message; it only raises.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn reveal(handle: &tauri::AppHandle, message_id: Option<&str>) {
+    let Some(window) = handle.get_webview_window("inbox") else {
+        return;
+    };
+    // Windows may refuse focus to a window behind another app's, flashing its
+    // taskbar button instead. Being topmost for a moment puts it in front
+    // either way.
+    let raised = window
+        .unminimize()
+        .and_then(|()| window.show())
+        .and_then(|()| window.set_always_on_top(true))
+        .and_then(|()| window.set_focus())
+        .and_then(|()| window.set_always_on_top(false));
+    if let Err(error) = raised {
+        log::warn!("could not bring the Inbox forward: {error}");
+    }
+    if let Some(message_id) = message_id {
+        if let Err(error) = window.emit(REVEAL_EVENT, serde_json::json!({ "messageId": message_id })) {
+            log::warn!("could not open message {message_id}: {error}");
+        }
+    }
 }
 
 #[tauri::command]

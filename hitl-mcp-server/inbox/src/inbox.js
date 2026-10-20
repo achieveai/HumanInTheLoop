@@ -10,6 +10,7 @@ import { renderAgentTree } from './pane-agents.js';
 import { createDetailPane } from './pane-detail.js';
 import {
     filterMessagesByType,
+    messageType,
     renderFilterBar,
     renderMessageList,
     renderTypeFilterBar,
@@ -22,6 +23,9 @@ import { createNotificationToggle } from './notifications.js';
 
 /** Emitted by the Rust side when a genuinely new event lands. */
 const CHANGED_EVENT = 'inbox-changed';
+const REVEAL_EVENT = 'inbox-reveal';
+/** How long a clicked toast waits for its message to reach the list. */
+const REVEAL_WAIT_MS = 30_000;
 const CHANGE_QUIET_MS = 100;
 const CHANGE_MAXIMUM_MS = 500;
 
@@ -119,6 +123,8 @@ export function createInbox({ invoke, elements, onError = console.error, actions
     /** Who the box under the list is addressed to; it is rebuilt only when that changes. */
     let composeTarget;
     let visibleMessages = [];
+    /** A toast's message still on its way into the list: `{ messageId, until }`. */
+    let pendingReveal = null;
 
     function statusAdmits(message, filter) {
         const open = message.status === 'pending' || message.status === 'stale';
@@ -651,7 +657,8 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         reconcileOptimistic(list, eventDriven);
         latestList = list;
         renderFilterBar(filterBar, list, { onFilter: selectFilter });
-        const messages = renderProjection(list);
+        let messages = renderProjection(list);
+        if (finishReveal()) messages = visibleMessages;
 
         // Pane 3 is told only when the *selected* message's folded status
         // actually moved — someone answered it on another device, the agent
@@ -764,6 +771,7 @@ export function createInbox({ invoke, elements, onError = console.error, actions
     }
 
     function selectScope(scopeKey) {
+        pendingReveal = null;
         state.scopeKey = scopeKey;
         // A different agent is a different question about what needs you, so
         // its filter is re-defaulted rather than inherited.
@@ -795,6 +803,7 @@ export function createInbox({ invoke, elements, onError = console.error, actions
     }
 
     function selectMessage(message, { navigate = true } = {}) {
+        pendingReveal = null;
         state.selectedId = message.messageId;
         state.selectedStatus = message.status;
         // Selection and layout are independent (spec §4.2): this records which
@@ -807,7 +816,48 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         return run(detailPane.show(message));
     }
 
-    return { refresh, refreshAfterChange, selectScope, selectFilter, selectType, selectMessage, detailPane, state };
+    /**
+     * Open one message, as clicking its toast asks. When the agent or filter
+     * hides it, they widen to All first: the reader asked for this message,
+     * not for the list they happened to leave open.
+     *
+     * The message may not be in the list yet: a toast can be clicked before
+     * the refresh its own arrival started has finished, and newer arrivals
+     * replace that refresh too. So the reveal waits, and whichever refresh
+     * first lists the message finishes it (see `finishReveal`).
+     */
+    function revealMessage(messageId) {
+        pendingReveal = { messageId, until: Date.now() + REVEAL_WAIT_MS };
+        if (finishReveal()) return Promise.resolve();
+        if (state.scopeKey !== 'all' || state.filter !== 'all') {
+            state.scopeKey = 'all';
+            state.filter = 'all';
+            renderBulkControls();
+        }
+        return run(refresh());
+    }
+
+    /** Select the waiting reveal's message once the latest list has it. */
+    function finishReveal() {
+        if (pendingReveal && Date.now() > pendingReveal.until) pendingReveal = null;
+        const messageId = pendingReveal?.messageId;
+        const row = latestList?.messages.find(message => message.messageId === messageId);
+        if (!row) return false;
+        pendingReveal = null;
+        state.types.add(messageType(row));
+        // Selected before the redraw: a long list draws only the rows on
+        // screen, and scrolls to its selection only when drawn with it.
+        state.selectedId = messageId;
+        renderProjection(latestList);
+        selectMessage(visibleMessages.find(message => message.messageId === messageId) ?? row);
+        messageList.querySelector(`.message-row[data-message-id="${CSS.escape(messageId)}"]`)
+            ?.scrollIntoView({ block: 'nearest' });
+        return true;
+    }
+
+    return {
+        refresh, refreshAfterChange, selectScope, selectFilter, selectType, selectMessage, revealMessage, detailPane, state,
+    };
 }
 
 async function main() {
@@ -869,6 +919,10 @@ async function main() {
         // to listen for: one event lands, both panes are re-derived.
         await tauri.event.listen(CHANGED_EVENT, () => {
             inbox.refreshAfterChange().catch(console.error);
+        });
+        // A toast was clicked; the window is already in front.
+        await tauri.event.listen(REVEAL_EVENT, event => {
+            inbox.revealMessage(event.payload.messageId);
         });
     };
     const connection = createConnectionSettings({
