@@ -285,6 +285,7 @@ impl Naming {
 }
 
 /// One subject, resolved. Internal: the shape both panes are derived from.
+#[derive(Clone)]
 struct Subject {
     row: MessageRow,
     /// The folded status, before `stale` is overlaid. Counting pending off
@@ -302,7 +303,10 @@ impl Subject {
     }
 }
 
-fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
+/// One subject from its own events. Nothing here depends on other subjects or
+/// on the clock, which is what lets [`Projection`] keep it until the subject
+/// gets a new event. `age_seconds` is set when a list is built.
+fn build_subject(events: &[Event]) -> Option<Subject> {
     let request = request_event(events)?;
     let state: MessageState = fold(events);
     let identity = identity::resolve(request, events);
@@ -318,7 +322,7 @@ fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
             status: state.status.as_str().to_string(),
             verdict: state.verdict.map(|v| v.as_str().to_string()),
             created_at: request.ntfy_time,
-            age_seconds: now.saturating_sub(request.ntfy_time),
+            age_seconds: 0,
             responder: state.responder.clone(),
             responded_at: state.responded_at,
             response_id: state.response_id.clone(),
@@ -349,11 +353,15 @@ fn build_subject(events: &[Event], now: u64) -> Option<Subject> {
 /// borrows the identity of a subject whose sender published that tag. Its
 /// status is the Inbox's own: `sent`, or `replied` once a notification names
 /// it in `inReplyTo`. It never reads as pending: nothing waits on you.
-fn build_subjects(events: &[Event], now: u64) -> Vec<Subject> {
-    let mut subjects: Vec<Subject> = group_by_subject(events)
-        .values()
-        .filter_map(|e| build_subject(e, now))
-        .collect();
+#[cfg(test)]
+fn build_subjects(events: &[Event]) -> Vec<Subject> {
+    let subjects = group_by_subject(events).values().filter_map(|e| build_subject(e)).collect();
+    link_subjects(subjects, events)
+}
+
+/// The part of [`build_subjects`] that joins subjects to each other: session
+/// tags and names, and where messages sent from the Inbox went.
+fn link_subjects(mut subjects: Vec<Subject>, events: &[Event]) -> Vec<Subject> {
 
     // Newest tag per session, and newest identity per tag.
     let mut tags: HashMap<String, (u64, String)> = HashMap::new();
@@ -420,6 +428,7 @@ fn build_subjects(events: &[Event], now: u64) -> Vec<Subject> {
     subjects
 }
 
+#[cfg(test)]
 /// Group a flat event log by the subject each event is about.
 ///
 /// `BTreeMap` rather than a hash map so the grouping order is deterministic,
@@ -432,6 +441,69 @@ fn group_by_subject(events: &[Event]) -> BTreeMap<String, Vec<Event>> {
         }
     }
     grouped
+}
+
+/// The event log and its fold, kept between calls.
+///
+/// Folding the whole log took about a second on a 30,000-event log, and a
+/// refresh used to fold it three times. The log only grows, so this keeps it
+/// in memory and re-folds only the subjects a new event touches; the joins
+/// across subjects run once per new batch. Every pane reads the same fold.
+#[derive(Default)]
+pub struct Projection {
+    events: Vec<Event>,
+    /// Indices into `events`, per subject, in log order.
+    groups: BTreeMap<String, Vec<usize>>,
+    /// Each subject folded from its own events, before [`link_subjects`].
+    folded: BTreeMap<String, Subject>,
+    /// Subjects with events not yet folded.
+    stale: HashSet<String>,
+    linked: Option<Vec<Subject>>,
+}
+
+impl Projection {
+    /// The `seq` of the newest event held, or 0.
+    pub fn last_seq(&self) -> i64 {
+        self.events.last().map_or(0, |event| event.seq)
+    }
+
+    /// Add events newer than [`Self::last_seq`], in `seq` order.
+    pub fn extend(&mut self, events: Vec<Event>) {
+        for event in events {
+            if let Some(subject) = &event.subject_id {
+                self.groups.entry(subject.clone()).or_default().push(self.events.len());
+                self.stale.insert(subject.clone());
+            }
+            self.events.push(event);
+            self.linked = None;
+        }
+    }
+
+    pub fn events(&self) -> &[Event] {
+        &self.events
+    }
+
+    pub fn tree(&mut self, now: u64) -> SessionTree {
+        tree_from(self.subjects(), now)
+    }
+
+    pub fn list(&mut self, scope_key: Option<&str>, filter: Option<&str>, now: u64) -> MessageList {
+        list_from(self.subjects(), scope_key, filter, now)
+    }
+
+    fn subjects(&mut self) -> &[Subject] {
+        if self.linked.is_none() {
+            for key in std::mem::take(&mut self.stale) {
+                let events: Vec<Event> = self.groups[&key].iter().map(|&i| self.events[i].clone()).collect();
+                match build_subject(&events) {
+                    Some(subject) => self.folded.insert(key, subject),
+                    None => self.folded.remove(&key),
+                };
+            }
+            self.linked = Some(link_subjects(self.folded.values().cloned().collect(), &self.events));
+        }
+        self.linked.as_deref().unwrap_or_default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -531,8 +603,12 @@ impl Counters {
 }
 
 /// Build the agent tree (spec §6).
+#[cfg(test)]
 pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
-    let subjects = build_subjects(events, now);
+    tree_from(&build_subjects(events), now)
+}
+
+fn tree_from(subjects: &[Subject], now: u64) -> SessionTree {
 
     // project -> session -> counters. `""` is the session slot of the
     // Unattributed node, which never renders a session row.
@@ -545,7 +621,7 @@ pub fn build_tree(events: &[Event], now: u64) -> SessionTree {
     let mut machines: BTreeMap<String, (u64, String)> = BTreeMap::new();
     let mut total = Counters::default();
 
-    for subject in &subjects {
+    for subject in subjects {
         total.add(subject);
         if let (Some(key), Some(tag)) = (&subject.row.session_key, &subject.row.session_tag) {
             session_tags.insert(key.clone(), tag.clone());
@@ -783,22 +859,27 @@ pub struct MessageList {
 /// `filter` of `None` means "you pick" and lands on the §7.3 default. An
 /// unrecognised filter string is treated the same way rather than returning an
 /// error, for the same reason `parse_scope` is forgiving.
+#[cfg(test)]
 pub fn build_list(events: &[Event], scope_key: Option<&str>, filter: Option<&str>, now: u64) -> MessageList {
+    list_from(&build_subjects(events), scope_key, filter, now)
+}
+
+fn list_from(subjects: &[Subject], scope_key: Option<&str>, filter: Option<&str>, now: u64) -> MessageList {
     let scope = parse_scope(scope_key);
 
-    let mut rows: Vec<MessageRow> = build_subjects(events, now)
-        .into_iter()
+    let mut rows: Vec<MessageRow> = subjects
+        .iter()
         // "All agents" is the default view, so it keeps to recent work. A
         // project or session picked from the tree shows its whole history.
         .filter(|subject| scope != Scope::All || subject.is_recent(now))
-        .map(|subject| subject.row)
-        .filter(|row| scope.admits(row))
+        .filter(|subject| scope.admits(&subject.row))
+        .map(|subject| MessageRow { age_seconds: now.saturating_sub(subject.row.created_at), ..subject.row.clone() })
         .collect();
 
     // `stale` needs the owning session's state, which needs every subject in
     // that session — including ones this scope filtered out. So it is applied
     // from a tree built over the whole log, not over the scoped rows.
-    let tree = build_tree(events, now);
+    let tree = tree_from(subjects, now);
     for row in &mut rows {
         row.status = display_status(&row.status, state_for(&tree, row)).to_string();
     }
@@ -2082,5 +2163,59 @@ mod tests {
         let row = &build_list(&events, None, Some("all"), NOW).messages[0];
         assert!(row.unattributed);
         assert_eq!(row.session_tag, None);
+    }
+
+    /// The kept fold must match a full fold of the same log, whatever batches
+    /// the log arrives in: a subject's later events, an identity before or
+    /// after its message, a reply to a message sent from the Inbox.
+    #[test]
+    fn the_kept_fold_matches_a_full_fold_after_every_batch() {
+        let log = vec![
+            question("q-1", NOW - DAY, "Hitl_MCP"),
+            notification("n-1", NOW - DAY, "Built"),
+            tagged_identity("q-1", NOW - DAY, "Hitl_MCP · master · a3f2", TAG),
+            identity("n-2", NOW - HOUR, "Other · main · 77aa"),
+            notification("n-2", NOW - HOUR, "Deployed"),
+            sent("m-1", NOW - HOUR, TAG, "check the build"),
+            answer("q-1", NOW - 30 * MINUTE, "phone"),
+            dismiss("n-1", "d-1", NOW - 20 * MINUTE),
+            question("q-2", NOW - 10 * MINUTE, "Hitl_MCP"),
+            reply_to("r-1", NOW - 5 * MINUTE, "m-1"),
+            tagged_identity("q-2", NOW - MINUTE, "Hitl_MCP · master · a3f2", TAG),
+        ];
+        let log: Vec<Event> = log.into_iter().enumerate().map(|(i, e)| Event { seq: i as i64 + 1, ..e }).collect();
+        let json = |value: &dyn erased::Json| value.to_json();
+
+        for batch in [1, 2, 3, 5] {
+            let mut kept = Projection::default();
+            for (i, chunk) in log.chunks(batch).enumerate() {
+                kept.extend(chunk.to_vec());
+                let seen = &log[..kept.events().len()];
+                // A later hour: ages and recency come from the read, not the fold.
+                let now = NOW + i as u64 * HOUR;
+                assert_eq!(kept.last_seq(), seen.last().unwrap().seq);
+                assert_eq!(json(&kept.tree(now)), json(&build_tree(seen, now)), "tree, batch {batch}, step {i}");
+                for scope in [None, Some("session:Hitl_MCP · a3f2"), Some(UNATTRIBUTED_KEY)] {
+                    for filter in [None, Some("all"), Some("needs_you")] {
+                        assert_eq!(
+                            json(&kept.list(scope, filter, now)),
+                            json(&build_list(seen, scope, filter, now)),
+                            "list {scope:?} {filter:?}, batch {batch}, step {i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    mod erased {
+        pub trait Json {
+            fn to_json(&self) -> serde_json::Value;
+        }
+        impl<T: serde::Serialize> Json for T {
+            fn to_json(&self) -> serde_json::Value {
+                serde_json::to_value(self).unwrap()
+            }
+        }
     }
 }

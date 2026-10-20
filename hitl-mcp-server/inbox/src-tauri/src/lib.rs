@@ -29,7 +29,7 @@ use crate::body::BodyOutcome;
 use crate::capture::{Pending, Queue};
 use crate::detail::MessageDetail;
 use crate::sink::{InboxSink, SharedStore};
-use crate::view::{MessageList, SessionTree};
+use crate::view::{MessageList, Projection, SessionTree};
 
 /// Emitted whenever a genuinely new event lands. The window's response is to
 /// re-read both panes: the view is a function of the log, so there is nothing
@@ -98,7 +98,7 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// The whole log, paged out of SQLite.
+/// The log after `after`, paged out of SQLite.
 ///
 /// The Inbox reads `events` and folds in memory rather than querying
 /// `hitl_store`'s `messages` projection. Two reasons, both structural: that
@@ -107,9 +107,9 @@ fn now_secs() -> u64 {
 /// `rebuild()` would drop any identity that had been patched on anyway.
 /// Folding here keeps the entire view a pure function of `(events, now)` —
 /// which is what makes `view.rs` testable without a database at all.
-fn all_events(store: &Store) -> Result<Vec<Event>, String> {
+fn events_after(store: &Store, after: i64) -> Result<Vec<Event>, String> {
     let mut out: Vec<Event> = Vec::new();
-    let mut cursor = 0i64;
+    let mut cursor = after;
     loop {
         let page = store
             .events_since(cursor, PAGE_SIZE)
@@ -121,28 +121,47 @@ fn all_events(store: &Store) -> Result<Vec<Event>, String> {
     Ok(out)
 }
 
-fn with_events<T>(store: &SharedStore, f: impl FnOnce(&[Event], u64) -> T) -> Result<T, String> {
-    let guard = store
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let events = all_events(&guard)?;
-    Ok(f(&events, now_secs()))
+/// The fold every pane reads, kept between commands; see [`Projection`].
+type SharedProjection = Arc<Mutex<Projection>>;
+
+/// Bring `projection` up to the log, then run `f` on it.
+///
+/// The store's lock is held only to read the new events, so an ingest never
+/// waits on a fold.
+fn with_projection<T>(
+    store: &SharedStore,
+    projection: &SharedProjection,
+    f: impl FnOnce(&mut Projection, u64) -> T,
+) -> Result<T, String> {
+    let mut projection = projection.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let new = {
+        let guard = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        events_after(&guard, projection.last_seq())?
+    };
+    projection.extend(new);
+    Ok(f(&mut projection, now_secs()))
 }
 
-async fn with_events_async<T, F>(store: SharedStore, f: F) -> Result<T, String>
+async fn with_projection_async<T, F>(store: SharedStore, projection: SharedProjection, f: F) -> Result<T, String>
 where
     T: Send + 'static,
-    F: FnOnce(&[Event], u64) -> T + Send + 'static,
+    F: FnOnce(&mut Projection, u64) -> T + Send + 'static,
 {
-    tauri::async_runtime::spawn_blocking(move || with_events(&store, f))
+    tauri::async_runtime::spawn_blocking(move || with_projection(&store, &projection, f))
         .await
         .map_err(|e| format!("the Inbox projection task did not run: {e}"))?
 }
 
 /// Pane 1 — the project → session tree (spec §6).
 #[tauri::command]
-async fn list_sessions(store: tauri::State<'_, SharedStore>) -> Result<SessionTree, String> {
-    with_events_async(store.inner().clone(), view::build_tree).await
+async fn list_sessions(
+    store: tauri::State<'_, SharedStore>,
+    projection: tauri::State<'_, SharedProjection>,
+) -> Result<SessionTree, String> {
+    with_projection_async(store.inner().clone(), projection.inner().clone(), |projection, now| {
+        projection.tree(now)
+    })
+    .await
 }
 
 /// Pane 2 — the message list (spec §7).
@@ -154,11 +173,12 @@ async fn list_sessions(store: tauri::State<'_, SharedStore>) -> Result<SessionTr
 #[tauri::command]
 async fn list_messages(
     store: tauri::State<'_, SharedStore>,
+    projection: tauri::State<'_, SharedProjection>,
     session_key: Option<String>,
     filter: Option<String>,
 ) -> Result<MessageList, String> {
-    with_events_async(store.inner().clone(), move |events, now| {
-        view::build_list(events, session_key.as_deref(), filter.as_deref(), now)
+    with_projection_async(store.inner().clone(), projection.inner().clone(), move |projection, now| {
+        projection.list(session_key.as_deref(), filter.as_deref(), now)
     })
     .await
 }
@@ -172,10 +192,12 @@ async fn list_messages(
 #[tauri::command]
 async fn get_message(
     store: tauri::State<'_, SharedStore>,
+    projection: tauri::State<'_, SharedProjection>,
     message_id: String,
 ) -> Result<Option<MessageDetail>, String> {
-    with_events_async(store.inner().clone(), move |events, now| {
-        detail::build_detail(events, &message_id, now)
+    with_projection_async(store.inner().clone(), projection.inner().clone(), move |projection, now| {
+        let all = projection.list(None, Some("all"), now);
+        detail::build_detail(projection.events(), &all, &message_id)
     })
     .await
 }
@@ -189,20 +211,23 @@ async fn get_message(
 #[tauri::command]
 async fn get_body(
     store: tauri::State<'_, SharedStore>,
+    projection: tauri::State<'_, SharedProjection>,
     pending: tauri::State<'_, Arc<Pending>>,
     message_id: String,
 ) -> Result<BodyOutcome, String> {
-    // The request event is copied out and the lock released before anything is
-    // awaited: holding the store's mutex across a network round trip would stop
-    // every ingest for as long as the archivist takes to answer.
+    // The request event is copied out and the locks released before anything
+    // is awaited: holding the store's mutex across a network round trip would
+    // stop every ingest for as long as the archivist takes to answer.
     let request = {
-        let guard = store
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let events = all_events(&guard)?;
-        events
-            .into_iter()
-            .find(|e| e.msg_type == "plan_review" && e.message_id == message_id)
+        let message_id = message_id.clone();
+        with_projection_async(store.inner().clone(), projection.inner().clone(), move |projection, _| {
+            projection
+                .events()
+                .iter()
+                .find(|e| e.msg_type == "plan_review" && e.message_id == message_id)
+                .cloned()
+        })
+        .await?
     };
 
     let Some(request) = request else {
@@ -603,6 +628,7 @@ pub fn run() {
             let pending = Arc::new(Pending::default());
             let lifecycle = Arc::new(ServiceLifecycle::default());
             app.manage(store.clone());
+            app.manage(SharedProjection::default());
             app.manage(waiters.clone());
             app.manage(pending.clone());
             app.manage(lifecycle.clone());
@@ -698,13 +724,13 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(all_events(&store).unwrap().len(), PAGE_SIZE + 7);
+        assert_eq!(events_after(&store, 0).unwrap().len(), PAGE_SIZE + 7);
     }
 
     #[test]
     fn an_empty_log_reads_as_no_events_rather_than_looping() {
         let store = Store::open_in_memory().unwrap();
-        assert!(all_events(&store).unwrap().is_empty());
+        assert!(events_after(&store, 0).unwrap().is_empty());
     }
 
     #[test]
@@ -719,7 +745,7 @@ mod tests {
                 .unwrap();
         }
 
-        let ids: Vec<_> = all_events(&store)
+        let ids: Vec<_> = events_after(&store, 0)
             .unwrap()
             .iter()
             .map(|e| e.ntfy_id.clone())
@@ -732,7 +758,7 @@ mod tests {
         let store: SharedStore = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
         let calling_thread = std::thread::current().id();
 
-        let projection_thread = with_events_async(store, |_, _| std::thread::current().id())
+        let projection_thread = with_projection_async(store, SharedProjection::default(), |_, _| std::thread::current().id())
             .await
             .unwrap();
 

@@ -12,7 +12,7 @@
 //! translation layer here would be a second place for the wire format to be
 //! described, and the two would drift.
 //!
-//! The row still comes from [`crate::view::build_list`] rather than being
+//! The row still comes from pane 2's list rather than being
 //! recomputed, so the status pill in pane 3 cannot disagree with the one in
 //! pane 2 — including the `stale` overlay, which needs the whole log to decide.
 
@@ -21,7 +21,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::identity;
-use crate::view::{self, MessageRow};
+use crate::view::{MessageList, MessageRow};
 
 /// Who sent this, and how confident the attribution is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -109,17 +109,15 @@ fn events_for(events: &[Event], message_id: &str) -> Vec<Event> {
 /// `None` when the id names nothing the Inbox can show — including a subject
 /// whose request event has scrolled out of ntfy's window, which pane 2 also
 /// refuses to draw a row for.
-pub fn build_detail(events: &[Event], message_id: &str, now: u64) -> Option<MessageDetail> {
+///
+/// `all` is the `None`/`all` list: the row is taken from it rather than
+/// rebuilt, because `stale` is decided over the owning session's whole
+/// history, so a row computed from this subject alone would quietly disagree
+/// with the one pane 2 is showing.
+pub fn build_detail(events: &[Event], all: &MessageList, message_id: &str) -> Option<MessageDetail> {
     let subject = events_for(events, message_id);
     let request = request_event(&subject)?;
-
-    // Taken from the list rather than rebuilt: `stale` is decided over the
-    // owning session's whole history, so a row computed from this subject alone
-    // would quietly disagree with the one pane 2 is showing.
-    let row = view::build_list(events, None, Some("all"), now)
-        .messages
-        .into_iter()
-        .find(|row| row.message_id == message_id)?;
+    let row = all.messages.iter().find(|row| row.message_id == message_id)?.clone();
     let settlement = folded_settlement(&subject, &row).map(|event| event.json());
 
     Some(MessageDetail {
@@ -133,9 +131,14 @@ pub fn build_detail(events: &[Event], message_id: &str, now: u64) -> Option<Mess
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view;
 
     const NOW: u64 = 1_786_600_000;
     const MINUTE: u64 = 60;
+
+    fn try_detail(events: &[Event], message_id: &str) -> Option<MessageDetail> {
+        build_detail(events, &view::build_list(events, None, Some("all"), NOW), message_id)
+    }
 
     fn ev(ntfy_id: &str, time: u64, payload: &str) -> Event {
         let json: Value = serde_json::from_str(payload).expect("test payload must be json");
@@ -177,7 +180,7 @@ mod tests {
         json["document"]["tasks"].as_array_mut().unwrap().push(child.clone());
         update.payload = json.to_string();
         let mut events = vec![work("old", 1), update];
-        let row = build_detail(&events, "work", NOW).unwrap().row;
+        let row = try_detail(&events, "work").unwrap().row;
         let metadata = row.work.unwrap();
         assert_eq!(metadata.status, "in_progress");
         assert_eq!(metadata.owner, "lead");
@@ -206,7 +209,7 @@ mod tests {
         malformed.payload = json.to_string();
         let events = vec![work("older", 1), work("b", 3), malformed, work("a", 3)];
         for order in [events.clone(), events.into_iter().rev().collect()] {
-            let detail = build_detail(&order, "work", NOW).unwrap();
+            let detail = try_detail(&order, "work").unwrap();
             assert_eq!(detail.row.message_id, "work");
             assert_eq!(detail.row.msg_type, "notification");
             assert_eq!(detail.row.badges.revision, Some(3));
@@ -220,10 +223,10 @@ mod tests {
     #[test]
     fn work_completion_does_not_dismiss_and_updates_do_not_restore() {
         let mut events = vec![work("first", 1)];
-        assert_eq!(build_detail(&events, "work", NOW).unwrap().row.status, "pending");
+        assert_eq!(try_detail(&events, "work").unwrap().row.status, "pending");
         events.push(ev("dismiss", NOW, r#"{"type":"dismiss_notification","messageId":"dismiss","notificationId":"work","dismissedFrom":"test"}"#));
         events.push(work("newer", 2));
-        let detail = build_detail(&events, "work", NOW).unwrap();
+        let detail = try_detail(&events, "work").unwrap();
         assert_eq!(detail.row.status, "dismissed");
         assert_eq!(detail.row.badges.revision, Some(2));
         assert_eq!(detail.settlement.unwrap()["messageId"], "dismiss");
@@ -248,7 +251,7 @@ mod tests {
     }
 
     fn detail(events: &[Event], id: &str) -> MessageDetail {
-        build_detail(events, id, NOW).unwrap_or_else(|| panic!("no detail for {id}"))
+        try_detail(events, id).unwrap_or_else(|| panic!("no detail for {id}"))
     }
 
     #[test]
@@ -449,7 +452,7 @@ mod tests {
 
     #[test]
     fn an_unknown_message_id_has_no_detail() {
-        assert!(build_detail(&[question()], "nope", NOW).is_none());
+        assert!(try_detail(&[question()], "nope").is_none());
     }
 
     #[test]
@@ -463,7 +466,7 @@ mod tests {
                 "selectedValues":["x"],"respondedFrom":"phone"}"#,
         );
 
-        assert!(build_detail(&[orphan], "gone", NOW).is_none());
+        assert!(try_detail(&[orphan], "gone").is_none());
     }
 
     #[test]
