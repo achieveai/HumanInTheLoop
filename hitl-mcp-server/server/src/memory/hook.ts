@@ -95,7 +95,12 @@ export async function runSessionStartHook(stdin: string, host: ReplicaHost): Pro
     const replica = replicaFor(host, cwd, repo.root);
     if (!replica) return '';
     const indexBefore = readIndex(replica.path);
-    await runLocked({ op: 'sync', key: repo.key, replica }, handleSync);
+    // A busy holder must not consume the host's whole startup-hook timeout.
+    try {
+      await runLocked({ op: 'sync', key: repo.key, replica }, handleSync, 2000);
+    } catch {
+      console.error('hitl: startup memory sync unavailable; using cached memory.');
+    }
     const context = sessionContext(host, replica, indexBefore);
     if (!context) return '';
     return host === 'copilot'

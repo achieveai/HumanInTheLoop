@@ -1,13 +1,14 @@
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { execFileSync } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
+import net from 'net';
 import {
   MAX_FILE_BYTES, claudeMemoryDir, readRegistry, registerReplica, sharedDir, syncKey, syncReplica, type Replica,
 } from '../memory/sync.js';
 import { runSessionStartHook } from '../memory/hook.js';
-import { askHolder, runLocked, tryHoldLock } from '../memory/lock.js';
+import { askHolder, lockAddress, runLocked, tryHoldLock } from '../memory/lock.js';
 
 const KEY = 'github.com/example/memtest';
 let root: string;
@@ -157,6 +158,22 @@ describe('runSessionStartHook', () => {
   it('prints nothing outside git', async () => {
     expect(await runSessionStartHook(JSON.stringify({ cwd: root }), 'codex')).toBe('');
   });
+
+  it('returns the cached index and a warning when the sync holder fails', async () => {
+    const cached = path.join(clone, '.hitl', 'memory');
+    mkdirSync(cached, { recursive: true });
+    writeFileSync(path.join(cached, 'MEMORY.md'), '- Cached memory stays available\n');
+    const warn = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const holder = await tryHoldLock(() => { throw new Error('holder unavailable'); });
+    try {
+      const out = await runSessionStartHook(JSON.stringify({ cwd: clone }), 'codex');
+      expect(out).toContain('Cached memory stays available');
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/sync.*cached memory/i));
+    } finally {
+      warn.mockRestore();
+      await new Promise<void>(resolve => holder!.close(() => resolve()));
+    }
+  });
 });
 
 describe('lock', () => {
@@ -179,5 +196,31 @@ describe('lock', () => {
   it('runs the request itself, then frees the lock, when nobody holds it', async () => {
     expect(await runLocked({ op: 'sync', key: 'k' }, () => 'done locally')).toBe('done locally');
     await expect(askHolder({ op: 'sync', key: 'k' }, 1000)).rejects.toThrow();
+  });
+
+  it('stops waiting at the total deadline when a holder never replies', async () => {
+    const sockets = new Set<net.Socket>();
+    let received!: () => void;
+    const requestReceived = new Promise<void>(resolve => { received = resolve; });
+    const holder = net.createServer(socket => {
+      sockets.add(socket);
+      socket.on('error', () => {});
+      socket.once('data', () => received());
+    });
+    await new Promise<void>(resolve => holder.listen(lockAddress(), resolve));
+    jest.useFakeTimers();
+    let outcome = 'pending';
+    const work = runLocked({ op: 'sync', key: 'k' }, () => 'local', 2000)
+      .then(() => { outcome = 'resolved'; }, () => { outcome = 'rejected'; });
+    try {
+      await requestReceived;
+      await jest.advanceTimersByTimeAsync(2000);
+      expect(outcome).toBe('rejected');
+    } finally {
+      jest.useRealTimers();
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>(resolve => holder.close(() => resolve()));
+      await work;
+    }
   });
 });

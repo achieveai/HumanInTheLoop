@@ -105,8 +105,10 @@ export function askHolder(request: SyncRequest, timeoutMs = 10_000): Promise<unk
  * Run `request` under the lock: hold it briefly when it is free, or hand the
  * request to whoever holds it.
  */
-export async function runLocked(request: SyncRequest, handle: Handler): Promise<unknown> {
+export async function runLocked(request: SyncRequest, handle: Handler, timeoutMs?: number): Promise<unknown> {
+  const deadline = timeoutMs === undefined ? Infinity : Date.now() + timeoutMs;
   for (let attempt = 0; attempt < 3; attempt++) {
+    if (Date.now() >= deadline) break;
     const server = await tryHoldLock(handle);
     if (server) {
       try {
@@ -115,8 +117,10 @@ export async function runLocked(request: SyncRequest, handle: Handler): Promise<
         await new Promise(resolve => server.close(resolve));
       }
     }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
     try {
-      return await askHolder(request);
+      return await askHolder(request, Math.min(10_000, remaining));
     } catch {
       // The holder exited between our two tries; take another turn.
     }
