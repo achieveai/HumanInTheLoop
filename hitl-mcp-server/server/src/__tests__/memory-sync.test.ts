@@ -207,6 +207,8 @@ describe('lock', () => {
       socket.on('error', () => {});
       socket.once('data', () => received());
     });
+    // Unix sockets need their parent directory; Windows named pipes do not.
+    mkdirSync(path.join(root, 'memory', '.sync'), { recursive: true });
     await new Promise<void>(resolve => holder.listen(lockAddress(), resolve));
     jest.useFakeTimers();
     let outcome = 'pending';
