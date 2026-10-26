@@ -56,7 +56,7 @@ async function init() {
         // Never leave the window on its "Waiting for question..." spinner: that
         // is indistinguishable from a hang, and the agent is blocked meanwhile.
         console.error('Failed to load the question payload:', err);
-        dialogContainer.innerHTML = '<p style="color:red;padding:24px;">'
+        dialogContainer.innerHTML = '<p class="payload-error" style="color:red;padding:24px;">'
             + 'Could not load the question. The agent is still waiting — '
             + 'close this window and ask it to resend.</p>';
         await invoke('show_no_activate').catch(() => {});
@@ -121,7 +121,7 @@ async function init() {
             await invoke('show_no_activate');
         } catch (err) {
             console.error('Failed to render the question:', err);
-            dialogContainer.innerHTML = '<p style="color:red;padding:24px;">Failed to load question data.</p>';
+            dialogContainer.innerHTML = '<p class="payload-error" style="color:red;padding:24px;">Failed to load question data.</p>';
         }
     }
 

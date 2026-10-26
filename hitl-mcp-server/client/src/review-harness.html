@@ -2,6 +2,9 @@
 <html lang="en" style="background:white;">
 <head>
     <meta charset="UTF-8">
+    <script src="theme-bootstrap.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script type="module" src="theme.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>HITL Plan Review — Test Harness</title>
     <link rel="stylesheet" href="review.css">
@@ -14,6 +17,7 @@
             event: { listen: () => Promise.resolve(() => {}) },
             core: {
                 invoke: (cmd, args) => {
+                    if (cmd === 'get_appearance') return Promise.resolve({ theme: 'light', warning: null });
                     console.log('[TAURI MOCK] invoke:', cmd, args);
                     window.__lastInvoke = { cmd, args };
                     return Promise.resolve();

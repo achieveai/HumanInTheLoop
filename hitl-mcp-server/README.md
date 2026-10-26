@@ -122,6 +122,29 @@ Do not change only the topic and expect another machine's encryption key to matc
 
 Launch Inbox separately; `hitl client` launches the popup/tray app.
 
+### Appearance
+
+Click the theme button at the right of the Inbox toolbar to switch directly
+between **Light** and **Dark**, without opening a dialog. Its tooltip describes
+the next action. The tray client's Appearance menu has the same choices. Light remains the default,
+independent of the operating-system theme. Switching does not reload open
+questions, messages, or reviews and preserves unfinished text and selections.
+
+The preference is local to this machine in `<HITL_HOME>/appearance.json` (normally
+`~/.hitl/appearance.json`). Other running HITL desktop processes using that state
+directory pick it up within about two seconds. Notification preferences and
+connection credentials are separate and are not changed. Update both desktop
+apps to use this feature; updating the npm server alone does not update an
+installed Inbox MSI.
+
+Dark mode covers the application UI and default-rendered diagrams. Explicitly
+styled diagrams and user images retain their original colors on a light backing.
+System notifications and external applications retain their operating-system
+appearance. Appearance errors are shown rather than silently resetting the
+preference; an invalid appearance file must be repaired before saving a change.
+
+### Reading and responding
+
 - Choose a project or agent in the left pane.
 - Use **All**, **Needs you**, or **Answered** to narrow the list.
 - Combine **Notifications**, **Questions**, and **Review plans** type filters.

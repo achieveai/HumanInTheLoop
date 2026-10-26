@@ -2,9 +2,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use hitl_transport::status::{now_millis, ConnectionStatus};
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem},
+    menu::{Menu, MenuItem, Submenu},
     tray::TrayIconBuilder,
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
 
 /// Flag set by the tray Quit handler so the ExitRequested handler in main()
@@ -34,25 +34,44 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let separator = MenuItem::with_id(app, "sep", "---", false, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let light = MenuItem::with_id(app, "appearance-light", "Light", true, None::<&str>)?;
+    let dark = MenuItem::with_id(app, "appearance-dark", "Dark", true, None::<&str>)?;
+    let appearance = Submenu::with_items(app, "Appearance", true, &[&light, &dark])?;
 
     let menu = Menu::with_items(
         app,
-        &[&status, &open_log, &cancel_review, &separator, &quit],
+        &[&status, &open_log, &cancel_review, &appearance, &separator, &quit],
     )?;
 
     let icon = Image::from_bytes(include_bytes!("../icons/icon.png"))?;
 
+    let error_status = status.clone();
     let _tray = TrayIconBuilder::new()
         .icon(icon)
         .tooltip("HITL - Human in the Loop")
         .menu(&menu)
-        .on_menu_event(|app, event| match event.id.as_ref() {
+        .on_menu_event(move |app, event| match event.id.as_ref() {
             "quit" => {
                 QUIT_REQUESTED.store(true, Ordering::SeqCst);
                 app.exit(0);
             }
             "open_log" => open_log_file(app),
             "cancel_review" => cancel_pending_reviews(app),
+            "appearance-light" | "appearance-dark" => {
+                let theme = if event.id.as_ref() == "appearance-dark" {
+                    hitl_transport::appearance::Theme::Dark
+                } else { hitl_transport::appearance::Theme::Light };
+                let handle = app.clone();
+                let error_status = error_status.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = crate::appearance::set_appearance(handle.clone(), theme).await {
+                        log::error!("Could not change appearance: {error}");
+                        let _ = error_status.set_text(format!("Appearance failed: {error}"));
+                        // A native menu has no inline error surface.
+                        let _ = handle.emit("appearance-error", error);
+                    }
+                });
+            }
             _ => {}
         })
         .build(app)?;

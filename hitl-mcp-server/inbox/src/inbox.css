@@ -1572,3 +1572,157 @@ body {
     color: #718096;
     font-size: 12px;
 }
+
+/* Opt-in dark colors; keep the light rules above unchanged. */
+html[data-hitl-theme="dark"],
+html[data-hitl-theme="dark"] body { background-color: var(--hitl-surface); color: var(--hitl-text); }
+html[data-hitl-theme="dark"] .pane-agents { background-color: var(--hitl-raised); border-right-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .pane-list { background-color: var(--hitl-surface); border-right-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .pane-detail { background-color: var(--hitl-surface); }
+html[data-hitl-theme="dark"] .agent-row:hover { background-color: var(--hitl-raised); }
+html[data-hitl-theme="dark"] .agent-row.is-selected { background-color: var(--hitl-accent); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .agent-row--root { border-bottom-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .agent-glyph { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .agent-row--waiting .agent-glyph { color: var(--hitl-error); }
+html[data-hitl-theme="dark"] .agent-row--active .agent-glyph { color: var(--hitl-success); }
+html[data-hitl-theme="dark"] .agent-row--stale { opacity: 1; }
+html[data-hitl-theme="dark"] .agent-pending { background-color: var(--hitl-warning-bg); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .agent-age { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .agent-row.is-selected .agent-age,
+html[data-hitl-theme="dark"] .agent-row.is-selected .agent-glyph { color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .agents-empty { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .agent-search { border-color: var(--hitl-border); background-color: var(--hitl-surface); }
+html[data-hitl-theme="dark"] .agents-older { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .filter-bar { border-bottom-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .filter { background-color: var(--hitl-raised); color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .filter:hover { background-color: var(--hitl-raised); }
+html[data-hitl-theme="dark"] .filter.is-active { background-color: var(--hitl-accent); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .filter-count { opacity: 1; }
+html[data-hitl-theme="dark"] .type-filter-bar { border-bottom-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .mark-all-read,
+html[data-hitl-theme="dark"] .undo-mark-all-read,
+html[data-hitl-theme="dark"] .dismiss-bulk-status { color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .mark-all-read:hover,
+html[data-hitl-theme="dark"] .undo-mark-all-read:hover,
+html[data-hitl-theme="dark"] .dismiss-bulk-status:hover { background-color: var(--hitl-raised); }
+html[data-hitl-theme="dark"] .mark-all-read[aria-disabled="true"],
+html[data-hitl-theme="dark"] .undo-mark-all-read[aria-disabled="true"] { opacity: 1; }
+html[data-hitl-theme="dark"] .mark-all-read:focus-visible,
+html[data-hitl-theme="dark"] .undo-mark-all-read:focus-visible,
+html[data-hitl-theme="dark"] .dismiss-bulk-status:focus-visible { outline-color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .bulk-status { background-color: var(--hitl-raised); border-bottom-color: var(--hitl-border); color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .type-filter { border-color: var(--hitl-border); background-color: var(--hitl-surface); color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .type-filter:hover:not(:disabled) { background-color: var(--hitl-raised); }
+html[data-hitl-theme="dark"] .type-filter[aria-pressed="true"] { background-color: var(--hitl-accent); border-color: var(--hitl-accent); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .type-filter:disabled { opacity: 1; }
+html[data-hitl-theme="dark"] .message-row { border-bottom-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .message-row:hover { background-color: var(--hitl-surface); }
+html[data-hitl-theme="dark"] .message-row.is-selected { background-color: var(--hitl-selected); box-shadow: var(--hitl-shadow) 3px 0px 0px inset; }
+html[data-hitl-theme="dark"] .message-glyph { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .message-age { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .status-pill { background-color: var(--hitl-raised); color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .status-pill--pending { background-color: var(--hitl-warning-bg); color: var(--hitl-warning); }
+html[data-hitl-theme="dark"] .status-pill--stale { background-color: var(--hitl-raised); color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .status-pill--answered { background-color: var(--hitl-success-bg); color: var(--hitl-success); }
+html[data-hitl-theme="dark"] .status-pill--lost { background-color: var(--hitl-error-bg); color: var(--hitl-error); }
+html[data-hitl-theme="dark"] .status-pill--sent { background-color: var(--hitl-raised); color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .status-pill--replied { background-color: var(--hitl-success-bg); color: var(--hitl-success); }
+html[data-hitl-theme="dark"] .status-pill-verdict { opacity: 1; }
+html[data-hitl-theme="dark"] .message-meta { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .badge { background-color: var(--hitl-raised); color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .badge-plaintext { background-color: var(--hitl-error-bg); color: var(--hitl-error); }
+html[data-hitl-theme="dark"] .list-empty { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-panel-note,
+html[data-hitl-theme="dark"] .detail-empty,
+html[data-hitl-theme="dark"] .detail-note { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-header { border-bottom-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .detail-kicker { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-when { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .badge-sender[data-source="path"] { opacity: 1; }
+html[data-hitl-theme="dark"] .detail-closed { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-closed-verb { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-lost-note { color: var(--hitl-error); }
+html[data-hitl-theme="dark"] .detail-retained { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-context { border-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .detail-context-toggle { background-color: var(--hitl-surface); }
+html[data-hitl-theme="dark"] .detail-context-body { border-top-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .detail-actions { border-top-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .detail-actions .button-primary { background-color: var(--hitl-accent); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .detail-actions .button-secondary { background-color: var(--hitl-surface); border-color: var(--hitl-border); color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-actions .button:disabled { opacity: 1; }
+html[data-hitl-theme="dark"] .detail-error { background-color: var(--hitl-error-bg); border-left-color: var(--hitl-error); color: var(--hitl-error); }
+html[data-hitl-theme="dark"] .agent-message-to { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-compose { border-top-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .detail-compose-to { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-compose-text { border-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .detail-compose-bar .button-primary { background-color: var(--hitl-accent); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .detail-compose-bar .button:disabled { opacity: 1; }
+html[data-hitl-theme="dark"] .detail-compose-status { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-compose-status--error { color: var(--hitl-error); }
+html[data-hitl-theme="dark"] .list-compose .detail-compose { background-color: var(--hitl-surface); }
+html[data-hitl-theme="dark"] .list-compose-hint { border-top-color: var(--hitl-border); color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-compose-text:disabled { background-color: var(--hitl-raised); }
+html[data-hitl-theme="dark"] .action-error-dialog { box-shadow: var(--hitl-shadow) 0px 18px 48px; color: var(--hitl-text); }
+html[data-hitl-theme="dark"] .action-error-dialog::backdrop { background-color: var(--hitl-scrim); }
+html[data-hitl-theme="dark"] .action-error-dialog .button { background-color: var(--hitl-error-bg); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .connection-dialog { box-shadow: var(--hitl-shadow) 0px 18px 48px; color: var(--hitl-text); }
+html[data-hitl-theme="dark"] .connection-dialog::backdrop { background-color: var(--hitl-scrim); }
+html[data-hitl-theme="dark"] .connection-intro { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .connection-dialog input { border-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .connection-dialog input:focus { border-color: var(--hitl-accent); outline-color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .connection-error { color: var(--hitl-error); }
+html[data-hitl-theme="dark"] .connection-actions .button-primary { background-color: var(--hitl-accent); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .connection-actions .button-secondary { background-color: var(--hitl-surface); border-color: var(--hitl-border); color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-progress { background-color: var(--hitl-raised); border-left-color: var(--hitl-accent); color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .detail-banner { border-left-color: var(--hitl-border); background-color: var(--hitl-surface); }
+html[data-hitl-theme="dark"] .detail-banner--answered-elsewhere,
+html[data-hitl-theme="dark"] .detail-banner--closed-elsewhere { background-color: var(--hitl-warning-bg); border-left-color: var(--hitl-error); color: var(--hitl-warning); }
+html[data-hitl-theme="dark"] .detail-banner--orphan { background-color: var(--hitl-warning-bg); border-left-color: var(--hitl-error); color: var(--hitl-warning); }
+html[data-hitl-theme="dark"] .option { border-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .option:hover { border-color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .option.selected { background-color: var(--hitl-selected); border-color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .option.is-chosen { background-color: var(--hitl-selected); border-color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .option-description { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .preview-panel { background-color: var(--hitl-code); border-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .preview-panel-label { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .stepper-tabs { border-bottom-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .stepper-tab { background-color: var(--hitl-surface); border-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .stepper-tab.active { background-color: var(--hitl-accent); border-color: var(--hitl-accent); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .other-label { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .other-input { border-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .other-answered-text { background-color: var(--hitl-success-bg); border-left-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .other-answered--empty { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .review-reading-bar { border-bottom-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .md-content code { background-color: var(--hitl-code); }
+html[data-hitl-theme="dark"] .md-content pre { background-color: var(--hitl-code); }
+html[data-hitl-theme="dark"] .inbox-bar { background-color: var(--hitl-raised); border-bottom-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .inbox-bar button { border-color: var(--hitl-border); color: var(--hitl-text); }
+html[data-hitl-theme="dark"] .inbox-bar button:hover { background-color: var(--hitl-raised); }
+html[data-hitl-theme="dark"] .inbox-bar-title { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"][data-layout="tablet"] .pane-agents,
+html[data-hitl-theme="dark"][data-layout="phone"] .pane-agents { border-right-color: var(--hitl-border); box-shadow: var(--hitl-shadow) 2px 0px 12px; }
+html[data-hitl-theme="dark"][data-layout="tablet"][data-agents="open"] .inbox-scrim,
+html[data-hitl-theme="dark"][data-layout="phone"][data-agents="open"] .inbox-scrim { background-color: var(--hitl-scrim); }
+html[data-hitl-theme="dark"] .pane-handle:hover,
+html[data-hitl-theme="dark"] .pane-handle[data-dragging="true"],
+html[data-hitl-theme="dark"] .pane-handle:focus-visible { background-color: var(--hitl-selected); outline-color: var(--hitl-accent); }
+html[data-hitl-theme="dark"][data-reading-pane="bottom"] .pane-list { border-bottom-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .agent-label { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .agent-row.is-selected .agent-label { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .message-session { color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .message-machine { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .badge-machine { background-color: var(--hitl-raised); color: var(--hitl-text); }
+html[data-hitl-theme="dark"] .detail-session { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .detail-session-name { color: var(--hitl-text); }
+html[data-hitl-theme="dark"] .detail-session-former { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .agent-pending { background: var(--hitl-error); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .agent-row.is-selected .agent-label { color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .agent-row--stale:not(.is-selected) { color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] .message-row.is-selected { box-shadow: inset 3px 0 0 var(--hitl-accent); }
+html[data-hitl-theme="dark"] .action-error-dialog,
+html[data-hitl-theme="dark"] .connection-dialog { background: var(--hitl-raised); color: var(--hitl-text); }
+html[data-hitl-theme="dark"] .action-error-dialog .button { background: var(--hitl-accent); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] .detail-actions .button:disabled,
+html[data-hitl-theme="dark"] .detail-compose-bar .button:disabled,
+html[data-hitl-theme="dark"] .connection-actions .button:disabled,
+html[data-hitl-theme="dark"] .type-filter:disabled { background: var(--hitl-raised); color: var(--hitl-muted); }

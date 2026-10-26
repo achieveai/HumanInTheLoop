@@ -12,8 +12,14 @@ function script(path) {
     });
 }
 
-async function render(kind, source, id) {
+function authoredColors(source) {
+    return /classDef\b|\bstyle\s+\w|%%\{\s*init|theme:|skinparam|!theme|#[0-9a-f]{3,8}\b/i.test(source);
+}
+
+async function render(kind, source, id, theme, colors) {
     if (source.length > 50000) throw new Error('Diagram exceeds the 50,000 character limit.');
+    if (theme === 'dark' && !['surface', 'raised', 'text', 'accent', 'muted', 'selected', 'warning', 'warning-bg']
+        .every(name => /^#[0-9a-f]{6}$/i.test(colors?.[name] || ''))) throw new Error('Invalid diagram palette');
     if (kind === 'mermaid') {
         mermaidReady ||= script('./vendor/mermaid.min.js').then(() => {
             window.mermaid.initialize({
@@ -26,8 +32,21 @@ async function render(kind, source, id) {
             return window.mermaid;
         });
         const engine = await mermaidReady;
+        const dark = theme === 'dark' && !authoredColors(source);
+        engine.initialize({
+            startOnLoad: false, securityLevel: 'strict', theme: dark ? 'dark' : 'default',
+            suppressErrorRendering: true, maxTextSize: 50000, maxEdges: 500, htmlLabels: false,
+            ...(dark ? { themeVariables: {
+                background: colors.surface, primaryColor: colors.selected, primaryTextColor: colors.text,
+                primaryBorderColor: colors.accent, lineColor: colors.muted, textColor: colors.text,
+                secondaryColor: colors.raised, tertiaryColor: colors.raised,
+                actorBkg: colors.raised, actorTextColor: colors.text, actorBorder: colors.accent,
+                signalColor: colors.text, signalTextColor: colors.text,
+                noteBkgColor: colors['warning-bg'], noteTextColor: colors.warning, noteBorderColor: colors.warning,
+            } } : {}),
+        });
         const { svg } = await engine.render(`diagram-${id}`, source);
-        return svg;
+        return { svg, lightBacking: !dark };
     }
     plantumlReady ||= Promise.all([
         script('./vendor/plantuml/viz-global.js'),
@@ -42,17 +61,44 @@ async function render(kind, source, id) {
         throw new Error('External includes are unavailable. Use a self-contained diagram.');
     }
     const engine = await plantumlReady;
+    // Apply defaults only to unstyled source. The bundled theme presets use
+    // bright actor fills whose small white labels fail our contrast target.
+    const dark = theme === 'dark' && !authoredColors(source);
+    const palette = [
+        `skinparam backgroundColor ${colors?.surface}`,
+        `skinparam defaultFontColor ${colors?.text}`,
+        `skinparam arrowColor ${colors?.muted}`,
+        'skinparam shadowing false',
+        `skinparam activityStartColor ${colors?.muted}`,
+        `skinparam activityEndColor ${colors?.muted}`,
+        ...['participant', 'actor', 'class', 'object', 'state', 'activity', 'component', 'rectangle', 'node', 'database', 'note']
+            .flatMap(kind => [
+                `skinparam ${kind}BackgroundColor ${colors?.raised}`,
+                `skinparam ${kind}FontColor ${colors?.text}`,
+                `skinparam ${kind}BorderColor ${colors?.accent}`,
+            ]),
+        `skinparam sequenceLifeLineBorderColor ${colors?.muted}`,
+        `skinparam sequenceGroupBackgroundColor ${colors?.raised}`,
+        `skinparam sequenceGroupHeaderFontColor ${colors?.text}`,
+        `skinparam sequenceDividerBackgroundColor ${colors?.raised}`,
+        `skinparam sequenceDividerFontColor ${colors?.text}`,
+    ].join('\n');
+    const renderedSource = dark ? source.replace(/(@start\w+[^\r\n]*)(\r?\n)/i,
+        (_match, start, newline) => `${start}${newline}${palette}\n`) : source;
     return new Promise((resolve, reject) => {
-        engine.renderToString(source.split(/\r\n|\n|\r/), resolve, error => reject(new Error(String(error))));
+        engine.renderToString(renderedSource.split(/\r\n|\n|\r/),
+            svg => resolve({ svg, lightBacking: !dark }),
+            error => reject(new Error(String(error))));
     });
 }
 
 window.addEventListener('message', async event => {
     if (event.source !== parent || event.data?.type !== 'render-diagram') return;
-    const { id, kind, source } = event.data;
+    const { id, kind, source, theme = 'light', palette } = event.data;
     try {
-        const svg = await render(kind, source, id);
-        parent.postMessage({ type: 'diagram-result', id, svg }, '*');
+        if (theme !== 'light' && theme !== 'dark') throw new Error('Invalid diagram theme');
+        const result = await render(kind, source, id, theme, palette);
+        parent.postMessage({ type: 'diagram-result', id, ...result }, '*');
     } catch (error) {
         parent.postMessage({ type: 'diagram-result', id, error: error.message || String(error) }, '*');
     }

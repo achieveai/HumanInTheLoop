@@ -2,6 +2,9 @@
 <html lang="en" style="background:transparent;">
 <head>
     <meta charset="UTF-8">
+    <script src="theme-bootstrap.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script type="module" src="theme.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>HITL Notifications — Test Harness</title>
     <link rel="stylesheet" href="notifications.css">
@@ -27,6 +30,7 @@
             },
             core: {
                 invoke: (cmd, args) => {
+                    if (cmd === 'get_appearance') return Promise.resolve({ theme: 'light', warning: null });
                     console.log('[TAURI MOCK] invoke:', cmd, args);
                     if (cmd === 'notifications_ready') {
                         if (window.__DURING_READY) window.__listeners['add-notification']({ payload: window.__DURING_READY });

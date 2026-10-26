@@ -1,0 +1,54 @@
+/* Dark is strictly opt-in. Do not set light defaults on existing elements. */
+html[data-hitl-theme="dark"] {
+    color-scheme: dark;
+    --hitl-canvas: #15181e;
+    --hitl-surface: #1b2028;
+    --hitl-raised: #232a34;
+    --hitl-text: #e7edf5;
+    --hitl-muted: #adb9c8;
+    --hitl-border: #6b7a8c;
+    --hitl-accent: #a6b8ff;
+    --hitl-on-accent: #121826;
+    --hitl-selected: #283a64;
+    --hitl-on-selected: #f0f4ff;
+    --hitl-success: #9de2bb;
+    --hitl-success-bg: #18392b;
+    --hitl-warning: #ffe08a;
+    --hitl-warning-bg: #3d3216;
+    --hitl-error: #ffb4b4;
+    --hitl-error-bg: #432329;
+    --hitl-code: #171b22;
+    --hitl-shadow: rgba(0, 0, 0, .5);
+    --hitl-scrim: rgba(0, 0, 0, .65);
+    --hitl-artwork: #ffffff;
+    background: var(--hitl-surface) !important; /* Existing inline white root. */
+    color: var(--hitl-text);
+}
+html[data-hitl-theme="dark"] body {
+    background: var(--hitl-surface) !important; /* Existing inline white body. */
+    color: var(--hitl-text);
+}
+html[data-hitl-theme="dark"] :is(input, textarea, select) {
+    background-color: var(--hitl-raised);
+    color: var(--hitl-text);
+    border-color: var(--hitl-border);
+    caret-color: var(--hitl-text);
+    accent-color: var(--hitl-accent);
+}
+html[data-hitl-theme="dark"] :is(input, textarea)::placeholder { color: var(--hitl-muted); opacity: 1; }
+html[data-hitl-theme="dark"] button { color: var(--hitl-text); }
+html[data-hitl-theme="dark"] :is(button, input, textarea, select):disabled { opacity: 1; color: var(--hitl-muted); }
+html[data-hitl-theme="dark"] :focus-visible { outline-color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] ::selection { background: var(--hitl-accent); color: var(--hitl-on-accent); }
+html[data-hitl-theme="dark"] a { color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .payload-error { color: var(--hitl-error) !important; }
+html[data-hitl-theme="dark"] .md-image-loaded { background: var(--hitl-artwork); }
+
+/* Only the new warning has light styles here; legacy light CSS stays untouched. */
+#appearance-warning {
+    position: fixed; top: 12px; right: 12px; max-width: min(420px, calc(100vw - 24px)); z-index: 1000; padding: 12px;
+    border: 1px solid #c53030; background: #fff5f5; color: #822727; border-radius: 6px;
+    font: 13px/1.5 "Segoe UI", sans-serif;
+}
+#appearance-warning button { margin: 8px 0 0 12px; padding: 4px 8px; }
+html[data-hitl-theme="dark"] #appearance-warning { background: var(--hitl-error-bg); color: var(--hitl-error); border-color: var(--hitl-error); }

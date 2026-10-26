@@ -7,3 +7,9 @@
 .work-task { border-left: 2px solid #94a3b8; padding: 8px 0 0 12px; margin-top: 12px; }
 .work-task > summary { cursor: pointer; font-weight: 600; }
 .work-task > summary:focus-visible { outline: 2px solid #3b82f6; outline-offset: 3px; }
+
+/* Opt-in dark colors; keep the light rules above unchanged. */
+html[data-hitl-theme="dark"] .work-empty,
+html[data-hitl-theme="dark"] .work-freshness { opacity: 1; }
+html[data-hitl-theme="dark"] .work-task { border-left-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .work-task > summary:focus-visible { outline-color: var(--hitl-accent); }

@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <script src="theme-bootstrap.js"></script>
+    <link rel="stylesheet" href="theme.css">
+    <script type="module" src="theme.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LLM Inbox — Test Harness</title>
     <!-- Same order as index.html, and for the same reason. See the comment there. -->
@@ -38,6 +41,12 @@
         window.__TAURI__ = {
             core: {
                 invoke: (cmd, args) => {
+                    if (cmd === 'get_appearance') return Promise.resolve({ theme: window.__APPEARANCE ?? 'light', warning: null });
+                    if (cmd === 'set_appearance') {
+                        if (window.__APPEARANCE_ERROR) return Promise.reject(new Error(window.__APPEARANCE_ERROR));
+                        window.__APPEARANCE = args.theme;
+                        return Promise.resolve({ theme: args.theme, warning: null });
+                    }
                     window.__INVOCATIONS.push({ cmd, args: args ?? null });
                     const fixture = window.__INBOX_FIXTURE ?? {};
 
@@ -192,6 +201,8 @@
         <button id="notifications-toggle" aria-pressed="true" aria-label="Desktop notifications"
                 title="Desktop notifications">🔔</button>
         <span class="inbox-bar-title">Inbox</span>
+        <button id="appearance-toggle" type="button" aria-label="Dark mode" aria-pressed="false"
+                aria-disabled="true" title="Switch to dark mode" style="margin-left:auto">◐</button>
     </div>
     <div class="inbox-scrim" id="inbox-scrim"></div>
 
