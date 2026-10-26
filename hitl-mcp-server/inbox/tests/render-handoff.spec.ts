@@ -28,7 +28,7 @@ test.describe('Pane 3 — a handoff', () => {
     await expect(page.locator('#handoff-next')).toBeVisible();
     await expect(page.locator('#handoff-end')).toHaveAttribute('type', 'checkbox');
     await expect(page.locator('#handoff-end')).not.toBeChecked();
-    await expect(page.locator('input[type="radio"]')).toHaveCount(0);
+    await expect(page.locator('#pane-detail input[type="radio"]')).toHaveCount(0);
   });
 
   test('typing an instruction unchecks End, and Send delivers the instruction', async ({ page }) => {

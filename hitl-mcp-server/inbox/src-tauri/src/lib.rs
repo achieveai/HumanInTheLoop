@@ -2,6 +2,9 @@
 // build must keep stderr, because that is where `env_logger` writes and the
 // whole of this binary's diagnostics with it.
 
+// The two Tauri hosts share the adapter; the storage stays in hitl-transport.
+#[path = "../../../client/src-tauri/src/appearance.rs"]
+mod appearance;
 mod backfill;
 mod body;
 mod capture;
@@ -581,9 +584,20 @@ pub fn run() {
         log::info!("webview flags: {flags}");
     }
 
+    let mut context = tauri::generate_context!();
+    // Preserve the existing light startup. Dark needs its background and
+    // document-start script configured before the declarative window is made.
+    #[cfg(desktop)]
+    if appearance::initial().0 == hitl_transport::appearance::Theme::Dark {
+        for window in &mut context.config_mut().app.windows {
+            if window.label == "inbox" { window.create = false; }
+        }
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
+            appearance::get_appearance,
+            appearance::set_appearance,
             list_sessions,
             list_messages,
             get_message,
@@ -617,6 +631,15 @@ pub fn run() {
                 })?;
             }
 
+            appearance::setup(app.handle());
+            #[cfg(desktop)]
+            if app.get_webview_window("inbox").is_none() {
+                let config = app.config().app.windows.iter()
+                    .find(|window| window.label == "inbox").ok_or("Inbox window config missing")?;
+                appearance::window_builder(app.handle(),
+                    tauri::WebviewWindowBuilder::from_config(app.handle(), config)?,
+                ).build()?;
+            }
             let path = database_path()?;
             let store =
                 Arc::new(Mutex::new(Store::open(&path).map_err(|error| {
@@ -662,7 +685,7 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running the HITL Inbox");
 }
 

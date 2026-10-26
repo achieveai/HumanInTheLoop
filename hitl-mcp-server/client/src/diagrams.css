@@ -16,3 +16,18 @@
 .diagram-dialog::backdrop { background: rgb(10 20 40 / 65%); }
 .diagram-dialog .diagram-viewport { flex: 1; min-height: 0; max-height: none; }
 @media (max-width: 600px) { .diagram-toolbar button { min-height: 44px; } .diagram-dialog { width: 98vw; height: 96vh; } }
+
+/* Opt-in dark colors; keep the light rules above unchanged. */
+html[data-hitl-theme="dark"] .diagram-viewer { border-color: var(--hitl-border); background-color: var(--hitl-surface); color: var(--hitl-text); }
+html[data-hitl-theme="dark"] .diagram-toolbar { background-color: var(--hitl-raised); color: var(--hitl-text); }
+html[data-hitl-theme="dark"] .diagram-toolbar button { border-color: var(--hitl-border); background-color: var(--hitl-surface); color: var(--hitl-text); }
+html[data-hitl-theme="dark"] .diagram-toolbar button:focus-visible,
+html[data-hitl-theme="dark"] .diagram-viewer summary:focus-visible,
+html[data-hitl-theme="dark"] .diagram-viewport:focus-visible { outline-color: var(--hitl-accent); }
+html[data-hitl-theme="dark"] .diagram-viewport { background-color: var(--hitl-surface); }
+html[data-hitl-theme="dark"] .diagram-viewer details { border-top-color: var(--hitl-border); }
+html[data-hitl-theme="dark"] .diagram-error { color: var(--hitl-error); }
+html[data-hitl-theme="dark"] .diagram-dialog { border-color: var(--hitl-border); background-color: var(--hitl-surface); }
+html[data-hitl-theme="dark"] .diagram-dialog::backdrop { background-color: var(--hitl-scrim); }
+/* Authored diagram palettes are content, not app chrome. Never invert them. */
+html[data-hitl-theme="dark"] [data-light-backing="true"] .diagram-viewport { background: var(--hitl-artwork); }

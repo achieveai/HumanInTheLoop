@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod appearance;
 mod drafts;
 mod logging;
 mod ntfy;
@@ -136,6 +137,8 @@ fn main() {
         .manage(hitl_transport::ntfy::identity::SenderIdentityCacheState::default())
         .manage(hitl_transport::ConnectionStatus::default())
         .invoke_handler(tauri::generate_handler![
+            appearance::get_appearance,
+            appearance::set_appearance,
             submit_answer,
             submit_plan_review,
             dismiss_notification,
@@ -147,6 +150,7 @@ fn main() {
             payload_store::notifications_ready
         ])
         .setup(|app| {
+            appearance::setup(app.handle());
             // Setup system tray
             tray::setup_tray(app.handle())?;
 

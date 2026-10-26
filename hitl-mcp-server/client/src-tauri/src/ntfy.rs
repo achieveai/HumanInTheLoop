@@ -481,7 +481,9 @@ fn build_review_window(
 ) -> tauri::Result<tauri::WebviewWindow> {
     let (width, height) = review_window_size(app);
 
-    tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App("review.html".into()))
+    crate::appearance::window_builder(app, tauri::WebviewWindowBuilder::new(
+        app, label, tauri::WebviewUrl::App("review.html".into()),
+    ))
         .title(title)
         .inner_size(width, height)
         .min_inner_size(REVIEW_MIN_SIZE.0, REVIEW_MIN_SIZE.1)
@@ -604,7 +606,9 @@ fn show_notification_payload(app: &AppHandle, config: &HitlConfig, payload: serd
     app.state::<payload_store::NotificationStartup>().queue("add-notification", &payload);
     let url_str = "notifications.html";
 
-    match tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App(url_str.into()))
+    match crate::appearance::window_builder(app, tauri::WebviewWindowBuilder::new(
+        app, label, tauri::WebviewUrl::App(url_str.into()),
+    ))
         .title("Notifications")
         .inner_size(400.0, 500.0)
         .center()
@@ -657,11 +661,11 @@ fn show_question(app: &AppHandle, config: &HitlConfig, question: &QuestionMessag
     payload_store::put(app, &label, question_json);
     let url_str = format!("index.html?encrypted={}", encrypted);
 
-    match tauri::WebviewWindowBuilder::new(
+    match crate::appearance::window_builder(app, tauri::WebviewWindowBuilder::new(
         app,
         &label,
         tauri::WebviewUrl::App(url_str.into()),
-    )
+    ))
     .title("HITL")
     .inner_size(768.0, 768.0)
     .center()

@@ -7,6 +7,7 @@
 //! being performed here, and this crate never installs a global logger — that
 //! is the binary's job.
 
+pub mod appearance;
 pub mod chunking;
 pub mod config;
 pub mod crypto;

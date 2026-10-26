@@ -19,6 +19,8 @@ let rendererReady;
 let nextId = 0;
 let queue = Promise.resolve();
 let expanded;
+const viewers = new Map();
+const currentTheme = () => document.documentElement.dataset.hitlTheme === 'dark' ? 'dark' : 'light';
 
 function engineFrame() {
     if (rendererReady) return rendererReady;
@@ -44,7 +46,12 @@ function engineFrame() {
     return rendererReady;
 }
 
-async function renderSvg(kind, source) {
+async function renderSvg(kind, source, theme) {
+    const style = getComputedStyle(document.documentElement);
+    const palette = Object.fromEntries(
+        ['surface', 'raised', 'text', 'accent', 'muted', 'selected', 'warning', 'warning-bg']
+            .map(name => [name, style.getPropertyValue(`--hitl-${name}`).trim()])
+    );
     try {
         const frame = await engineFrame();
         return await new Promise((resolve, reject) => {
@@ -55,10 +62,10 @@ async function renderSvg(kind, source) {
                 if (event.source !== frame.contentWindow || event.data?.type !== 'diagram-result' || event.data.id !== id) return;
                 cleanup();
                 if (event.data.error) reject(new Error(event.data.error));
-                else resolve(event.data.svg);
+                else resolve(event.data);
             }
             window.addEventListener('message', receive);
-            frame.contentWindow.postMessage({ type: 'render-diagram', id, kind, source }, '*');
+            frame.contentWindow.postMessage({ type: 'render-diagram', id, kind, source, theme, palette }, '*');
         });
     } catch (error) {
         renderer?.remove(); renderer = null; rendererReady = null;
@@ -110,7 +117,8 @@ function expand(image, trigger) {
     viewport.append(copy); controls(copy, viewport, toolbar);
     toolbar.append(button('Close expanded diagram', 'Close', () => dialog.close()));
     dialog.append(toolbar, viewport); document.body.append(dialog);
-    expanded = { dialog, trigger };
+    expanded = { dialog, trigger, image, copy };
+    dialog.dataset.lightBacking = image.closest('.diagram-viewer').dataset.lightBacking;
     dialog.addEventListener('close', () => {
         dialog.remove();
         if (expanded?.dialog === dialog) expanded = null;
@@ -142,11 +150,16 @@ function enhance(code) {
     const summary = document.createElement('summary'); summary.textContent = 'Diagram source';
     details.append(summary);
     pre.replaceWith(viewer); details.append(pre); viewer.append(status, details);
-    queue = queue.then(async () => {
+    const record = { generation: 0, refresh: null, image: null };
+    record.refresh = () => {
+      const generation = ++record.generation;
+      const theme = currentTheme();
+      queue = queue.then(async () => {
+        if (generation !== record.generation) return;
         if (!viewer.isConnected) return;
         try {
-            const svg = await renderSvg(kind, source);
-            if (!viewer.isConnected) return;
+            const { svg, lightBacking } = await renderSvg(kind, source, theme);
+            if (!viewer.isConnected || generation !== record.generation) return;
             const image = document.createElement('img');
             image.alt = `${kind === 'mermaid' ? 'Mermaid' : 'PlantUML'} diagram. Text description is in Diagram source.`;
             // Mermaid emits percentage widths; resolve its viewBox so 100%
@@ -163,19 +176,36 @@ function enhance(code) {
             if (title) image.alt = title;
             image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(root))}`;
             await image.decode();
-            if (!viewer.isConnected) return;
+            if (!viewer.isConnected || generation !== record.generation) return;
+            viewer.dataset.lightBacking = String(lightBacking);
+            viewer.dataset.renderTheme = theme;
+            if (record.image) {
+                record.image.src = image.src;
+                if (expanded?.image === record.image) {
+                    expanded.copy.src = image.src;
+                    expanded.dialog.dataset.lightBacking = String(lightBacking);
+                }
+                status.remove();
+                return;
+            }
             const viewport = document.createElement('div'); viewport.className = 'diagram-viewport';
             const toolbar = document.createElement('div'); toolbar.className = 'diagram-toolbar';
             viewport.append(image); controls(image, viewport, toolbar);
             const expandButton = button('Expand diagram', 'Expand', () => expand(image, expandButton));
             toolbar.append(expandButton);
             status.replaceWith(toolbar, viewport);
+            record.image = image;
         } catch (error) {
+            if (generation !== record.generation || !viewer.isConnected) return;
             status.className = 'diagram-error';
             status.textContent = `Could not render ${kind} diagram. ${error.message}`;
+            if (!status.isConnected) viewer.prepend(status);
             details.open = true;
         }
-    });
+      });
+    };
+    viewers.set(viewer, record);
+    record.refresh();
 }
 
 function scan(root) {
@@ -188,7 +218,11 @@ const style = document.createElement('link');
 style.rel = 'stylesheet'; style.href = new URL('./diagrams.css', import.meta.url).href;
 document.head.append(style);
 new MutationObserver(records => {
+    for (const viewer of viewers.keys()) if (!viewer.isConnected) viewers.delete(viewer);
     if (expanded && !expanded.trigger.isConnected) expanded.dialog.close();
     for (const record of records) for (const node of record.addedNodes) scan(node);
 }).observe(document.documentElement, { childList: true, subtree: true });
 scan(document.documentElement);
+window.addEventListener('hitl-theme-changed', () => {
+    for (const [viewer, record] of viewers) if (viewer.isConnected) record.refresh();
+});

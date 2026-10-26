@@ -42,6 +42,7 @@ async function stubTauri(page: Page, opts: InvokeStub) {
     w.__TAURI__ = {
       core: {
         invoke: (cmd: string, args: unknown) => {
+          if (cmd === 'get_appearance') return Promise.resolve({ theme: 'light', warning: null });
           w.__calls.push({ cmd, args });
           if (cmd === 'take_window_payload') {
             const staged = sessionStorage.getItem(KEY);
