@@ -145,6 +145,24 @@ export function createThreadPane({ container, invoke, onError = console.error, a
         if (mark) headline.appendChild(mark);
     }
 
+    function threadSessionLine(anchor) {
+        if (!anchor.formerNames?.length) return null;
+        const line = el('p', 'detail-session');
+        const former = el('span', 'detail-session-former');
+        const toggle = el('button', 'thread-former-toggle', `Older names (${anchor.formerNames.length})`);
+        toggle.type = 'button';
+        toggle.setAttribute('aria-expanded', 'false');
+        const names = el('span', 'thread-former-names', anchor.formerNames.join(' · '));
+        names.hidden = true;
+        toggle.addEventListener('click', () => {
+            names.hidden = !names.hidden;
+            toggle.setAttribute('aria-expanded', String(!names.hidden));
+        });
+        former.append(toggle, names);
+        line.appendChild(former);
+        return line;
+    }
+
     function threadHeader(anchor, rows) {
         const header = el('header', 'thread-header detail-header');
         header.appendChild(el('div', 'detail-kicker', 'Conversation'));
@@ -172,6 +190,8 @@ export function createThreadPane({ container, invoke, onError = console.error, a
             project.appendChild(document.createTextNode(anchor.projectKey));
             meta.appendChild(project);
         }
+        const session = threadSessionLine(anchor);
+        if (session) meta.appendChild(session);
         const latest = latestOf(rows);
         if (latest) {
             meta.appendChild(el('span', 'detail-when', `Last activity ${formatAbsolute(latest.createdAt)}`));
@@ -187,10 +207,6 @@ export function createThreadPane({ container, invoke, onError = console.error, a
             header.appendChild(roster);
         }
 
-        // The name is the title two lines up; only the objective and earlier
-        // names earn a line here.
-        const session = sessionLine(anchor, { name: false });
-        if (session) header.appendChild(session);
         return header;
     }
 
@@ -515,6 +531,9 @@ export function createThreadPane({ container, invoke, onError = console.error, a
         root.appendChild(threadHeader(anchor, rows));
 
         const scroll = el('div', 'thread-scroll');
+        if (anchor.objective) {
+            scroll.appendChild(el('p', 'thread-objective detail-session-objective', anchor.objective));
+        }
         const ordered = [...rows].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
         openingMounts = [];
         for (const row of ordered) {
@@ -721,11 +740,13 @@ export function createThreadPane({ container, invoke, onError = console.error, a
         if (!state || state.key !== conversationKeyOf(message)) return;
         const header = container.querySelector('.thread-header');
         if (!header) return;
-        const line = sessionLine(message, { name: false });
+        const line = threadSessionLine(message);
+        const objective = container.querySelector('.thread-objective');
+        if (objective) objective.textContent = message.objective || '';
         const current = header.querySelector('.detail-session');
         if (current && line) current.replaceWith(line);
         else if (current) current.remove();
-        else if (line) header.querySelector('.detail-meta')?.after(line);
+        else if (line) header.querySelector('.detail-meta')?.appendChild(line);
     }
 
     function clear() {

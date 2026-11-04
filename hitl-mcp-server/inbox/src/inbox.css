@@ -2275,19 +2275,53 @@ body {
 #pane-agents .agent-load-more:hover { background: oklch(0.92 0.01 250); color: oklch(0.25 0.02 250); }
 #pane-agents .agent-load-more:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 
-/* Read state actions stay distinct from response/send controls. */
+/* Read state actions use the same outlined treatment as the thread send action. */
 .detail-notification .notification-read-action {
-    color: oklch(0.38 0.13 275);
-    background: oklch(0.95 0.025 275);
-    border-color: oklch(0.76 0.07 275);
+    color: #4c51bf;
+    background: #fff;
+    border-color: #e2e8f0;
     min-width: 44px;
     min-height: 44px;
 }
-.detail-notification .notification-read-action:hover {
-    color: oklch(0.28 0.13 275);
-    background: oklch(0.89 0.04 275);
+.detail-notification .notification-read-action:hover:not(:disabled) {
+    color: #4c51bf;
+    background: #f0f1fa;
+    border-color: #c3c8f0;
 }
 .detail-notification .notification-read-action:focus-visible {
     outline: 2px solid currentColor;
     outline-offset: 2px;
+}
+
+/* Only the annotated conversation context: history is opt-in; objective scrolls. */
+.thread-header .thread-former-toggle {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+    min-height: 44px;
+    padding: 0;
+}
+.thread-header .thread-former-toggle:hover { color: #4a5568; }
+.thread-header .thread-former-toggle:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.thread-header .thread-former-names:not([hidden]) { display: block; padding-bottom: 8px; }
+.thread-scroll > .thread-objective {
+    margin: 0;
+    padding: 12px 16px;
+    color: #4a5568;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+/* Former names shares the wrapping header tag row. */
+.thread-header .detail-meta > .detail-session {
+    margin: 0;
+    min-width: 0;
+    max-width: 100%;
+}
+.thread-header .detail-meta > .detail-session .detail-session-former {
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
