@@ -17,6 +17,7 @@ async function install(page, response: unknown, saveResponse: unknown = undefine
         if ((saveResponse as any)?.error) return Promise.reject(new Error((saveResponse as any).error));
         return Promise.resolve(saveResponse);
       }
+      if (command === 'open_qr_scanner') return Promise.resolve();
       return Promise.reject(new Error(`unexpected ${command}`));
     };
     win.__SETTINGS = settings.createConnectionSettings({
@@ -108,6 +109,31 @@ test('configured mobile startup bypasses setup', async ({ page }) => {
 
   await expect(page.getByRole('dialog', { name: 'Connect Inbox' })).not.toBeVisible();
   expect(await page.evaluate(() => (window as any).__CONFIGURED)).toBe(1);
+});
+
+test('mobile settings Cancel closes without saving or changing the connection', async ({ page }) => {
+  await install(page, { mobile: true, configured: true, topicId: 'phone-topic' });
+  await page.getByRole('button', { name: 'Connection settings' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Connect Inbox' });
+  await expect(dialog).toBeVisible();
+
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(dialog).not.toBeVisible();
+  const calls = await page.evaluate(() => (window as any).__SETTINGS_CALLS);
+  expect(calls.filter(call => call.command === 'save_connection_settings')).toEqual([]);
+});
+
+test('mobile scan action explains the flow, opens the native scanner, and closes settings', async ({ page }) => {
+  await install(page, { mobile: true, configured: true, topicId: 'phone-topic' });
+  await page.getByRole('button', { name: 'Connection settings' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Connect Inbox' });
+  await expect(dialog).toContainText('Connection settings → Share connection');
+  await expect(dialog).toContainText('tap the HITL Inbox link');
+
+  await dialog.getByRole('button', { name: 'Scan connection QR' }).click();
+  await expect(dialog).not.toBeVisible();
+  const calls = await page.evaluate(() => (window as any).__SETTINGS_CALLS);
+  expect(calls.at(-1)).toEqual({ command: 'open_qr_scanner', args: undefined });
 });
 
 test('configured desktop startup uses the registered settings command and hides mobile settings', async ({ page }) => {

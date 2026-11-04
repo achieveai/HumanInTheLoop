@@ -13,6 +13,7 @@ name = "hitl_inbox_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
+serde_json = { workspace = true }
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
@@ -33,6 +34,9 @@ uuid = { workspace = true }
 log = { workspace = true, features = ["std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+# Desktop → Android connection sharing, rendered entirely in Rust so the key
+# never reaches the WebView as text (see share.rs).
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 # Windows pops a toast up only for an app on the Start menu; a bare exe adds
 # its own shortcut with these (see src/start_menu.rs). The same version Tauri

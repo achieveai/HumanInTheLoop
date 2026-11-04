@@ -27,6 +27,12 @@
         <button id="notifications-toggle" aria-pressed="true" aria-label="Desktop notifications"
                 title="Desktop notifications">🔔</button>
         <button id="connection-settings" aria-label="Connection settings" title="Connection settings">⚙</button>
+        <button id="share-connection" aria-label="Share connection to Android" title="Share connection to Android" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M3 3h6v6H3zM15 3h6v6h-6zM3 15h6v6H3z"/>
+                <path d="M11 3h2v2h-2zM3 11h2v2H3zM11 11h2v2h-2zM15 15h2v2h-2zM19 15h2v2h-2zM11 19h2v2h-2zM15 19h2v2h-2zM19 19h2v2h-2z" fill="currentColor" stroke="none"/>
+            </svg>
+        </button>
         <span class="inbox-bar-title">Inbox</span>
     </div>
     <div class="inbox-scrim" id="inbox-scrim"></div>
@@ -54,7 +60,6 @@
                 <button class="dismiss-bulk-status" type="button" aria-label="Dismiss Undo">Dismiss</button>
             </div>
             <div class="message-list" id="message-list"></div>
-            <div class="list-compose" id="list-compose" aria-label="Message the picked agent"></div>
         </section>
 
         <!-- Pane 3: the three renderers (spec §8). Filled by pane-detail.js,
@@ -77,7 +82,17 @@
     <dialog class="connection-dialog" id="connection-dialog" aria-labelledby="connection-title">
         <form>
             <h2 id="connection-title">Connect Inbox</h2>
-            <p class="connection-intro">Enter the server, topic and encryption key from your HITL configuration.</p>
+            <p class="connection-intro">Connect with a QR code from your desktop, or enter the connection details manually.</p>
+            <div class="connection-scan" hidden>
+                <button class="button button-secondary scan-connection" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                        <path d="M3 3h6v6H3zM15 3h6v6h-6zM3 15h6v6H3z"/>
+                        <path d="M11 3h2v2h-2zM3 11h2v2H3zM11 11h2v2h-2zM15 15h2v2h-2zM19 15h2v2h-2zM11 19h2v2h-2zM15 19h2v2h-2zM19 19h2v2h-2z" fill="currentColor" stroke="none"/>
+                    </svg>
+                    Scan connection QR
+                </button>
+                <p class="connection-scan-help">On your desktop, open <strong>Connection settings → Share connection</strong>. Then scan the QR and tap the HITL Inbox link when it appears.</p>
+            </div>
             <label for="connection-url">Server</label>
             <input id="connection-url" name="ntfyUrl" type="url" inputmode="url" value="https://ntfy.sh"
                    autocomplete="off" spellcheck="false" required>
@@ -88,11 +103,40 @@
                    autocomplete="off" spellcheck="false" required>
             <p class="connection-error" role="alert" aria-live="assertive"></p>
             <div class="connection-actions">
-                <button class="button button-secondary connection-cancel" type="button"
-                        onclick="this.closest('dialog').close()">Cancel</button>
+                <button class="button button-secondary connection-cancel" type="button">Cancel</button>
                 <button class="button button-primary" type="submit">Save connection</button>
             </div>
         </form>
+    </dialog>
+
+    <dialog class="connection-dialog share-dialog" id="share-dialog" aria-labelledby="share-title">
+        <h2 id="share-title">Share connection to Android</h2>
+        <p class="connection-intro">Scan with the camera on your phone or tablet, then open the link with HITL Inbox.</p>
+        <div class="share-qr" role="img" aria-label="Connection QR code"></div>
+        <p class="share-warning">Anyone who scans this code can read <strong>and answer</strong> your inbox. Share it only with your own devices, and do not photograph or forward it.</p>
+        <p class="share-countdown" aria-live="polite"></p>
+        <p class="connection-error share-error" role="alert" aria-live="assertive"></p>
+        <div class="connection-actions">
+            <button class="button button-secondary share-close" type="button">Close</button>
+        </div>
+    </dialog>
+
+    <dialog class="connection-dialog import-dialog" id="import-dialog" aria-labelledby="import-title">
+        <h2 id="import-title">Import connection</h2>
+        <p class="connection-intro">A scanned code wants to connect this device to:</p>
+        <dl class="import-preview">
+            <dt>Server</dt>
+            <dd class="import-server"></dd>
+            <dt>Topic ID</dt>
+            <dd class="import-topic"></dd>
+        </dl>
+        <p class="share-warning">Import only codes shown by a device you trust. The encryption key is imported without being displayed.</p>
+        <p class="import-overwrite-note" hidden>This will <strong>replace the connection currently saved on this device</strong>.</p>
+        <p class="connection-error import-error" role="alert" aria-live="assertive"></p>
+        <div class="connection-actions">
+            <button class="button button-secondary import-cancel" type="button">Cancel</button>
+            <button class="button button-primary import-confirm" type="button">Import connection</button>
+        </div>
     </dialog>
 
     <script type="module" src="inbox.js"></script>

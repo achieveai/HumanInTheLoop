@@ -77,8 +77,11 @@ test.describe('Session names', () => {
     await expect(page.locator('.message-row[data-message-id="n-2"] .message-session')).toHaveCount(0);
 
     await row.click();
-    const line = page.locator('.detail-session');
-    await expect(line.locator('.detail-session-name')).toHaveText('Session names');
+    // The name leads the thread header as the pane's title; the header line
+    // itself carries only what the title does not say.
+    await expect(page.locator('.thread-header .detail-title')).toHaveText('Session names');
+    const line = page.locator('.thread-header .detail-session');
+    await expect(line.locator('.detail-session-name')).toHaveCount(0);
     await expect(line.locator('.detail-session-objective')).toHaveText('Let agents name their sessions.');
     await expect(line.locator('.detail-session-former')).toHaveText('Formerly: Android build · Inbox fix');
   });
@@ -137,7 +140,7 @@ test.describe('Session names', () => {
       (window as any).__simulateChange();
     }, fixture(NAMING));
 
-    await expect(page.locator('.detail-session-name')).toHaveText('Session names');
+    await expect(page.locator('.thread-header .detail-session-objective')).toHaveText('Let agents name their sessions.');
     expect(await page.locator('#pane-detail .detail-root').evaluate(root => (root as any).__kept)).toBe(true);
   });
 });

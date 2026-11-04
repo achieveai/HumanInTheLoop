@@ -4,8 +4,10 @@ import { mount, recorded } from './mount.js';
 
 // Pane 3, plan reviews (spec §8.3).
 //
-// The reviewer itself is client/src/review.js, unchanged and already covered by
-// the client's own suite. What is new here is the two decisions around it:
+// The reviewer itself is client/src/review.js, already covered by the client's
+// own suite; the Inbox copy's header starts collapsed — the one deliberate
+// divergence (a thread pane cannot spare the ~215px a whole window can).
+// What is new here is the two decisions around it:
 // whether a body is fit to render at all, and — when it is not — whether the
 // reason given actually points at the thing the reader has to go and fix.
 //
@@ -385,22 +387,16 @@ test.describe('Pane 3 — a plan that cannot be vouched for (spec §8.3)', () =>
 // The titlebar deliberately survives a collapse: it carries "Find in plan", and
 // in the client popup `review.js` is the whole window, so there is nowhere else
 // for search to live.
+//
+// Default: collapsed. The Inbox hosts the reviewer in a thread pane, where
+// the block costs the plan more than it tells the reader; only an explicit
+// expansion is remembered for the next review.
 test.describe('the review header collapses (spec §8.3)', () => {
   const toggle = '#review-header-toggle';
   const body = '#review-header-body';
 
-  test('starts expanded, with the path, chips and summary on screen', async ({ page }) => {
+  test('starts collapsed — the block hides, the title and find box stay', async ({ page }) => {
     await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
-
-    await expect(page.locator(toggle)).toHaveAttribute('aria-expanded', 'true');
-    await expect(page.locator('.review-meta')).toBeVisible();
-    await expect(page.locator('.review-summary')).toContainText('Three steps.');
-  });
-
-  test('collapsing hides the block but keeps the title and the find box', async ({ page }) => {
-    await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
-
-    await page.locator(toggle).click();
 
     await expect(page.locator(toggle)).toHaveAttribute('aria-expanded', 'false');
     await expect(page.locator(body)).toBeHidden();
@@ -412,6 +408,17 @@ test.describe('the review header collapses (spec §8.3)', () => {
     await expect(page.locator('#review-find-input')).toBeVisible();
   });
 
+  test('expanding puts the path, chips and summary back on screen', async ({ page }) => {
+    await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
+
+    await page.locator(toggle).click();
+
+    await expect(page.locator(toggle)).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator(body)).toBeVisible();
+    await expect(page.locator('.review-meta')).toBeVisible();
+    await expect(page.locator('.review-summary')).toContainText('Three steps.');
+  });
+
   // Against what the header actually gave up, not a fixed pixel count: this
   // fixture's summary is one line where a real one is a paragraph, so any
   // constant here would either be unreachable or prove nothing.
@@ -419,10 +426,12 @@ test.describe('the review header collapses (spec §8.3)', () => {
     await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
     const panes = () => page.locator('.review-body').boundingBox();
 
+    await page.locator(toggle).click(); // expand — the block now has height to give
+
     const before = (await panes())?.height ?? 0;
     const surrendered = (await page.locator(body).boundingBox())?.height ?? 0;
 
-    await page.locator(toggle).click();
+    await page.locator(toggle).click(); // collapse
 
     const gained = ((await panes())?.height ?? 0) - before;
     expect(surrendered, 'the header body had no height to give').toBeGreaterThan(40);
@@ -446,14 +455,14 @@ test.describe('the review header collapses (spec §8.3)', () => {
 
   test('the choice is remembered for the next review', async ({ page }) => {
     await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
-    await page.locator(toggle).click();
-    await expect(page.locator(body)).toBeHidden();
+    await page.locator(toggle).click(); // expand — against the new default
+    await expect(page.locator(body)).toBeVisible();
 
     // Re-mounted rather than reloaded: the harness stages its fixture per
     // mount, and "the next review" is literally a second mount anyway.
     await mount(page, 'review', review(), { body: bodyOk(CONTENT, DIFF) });
 
-    await expect(page.locator(toggle)).toHaveAttribute('aria-expanded', 'false');
-    await expect(page.locator(body)).toBeHidden();
+    await expect(page.locator(toggle)).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator(body)).toBeVisible();
   });
 });

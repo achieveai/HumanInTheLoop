@@ -414,7 +414,7 @@ test.describe('Publishing a reply (spec §9.1)', () => {
       { request: { body: 'Shipped.' } },
     ), { wire: true, failWith: 'no network' });
 
-    const button = page.locator('.detail-actions .button', { hasText: 'Dismiss' });
+    const button = page.getByRole('button', { name: 'Dismiss' });
     await button.click();
 
     await expect(page.locator('.detail-error')).toContainText('Could not dismiss this — nothing left this machine.');

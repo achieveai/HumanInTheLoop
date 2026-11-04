@@ -27,22 +27,91 @@
            window.__INBOX_FIXTURE = {
              sessions: <SessionTree>,
              messages: <MessageList> | { "<scopeKey>|<filter>": <MessageList> },
+             details: { "<messageId>": <MessageDetail> },
+             bodies:   { "<messageId>": <BodyOutcome> },
            }
 
          Every invoke() is recorded on window.__INVOCATIONS so a test can
-         assert what the UI asked for, not just what it drew. -->
+         assert what the UI asked for, not just what it drew.
+
+         When nothing injected __INBOX_FIXTURE (a plain browser, no Playwright
+         init script), the harness downloads harness-fixture.json next to this
+         file — a recording of the same commands made against the live
+         ~/.hitl event log by `cargo test --release --lib
+         dump_harness_fixture` (see src-tauri/src/fixture_dump.rs). The
+         recording also carries `settings` (ConnectionSettings from
+         ~/.hitl/config.json, desktop shape) which the
+         get_connection_settings mock hands back. A missing or stale file is
+         not an error: the empty fallbacks below apply, as before. -->
     <script>
         window.__INVOCATIONS = [];
         window.__listeners = {};
 
+        // Resolves once a downloaded fixture (if any) is in place. Playwright
+        // sets __INBOX_FIXTURE in an init script, which runs before this, so
+        // tests never touch the network.
+        window.__FIXTURE_READY = (async () => {
+            if (window.__INBOX_FIXTURE) return;
+            try {
+                const response = await fetch('./harness-fixture.json', { cache: 'no-store' });
+                if (!response.ok) return;
+                const recorded = await response.json();
+                window.__INBOX_FIXTURE = {
+                    sessions: recorded.sessions,
+                    messages: recorded.messages,
+                    details: recorded.details,
+                    bodies: recorded.bodies,
+                };
+                window.__HARNESS_SETTINGS = recorded.settings ?? null;
+            } catch {
+                // No recording: the empty fallbacks below apply.
+            }
+        })();
+
+        // Search index for the agent tree: sessionKey -> lowercase text of
+        // every message the recording holds (list rows, message details,
+        // settlements). Built idle after first paint so the 80 MB recording
+        // never blocks rendering; tree search reads it through
+        // window.__INBOX_SEARCH_BODIES and simply matches metadata until
+        // this resolves.
+        window.__SEARCH_BODIES_READY = window.__FIXTURE_READY.then(() => {
+            const fixture = window.__INBOX_FIXTURE ?? {};
+            const idle = window.requestIdleCallback ?? (fn => setTimeout(fn, 1000));
+            return new Promise(resolve => idle(() => {
+                try {
+                    const index = {};
+                    const push = (key, text) => {
+                        if (!key || !text) return;
+                        const lower = String(text).toLowerCase();
+                        index[key] = index[key] ? `${index[key]} ${lower}` : lower;
+                    };
+                    for (const list of Object.values(fixture.messages ?? {})) {
+                        for (const row of list?.messages ?? []) {
+                            push(row.sessionKey, [row.title, row.objective, row.contextSnippet, row.verdict]
+                                .filter(Boolean).join(' '));
+                        }
+                    }
+                    for (const detail of Object.values(fixture.details ?? {})) {
+                        push(detail?.row?.sessionKey, JSON.stringify(detail?.request ?? {}));
+                        push(detail?.row?.sessionKey, JSON.stringify(detail?.settlement ?? {}));
+                    }
+                    window.__INBOX_SEARCH_BODIES = index;
+                } catch {
+                    // Metadata-only search until a recording is in place.
+                }
+                resolve();
+            }));
+        });
+
         window.__TAURI__ = {
             core: {
-                invoke: (cmd, args) => {
+                invoke: async (cmd, args) => {
+                    await window.__FIXTURE_READY;
                     window.__INVOCATIONS.push({ cmd, args: args ?? null });
                     const fixture = window.__INBOX_FIXTURE ?? {};
 
                     if (cmd === 'get_connection_settings') {
-                        return Promise.resolve({ mobile: false, configured: true, topicId: null });
+                        return window.__HARNESS_SETTINGS ?? { mobile: false, configured: true, topicId: null };
                     }
 
                     // Desktop notifications: `window.__NOTIFICATIONS` holds the
@@ -179,6 +248,7 @@
         // inbox.js, rather than reimplementing its refresh here.
         window.__simulateChange = () => window.__listeners['inbox-changed']?.({ payload: null });
     </script>
+
 </head>
 <body>
     <!-- Layout chrome (mobile spec §4). Hidden entirely at wide widths.
@@ -214,7 +284,6 @@
                 <button class="dismiss-bulk-status" type="button" aria-label="Dismiss Undo">Dismiss</button>
             </div>
             <div class="message-list" id="message-list"></div>
-            <div class="list-compose" id="list-compose" aria-label="Message the picked agent"></div>
         </section>
         <section class="pane pane-detail" id="pane-detail" aria-label="Detail"></section>
         <button class="pane-handle" id="pane-handle-1" aria-label="Resize agents" role="separator"
@@ -233,4 +302,3 @@
 
     <script type="module" src="inbox.js"></script>
 </body>
-</html>

@@ -10,6 +10,8 @@ export function createConnectionSettings({ invoke, dialog, openButton, onConfigu
     const key = dialog?.querySelector('#connection-key');
     const error = dialog?.querySelector('.connection-error');
     const cancel = dialog?.querySelector('.connection-cancel');
+    const scanOption = dialog?.querySelector('.connection-scan');
+    const scanButton = dialog?.querySelector('.scan-connection');
     let required = false;
     let started = false;
     let configured = false;
@@ -57,6 +59,7 @@ export function createConnectionSettings({ invoke, dialog, openButton, onConfigu
         }
 
         markConfigured(Boolean(settings.configured));
+        if (scanOption) scanOption.hidden = !settings.mobile;
         if (!settings.mobile || settings.configured) {
             fill(settings);
             if (!settings.mobile && openButton) openButton.hidden = true;
@@ -86,6 +89,25 @@ export function createConnectionSettings({ invoke, dialog, openButton, onConfigu
             if (error) error.textContent = String(reason?.message ?? reason);
         } finally {
             if (submit) submit.disabled = false;
+        }
+    });
+
+    // Bound handlers do not depend on inline HTML event behavior in a WebView.
+    cancel?.addEventListener('click', () => {
+        if (!required) dialog.close();
+    });
+    scanButton?.addEventListener('click', async () => {
+        if (error) error.textContent = '';
+        scanButton.disabled = true;
+        try {
+            await invoke('open_qr_scanner');
+            // Returning through a scanned link presents the import confirmation;
+            // do not leave a second modal underneath it.
+            dialog.close();
+        } catch (reason) {
+            if (error) error.textContent = String(reason?.message ?? reason);
+        } finally {
+            scanButton.disabled = false;
         }
     });
 

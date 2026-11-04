@@ -11,10 +11,10 @@
 // renderer, for the same reason — never rebuild the body under someone typing.
 
 import {
-    actionButton,
     contextBlock,
     detailHeader,
     el,
+    iconActionButton,
     isOpen,
     removeNotice,
     renderMarkdownInto,
@@ -189,7 +189,10 @@ export function renderHandoff(container, detail, actions = {}) {
         return { locked: true, applyRow };
     }
 
-    footer.appendChild(actionButton('Send', 'button-primary', actions.onSubmit ? submit : null));
+    // Icon-only: the paper plane reads as "send" without words, and a thread
+    // of quiet cards stays quiet. The accessible name carries the label.
+    footer.appendChild(iconActionButton('send', 'button-primary',
+        actions.onSubmit ? submit : null, 'Send'));
 
     return {
         locked: false,

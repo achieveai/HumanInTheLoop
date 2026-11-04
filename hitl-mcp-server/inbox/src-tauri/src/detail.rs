@@ -115,9 +115,16 @@ fn events_for(events: &[Event], message_id: &str) -> Vec<Event> {
 /// history, so a row computed from this subject alone would quietly disagree
 /// with the one pane 2 is showing.
 pub fn build_detail(events: &[Event], all: &MessageList, message_id: &str) -> Option<MessageDetail> {
+    let row = all.messages.iter().find(|row| row.message_id == message_id)?.clone();
+    build_detail_with_row(events, row, message_id)
+}
+
+/// The same detail once the row is already in hand. `get_message` reaches
+/// for this with a whole-history row when the recency-capped all-agents
+/// list does not contain the message.
+pub fn build_detail_with_row(events: &[Event], row: MessageRow, message_id: &str) -> Option<MessageDetail> {
     let subject = events_for(events, message_id);
     let request = request_event(&subject)?;
-    let row = all.messages.iter().find(|row| row.message_id == message_id)?.clone();
     let settlement = folded_settlement(&subject, &row).map(|event| event.json());
 
     Some(MessageDetail {

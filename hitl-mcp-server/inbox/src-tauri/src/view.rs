@@ -491,6 +491,21 @@ impl Projection {
         list_from(self.subjects(), scope_key, filter, now)
     }
 
+    /// One row for a message wherever it lives. The all-agents scope applies
+    /// the recency cut (§"All agents" above), so settled history older than
+    /// the window misses its row lookup there even though the message's own
+    /// session scope keeps the whole thread — `get_message` falls back to
+    /// this after the all-scope list misses.
+    pub fn row_for(&mut self, message_id: &str, now: u64) -> Option<MessageRow> {
+        let subjects = self.subjects();
+        let tree = tree_from(subjects, now);
+        let subject = subjects.iter().find(|s| s.row.message_id == message_id)?;
+        let mut row = subject.row.clone();
+        row.status = display_status(&row.status, state_for(&tree, &row)).to_string();
+        row.age_seconds = now.saturating_sub(row.created_at);
+        Some(row)
+    }
+
     fn subjects(&mut self) -> &[Subject] {
         if self.linked.is_none() {
             for key in std::mem::take(&mut self.stale) {
@@ -748,6 +763,7 @@ fn tree_from(subjects: &[Subject], now: u64) -> SessionTree {
 pub enum Scope {
     All,
     Project(String),
+    Repository(String),
     Session(String),
     Unattributed,
 }
@@ -761,6 +777,7 @@ pub fn parse_scope(raw: Option<&str>) -> Scope {
         Some("unattributed") => Scope::Unattributed,
         Some(other) => match other.split_once(':') {
             Some(("project", key)) => Scope::Project(key.to_string()),
+            Some(("repository", key)) => Scope::Repository(key.to_string()),
             Some(("session", key)) => Scope::Session(key.to_string()),
             _ => Scope::All,
         },
@@ -773,6 +790,7 @@ impl Scope {
             Self::All => true,
             Self::Unattributed => row.unattributed,
             Self::Project(key) => &row.project_key == key,
+            Self::Repository(key) => row.project_key.split('/').next().unwrap_or("").trim() == key,
             Self::Session(key) => row.session_key.as_deref() == Some(key.as_str()),
         }
     }
@@ -1618,6 +1636,21 @@ mod tests {
         let list = build_list(&events, Some("session:Hitl_MCP · a3f2"), Some("all"), NOW);
         assert_eq!(list.messages.len(), 2);
         assert!(list.messages.iter().all(|m| m.status == "pending"));
+    }
+
+    #[test]
+    fn repository_scope_includes_worktrees_without_matching_other_repos() {
+        let events = [
+            question("a", NOW - MINUTE, "repo/branchA"),
+            identity("a", NOW - MINUTE, "repo/branchA · master · aaaa"),
+            question("b", NOW - MINUTE, "repo/branchB"),
+            identity("b", NOW - MINUTE, "repo/branchB · master · bbbb"),
+            question("c", NOW - MINUTE, "other/branchA"),
+            identity("c", NOW - MINUTE, "other/branchA · master · cccc"),
+        ];
+        let list = build_list(&events, Some("repository:repo"), Some("all"), NOW);
+        let ids: std::collections::HashSet<_> = list.messages.iter().map(|row| row.message_id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"].into_iter().collect());
     }
 
     #[test]

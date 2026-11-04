@@ -6,7 +6,7 @@
 // in the tree; the reading pane has none. The server side delivers it on the
 // agent's next hook or channel push.
 
-import { detailHeader, el } from './detail-shell.js';
+import { badgeIcon, detailHeader, el } from './detail-shell.js';
 
 const KICKER = 'Message to agent';
 
@@ -60,6 +60,11 @@ export function relabelListComposer(container, session) {
     if (session) relabelCompose(container, listTarget(session));
 }
 
+/** The thread's reply box: the same form, addressed to a conversation row. */
+export function threadComposer(row, onMessageAgent) {
+    return buildCompose(row, onMessageAgent, NO_TAG);
+}
+
 /** Readdress the compose box in `container` to `row`'s session, keeping what was typed. */
 function relabelCompose(container, row) {
     const form = container.querySelector('form.detail-compose');
@@ -92,9 +97,14 @@ function buildCompose(row, onMessageAgent, reason) {
     form.querySelector('label').htmlFor = text.id = `compose-${row.messageId}`;
     form.appendChild(text);
 
-    const send = el('button', 'button button-primary', 'Send');
+    // Icon-only: the paper plane reads as "send" without words; the
+    // accessible name carries them for screen readers and tests.
+    const send = el('button', 'button button-primary');
     send.type = 'submit';
     send.disabled = true;
+    send.appendChild(badgeIcon('send', 14));
+    send.setAttribute('aria-label', 'Send message to agent');
+    send.title = 'Send (Ctrl+Enter)';
     const status = el('p', 'detail-compose-status');
     status.setAttribute('role', 'status');
 

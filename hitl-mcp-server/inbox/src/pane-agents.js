@@ -28,14 +28,18 @@ function el(tag, className, text) {
  */
 function agentRow({ kind, scopeKey, glyph, name, label, hint, state, pending, lastEventAt, now }, options) {
     const row = el('div', `agent-row agent-row--${kind}`);
-    row.dataset.scopeKey = scopeKey;
-    row.setAttribute('role', 'button');
-    row.tabIndex = 0;
+    // Grouping rows (a repo folder merged from several projects, a machine
+    // subfolder) have no scope of their own — they only organise the tree.
+    if (scopeKey) {
+        row.dataset.scopeKey = scopeKey;
+        row.setAttribute('role', 'button');
+        row.tabIndex = 0;
+    }
     if (state) {
         row.dataset.state = state;
         row.classList.add(`agent-row--${state}`);
     }
-    if (scopeKey === options.selectedScope) row.classList.add('is-selected');
+    if (scopeKey && scopeKey === options.selectedScope) row.classList.add('is-selected');
 
     const mark = el('span', 'agent-glyph', glyph ?? '');
     if (state) mark.title = state;
@@ -56,7 +60,7 @@ function agentRow({ kind, scopeKey, glyph, name, label, hint, state, pending, la
         row.appendChild(age);
     }
 
-    const select = () => options.onSelect?.(scopeKey);
+    const select = () => { if (scopeKey) options.onSelect?.(scopeKey); };
     row.addEventListener('click', select);
     row.addEventListener('keydown', event => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -72,25 +76,30 @@ function agentRow({ kind, scopeKey, glyph, name, label, hint, state, pending, la
  * The rows to draw. Without a query: recent rows only (the projection's
  * `recent`), plus the selected row so a selection never vanishes. With one:
  * every project whose name matches, with all its sessions, and every session
- * whose label matches, however old.
+ * whose label, details, or message content matches, however old.
  */
-function visibleTree(tree, query, selectedScope) {
+function visibleTree(tree, query, selectedScope, options = {}) {
     const q = query.trim().toLowerCase();
     const matches = text => String(text ?? '').toLowerCase().includes(q);
+    const bodyOf = session => (options.bodyTextFor ? String(options.bodyTextFor(session) ?? '') : '');
     const projects = [];
     let hidden = 0;
 
     for (const project of tree.projects) {
         const projectHit = q !== '' && matches(project.name);
         const sessions = project.sessions.filter(session => {
-            if (q) return projectHit || [session.label, session.sessionName, session.objective, session.machine, ...(session.formerNames ?? [])].some(matches);
-            const shown = session.recent !== false || session.scopeKey === selectedScope;
+            if (q) {
+                return projectHit
+                    || [session.label, session.sessionName, session.objective, session.machine, ...(session.formerNames ?? [])].some(matches)
+                    || matches(bodyOf(session));
+            }
+            const shown = true; // Age filtering belongs to repository rows below.
             if (!shown) hidden++;
             return shown;
         });
         const shown = q
             ? projectHit || sessions.length > 0
-            : project.recent !== false || sessions.length > 0 || project.scopeKey === selectedScope;
+            : true;
         if (shown) projects.push({ ...project, sessions });
     }
     return { projects, hidden };
@@ -116,9 +125,70 @@ export function formerly(names) {
 
 /** The last tree and options per container, so typing a query can redraw. */
 const drawn = new WeakMap();
+const expandedMachines = new WeakMap();
+const RECENT_REPOSITORY_SECONDS = 48 * 60 * 60;
+
+/**
+ * Folder names name the repository, not the checkout: worktrees arrive as
+ * "repo/path · id", and the reader asked for repo folders with the machine
+ * as the subfolder. A repo checked out on several machines gets one
+ * subfolder per machine; a single-machine repo stays flat.
+ */
+function repoNameOf(name) {
+    const stem = String(name ?? '').split('/')[0].trim();
+    return stem || 'Unknown';
+}
+
+/** Merge projects into repo folders, sessions grouped by machine inside. */
+function groupIntoRepos(projects) {
+    const byRepo = new Map();
+    for (const project of projects) {
+        const name = repoNameOf(project.name);
+        let repo = byRepo.get(name);
+        if (!repo) {
+            repo = { name, projects: [], unattributed: false };
+            byRepo.set(name, repo);
+        }
+        repo.projects.push(project);
+        repo.unattributed = repo.unattributed || !!project.unattributed;
+    }
+    const repos = [];
+    for (const repo of byRepo.values()) {
+        const sessions = repo.projects.flatMap(project => project.sessions);
+        const merged = repo.projects.length > 1;
+        const machines = new Map();
+        for (const session of sessions) {
+            const key = session.machine || '';
+            if (!machines.has(key)) machines.set(key, []);
+            machines.get(key).push(session);
+        }
+        const groups = [...machines.entries()].map(([machine, rows]) => ({
+            machine,
+            sessions: rows,
+            pending: rows.reduce((total, s) => total + (s.pendingCount ?? 0), 0),
+            lastEventAt: rows.reduce((max, s) => Math.max(max, s.lastEventAt ?? 0), 0) || null,
+        })).sort((a, b) => (b.lastEventAt ?? 0) - (a.lastEventAt ?? 0));
+        repos.push({
+            ...repo,
+            // A lone project keeps its scope, so its folder still selects.
+            scopeKey: merged ? `repository:${repo.name}` : repo.projects[0].scopeKey,
+            glyph: repo.projects[0]?.glyph,
+            state: merged
+                ? (sessions.some(s => s.state === 'waiting') ? 'waiting' : undefined)
+                : repo.projects[0].state,
+            pending: sessions.reduce((total, s) => total + (s.pendingCount ?? 0), 0),
+            lastEventAt: sessions.reduce((max, s) => Math.max(max, s.lastEventAt ?? 0), 0) || null,
+            groups,
+        });
+    }
+    repos.sort((a, b) => (b.lastEventAt ?? 0) - (a.lastEventAt ?? 0));
+    return repos;
+}
 
 function drawTree(container, body, query) {
     const { tree, opts } = drawn.get(container);
+    if (!expandedMachines.has(container)) expandedMachines.set(container, new Set());
+    const expanded = expandedMachines.get(container);
     const now = tree.now;
     body.textContent = '';
 
@@ -136,43 +206,56 @@ function drawTree(container, body, query) {
         return;
     }
 
-    const { projects, hidden } = visibleTree(tree, query, opts.selectedScope);
+    const { projects, hidden } = visibleTree(tree, query, opts.selectedScope, opts);
     if (query.trim() && !projects.length) {
-        body.appendChild(el('p', 'agents-empty', 'No agents or folders match.'));
+        body.appendChild(el('p', 'agents-empty', 'No agents, folders, or message content matches.'));
         return;
     }
 
-    for (const project of projects) {
+    const machines = new Map();
+    for (const repo of groupIntoRepos(projects)) {
+        for (const sub of repo.groups) {
+            const name = sub.machine || 'Unknown machine';
+            if (!machines.has(name)) machines.set(name, []);
+            machines.get(name).push({ repo, sub });
+        }
+    }
+    for (const [machine, entries] of machines) {
         const group = el('div', 'agent-group');
-        if (project.unattributed) group.classList.add('agent-group--unattributed');
-
-        group.appendChild(agentRow({
+        const heading = agentRow({
             kind: 'project',
-            scopeKey: project.scopeKey,
-            glyph: project.glyph,
-            name: project.name,
-            state: project.state,
-            pending: project.pendingCount,
-            lastEventAt: project.lastEventAt,
+            name: machine,
+            pending: entries.reduce((sum, { sub }) => sum + sub.pending, 0),
             now,
-        }, opts));
-
-        for (const session of project.sessions) {
+        }, opts);
+        heading.classList.add('agent-machine-heading');
+        group.appendChild(heading);
+        const older = entries.filter(({ sub }) => !sub.lastEventAt || now - sub.lastEventAt > RECENT_REPOSITORY_SECONDS);
+        const visible = query.trim() || expanded.has(machine)
+            ? entries : entries.filter(entry => !older.includes(entry));
+        for (const { repo, sub } of visible) {
             group.appendChild(agentRow({
-                kind: 'session',
-                scopeKey: session.scopeKey,
-                glyph: session.glyph,
-                name: session.sessionName || session.label,
-                // The small grey text: the branch once named, and the machine.
-                label: [session.sessionName ? session.label : '', session.machine].filter(Boolean).join(' · ') || undefined,
-                hint: sessionHint(session),
-                state: session.state,
-                pending: session.pendingCount,
-                lastEventAt: session.lastEventAt,
+                kind: 'folder',
+                scopeKey: repo.scopeKey,
+                name: repo.name,
+                glyph: repo.glyph,
+                pending: sub.pending,
+                lastEventAt: sub.lastEventAt,
                 now,
             }, opts));
         }
-
+        if (older.length && !query.trim()) {
+            const more = el('button', 'agent-load-more', expanded.has(machine) ? 'Show less' : 'Load more…');
+            more.type = 'button';
+            more.setAttribute('aria-label', `${expanded.has(machine) ? 'Hide' : 'Show'} older repositories on ${machine}`);
+            more.setAttribute('aria-expanded', String(expanded.has(machine)));
+            more.addEventListener('click', () => {
+                if (expanded.has(machine)) expanded.delete(machine);
+                else expanded.add(machine);
+                drawTree(container, body, query);
+            });
+            group.appendChild(more);
+        }
         body.appendChild(group);
     }
 
@@ -196,8 +279,8 @@ export function renderAgentTree(container, tree, options = {}) {
         container.textContent = '';
         search = el('input', 'agent-search');
         search.type = 'search';
-        search.placeholder = 'Search agents or folders';
-        search.setAttribute('aria-label', 'Search agents or folders, including older ones');
+        search.placeholder = 'Search agents, folders, or message content';
+        search.setAttribute('aria-label', 'Search agents, folders, or message content, including older ones');
         body = el('div', 'agent-tree');
         container.append(search, body);
         search.addEventListener('input', () => drawTree(container, body, search.value));

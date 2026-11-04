@@ -32,6 +32,7 @@
 
 import { disposeReview, renderPlanReview, renderReviewPanel } from './review.js';
 import {
+    badgeIcon,
     detailHeader,
     el,
     isOpen,
@@ -264,31 +265,19 @@ export function renderReview(container, detail, body, actions = {}, draft = null
     const root = el('article', 'detail-root detail-review');
     root.dataset.messageId = row.messageId;
     root.dataset.status = row.status;
-    root.appendChild(detailHeader(detail, KICKER));
 
-    // A plan is read for minutes. Give it the complete reading area without
-    // changing the user's saved pane widths or rebuilding a live review draft.
-    root.dataset.expanded = 'true';
-    const readingBar = el('div', 'review-reading-bar');
-    const expandButton = el('button', 'button button-secondary', 'Back to Inbox');
-    expandButton.type = 'button';
-    expandButton.setAttribute('aria-expanded', 'true');
-    expandButton.addEventListener('click', () => {
-        const expanded = root.dataset.expanded !== 'true';
-        root.dataset.expanded = String(expanded);
-        expandButton.textContent = expanded ? 'Back to Inbox' : 'Expand review';
-        expandButton.setAttribute('aria-expanded', String(expanded));
-        if (!expanded && document.documentElement.dataset.layout === 'phone') {
-            document.getElementById('pane-back')?.click();
-        }
-    });
-    readingBar.append(expandButton);
-    root.prepend(readingBar);
+    root.appendChild(detailHeader(detail, KICKER));
 
     const host = el('div', 'detail-review-host');
     root.appendChild(host);
     container.appendChild(root);
-    const dispose = () => disposeReview(host);
+    // dispose grows a maximize teardown once the plan renders; until
+    // then (and on the read-only early return) it is just the review.
+    let teardownMaximize = () => {};
+    const dispose = () => {
+        teardownMaximize();
+        disposeReview(host);
+    };
 
     if (body?.outcome !== 'ok') {
         const state = panelStateFor(body);
@@ -353,6 +342,69 @@ export function renderReview(container, detail, body, actions = {}, draft = null
 
         onCancel: actions.onCancel,
     });
+
+    // The verdict buttons ship from review.js as text-only; the Inbox gives
+    // each an inline glyph from the shared set so the footer reads at icon
+    // speed before it reads as words. Presentation only — handlers and
+    // validation stay review.js's.
+    const VERDICT_ICONS = [
+        ['btn-skip', 'skip'],
+        ['btn-reject', 'reject'],
+        ['btn-request-changes', 'changes'],
+        ['btn-approve', 'approve'],
+    ];
+    for (const [id, icon] of VERDICT_ICONS) {
+        const button = host.querySelector(`#${id}`);
+        if (button) button.insertBefore(badgeIcon(icon, 13), button.firstChild);
+    }
+
+    // Fill the window with the plan. The titlebar is review.js's, so the
+    // button lands beside "Find in plan" -- the same presentation-only
+    // injection as the verdict glyphs. One button both ways: the expand
+    // glyph promises the window, the collapse glyph puts the card back
+    // in the thread. Esc backs out too.
+    const findBar = host.querySelector('.review-titlebar .review-find');
+    if (findBar) {
+        const toggle = el('button', 'review-maximize');
+        toggle.type = 'button';
+        toggle.setAttribute('aria-pressed', 'false');
+        const label = on => (on
+            ? 'Put the plan back in the thread'
+            : 'Fill the window with this plan');
+        toggle.setAttribute('aria-label', label(false));
+        toggle.title = label(false);
+        // Draw at the final size: scaling the shared 16px glyph thickens its stroke.
+        const fullscreenIcon = on => {
+            const icon = badgeIcon(on ? 'collapse' : 'expand', 24);
+            const svg = icon.querySelector('svg');
+            svg.setAttribute('viewBox', '0 0 24 24');
+            svg.setAttribute('stroke-width', '1.25');
+            svg.innerHTML = on
+                ? '<path d="M4 9h5V4M15 4v5h5M20 15h-5v5M9 20v-5H4"/>'
+                : '<path d="M9 4H4v5M15 4h5v5M20 15v5h-5M9 20H4v-5"/>';
+            return icon;
+        };
+        toggle.appendChild(fullscreenIcon(false));
+        const setMaximized = on => {
+            root.classList.toggle('detail-review-maximized', on);
+            document.body.style.overflow = on ? 'hidden' : '';
+            toggle.setAttribute('aria-pressed', String(on));
+            toggle.setAttribute('aria-label', label(on));
+            toggle.title = label(on);
+            toggle.replaceChildren(fullscreenIcon(on));
+        };
+        toggle.addEventListener('click', () =>
+            setMaximized(!root.classList.contains('detail-review-maximized')));
+        const onKeydown = event => {
+            if (event.key === 'Escape') setMaximized(false);
+        };
+        document.addEventListener('keydown', onKeydown);
+        teardownMaximize = () => {
+            document.removeEventListener('keydown', onKeydown);
+            document.body.style.overflow = '';
+        };
+        findBar.appendChild(toggle);
+    }
 
     if (draft) controller.restoreDraft(draft);
 

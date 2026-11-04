@@ -5,11 +5,14 @@
 mod backfill;
 mod body;
 mod capture;
+#[cfg(test)]
+mod fixture_dump;
 mod detail;
 mod identity;
 mod reply;
 mod session;
 mod settings;
+mod share;
 mod sink;
 #[cfg(windows)]
 mod start_menu;
@@ -197,7 +200,17 @@ async fn get_message(
 ) -> Result<Option<MessageDetail>, String> {
     with_projection_async(store.inner().clone(), projection.inner().clone(), move |projection, now| {
         let all = projection.list(None, Some("all"), now);
-        detail::build_detail(projection.events(), &all, &message_id)
+        if let Some(detail) = detail::build_detail(projection.events(), &all, &message_id) {
+            return Some(detail);
+        }
+        // The all-agents scope keeps to the recent window (view.rs), so a
+        // settled message from an older thread misses the row lookup above.
+        // Session scopes keep whole histories — resolve the row there and
+        // build the identical detail.
+        let Some(row) = projection.row_for(&message_id, now) else {
+            return None;
+        };
+        detail::build_detail_with_row(projection.events(), row, &message_id)
     })
     .await
 }
@@ -402,12 +415,16 @@ fn reveal(handle: &tauri::AppHandle, message_id: Option<&str>) {
     // Windows may refuse focus to a window behind another app's, flashing its
     // taskbar button instead. Being topmost for a moment puts it in front
     // either way.
+    // Android has no minimize/always-on-top concepts; raising is a plain show.
+    #[cfg(not(target_os = "android"))]
     let raised = window
         .unminimize()
         .and_then(|()| window.show())
         .and_then(|()| window.set_always_on_top(true))
         .and_then(|()| window.set_focus())
         .and_then(|()| window.set_always_on_top(false));
+    #[cfg(target_os = "android")]
+    let raised = window.show();
     if let Err(error) = raised {
         log::warn!("could not bring the Inbox forward: {error}");
     }
@@ -522,6 +539,61 @@ fn save_connection_settings(
     Ok(())
 }
 
+/// Desktop → Android sharing. Only the SVG crosses into the WebView; the
+/// payload (and with it the key) stays in Rust. Android gets an error instead:
+/// sharing is something the desktop does, not the phone.
+#[tauri::command]
+fn share_connection_qr() -> Result<String, String> {
+    if cfg!(target_os = "android") {
+        return Err("Share the connection from the desktop app.".to_string());
+    }
+    let dir = hitl_transport::paths::hitl_dir()?;
+    share::connection_qr_at(&dir)
+}
+
+/// Android only: a scanned `hitl-inbox://` link parked by MainActivity, claimed
+/// once. Other platforms simply have nothing pending.
+#[tauri::command]
+fn take_pending_import() -> Result<Option<String>, String> {
+    if !cfg!(target_os = "android") {
+        return Ok(None);
+    }
+    let dir = hitl_transport::paths::hitl_dir()?;
+    share::take_pending_at(&dir)
+}
+
+/// What the import confirmation shows: where the code points, never the key.
+#[tauri::command]
+fn inspect_connection_import(uri: String) -> Result<share::ImportPreview, String> {
+    share::inspect(&uri)
+}
+
+/// Confirmed import: parse and validate the code, then save through exactly
+/// the same path as manual entry, including reconnecting the services.
+#[tauri::command]
+fn import_connection(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, SharedStore>,
+    waiters: tauri::State<'_, Arc<AckWaiters>>,
+    pending: tauri::State<'_, Arc<Pending>>,
+    lifecycle: tauri::State<'_, Arc<ServiceLifecycle>>,
+    settings_lock: tauri::State<'_, Mutex<()>>,
+    uri: String,
+) -> Result<(), String> {
+    let input = share::parse_payload(&uri)?;
+    save_connection_settings(
+        app,
+        store,
+        waiters,
+        pending,
+        lifecycle,
+        settings_lock,
+        input.ntfy_url,
+        input.topic_id,
+        input.encryption_key,
+    )
+}
+
 /// Chromium flags that keep the webview alive when its window is not in front.
 ///
 /// WebView2 is Chromium, and Chromium assumes a window you cannot see is a
@@ -564,6 +636,39 @@ const WEBVIEW_FLAGS: &str = concat!(
     "--disable-backgrounding-occluded-windows",
 );
 
+#[cfg(target_os = "android")]
+struct ConnectionNative<R: tauri::Runtime>(tauri::plugin::PluginHandle<R>);
+
+/// Small app-local native bridge. The phone's camera owns scanning and camera
+/// permission; HITL only receives the resulting custom link as before.
+fn connection_native_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::<R>::new("connection-native")
+        .setup(|_app, _api| {
+            #[cfg(target_os = "android")]
+            {
+                let handle = _api.register_android_plugin("com.hitl.inbox", "ConnectionPlugin")?;
+                _app.manage(ConnectionNative(handle));
+            }
+            Ok(())
+        })
+        .build()
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn open_qr_scanner(native: tauri::State<'_, ConnectionNative<tauri::Wry>>) -> Result<(), String> {
+    native
+        .0
+        .run_mobile_plugin("openQrScanner", ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn open_qr_scanner() -> Result<(), String> {
+    Err("QR scanning is available in the Android app.".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_logging();
@@ -583,6 +688,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(connection_native_plugin())
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             list_messages,
@@ -599,6 +705,11 @@ pub fn run() {
             reply::clear_review_draft,
             get_connection_settings,
             save_connection_settings,
+            share_connection_qr,
+            take_pending_import,
+            inspect_connection_import,
+            import_connection,
+            open_qr_scanner,
             get_notifications_enabled,
             set_notifications_enabled
         ])

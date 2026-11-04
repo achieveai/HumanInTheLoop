@@ -22,6 +22,7 @@ import {
     contextBlock,
     detailHeader,
     el,
+    iconActionButton,
     isOpen,
     removeNotice,
     renderMarkdownInto,
@@ -70,17 +71,28 @@ export function renderNotification(container, detail, actions = {}) {
     let restoreInFlight = false;
     drawFooter();
 
+    function readAction(unread, handler) {
+        const button = iconActionButton('ack', 'notification-read-action', handler,
+            unread ? 'Mark as unread' : 'Mark as read');
+        const svg = button.querySelector('svg');
+        svg.setAttribute('width', '18');
+        svg.setAttribute('height', '18');
+        svg.innerHTML = unread
+            ? '<rect x="1.5" y="3" width="13" height="10" rx="1.5"/><path d="m2 4 6 4.5L14 4"/>'
+            : '<path d="M1.5 6 8 1.5 14.5 6v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V6Z"/><path d="m1.5 6 6.5 4 6.5-4M2 13l4-3M14 13l-4-3"/>';
+        return button;
+    }
+
     function drawFooter() {
         bar.textContent = '';
         if (!settled) {
-            bar.appendChild(actionButton('Dismiss', 'button-primary',
-                actions.onDismiss ? dismiss : null));
+            // An envelope makes the read-state action recognizable.
+            bar.appendChild(readAction(false, actions.onDismiss ? dismiss : null));
             return;
         }
         bar.appendChild(el('p', 'detail-retained', RETAINED));
         if (currentRow.responseId) {
-            const button = actionButton('Mark unread', 'button-secondary',
-                actions.onRestore ? restore : null);
+            const button = readAction(true, actions.onRestore ? restore : null);
             button.disabled ||= restoreInFlight;
             bar.appendChild(button);
         }

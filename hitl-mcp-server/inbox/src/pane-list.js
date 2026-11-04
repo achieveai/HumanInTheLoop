@@ -8,6 +8,9 @@
 // snippets and responder names are agent-authored text, and `textContent`
 // cannot be talked into interpreting any of it as markup.
 
+import { participantChip } from './detail-shell.js';
+import { participantsOf } from './participants.js';
+
 const MINUTE = 60;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -117,9 +120,11 @@ export function renderTypeFilterBar(container, messages, enabled, { onToggle } =
         }
         button.setAttribute('aria-pressed', String(pressed));
         button.disabled = pressed && enabled.size === 1;
-        button.querySelector('.filter-count').textContent = String(
-            messages.filter(message => messageType(message) === type.key).length,
-        );
+        const count = messages.filter(message => messageType(message) === type.key).length;
+        button.querySelector('.filter-count').textContent = String(count);
+        // A zero-count chip filters to nothing; hide it unless it is the
+        // only kind still filtering, so the bar lists kinds that exist.
+        button.hidden = count === 0 && !(pressed && enabled.size === 1);
     }
 }
 
@@ -226,6 +231,215 @@ function messageRow(message, { selectedId, onSelect } = {}) {
     });
 
     return row;
+}
+
+/**
+ * What makes one conversation. Sub-agents of one task each send from their
+ * own session, but the reader thinks in tasks: every session sharing a
+ * title + objective is ONE conversation (a lead plus its judge-k/judge-j
+ * spawns, say). Rows without that signature fall back to one conversation
+ * per session; `unattributed` rows group by project and session name.
+ */
+export function conversationKeyOf(message) {
+    const title = (message.sessionName ?? '').trim();
+    const objective = (message.objective ?? '').trim();
+    if (title && objective) return `task:${title} ${objective}`;
+    if (message.sessionKey) return `${message.sessionKey} ${message.projectKey ?? ''}`;
+    return `unattributed ${message.projectKey ?? ''} ${message.sessionName ?? message.sessionLabel ?? ''}`;
+}
+
+/** Whether anyone still has to act on this message. */
+export function isOpenMessage(message) {
+    return message.status === 'pending' || message.status === 'stale';
+}
+
+/**
+ * Group a newest-first message list into conversations, newest activity first.
+ *
+ * Pure projection over the rows the server already sent — pane 2 never
+ * re-asks for the list it was just handed. `rows` stays newest-first; the
+ * thread re-sorts when it draws.
+ */
+export function groupConversations(messages) {
+    const byKey = new Map();
+    for (const message of messages) {
+        const key = conversationKeyOf(message);
+        let conversation = byKey.get(key);
+        if (!conversation) {
+            conversation = { key, rows: [] };
+            byKey.set(key, conversation);
+        }
+        conversation.rows.push(message);
+    }
+    const conversations = [];
+    for (const conversation of byKey.values()) {
+        const { rows } = conversation;
+        const latest = rows.reduce((a, b) => ((b.createdAt ?? 0) > (a.createdAt ?? 0) ? b : a));
+        conversation.latest = latest;
+        // The anchor is what opening the conversation selects and scrolls
+        // to: the OLDEST thing still waiting for you — the thread reads
+        // oldest → newest, so it must open at the top of the unread run,
+        // not wherever a newest-first scope list happens to put a match.
+        const open = rows
+            .filter(isOpenMessage)
+            .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+        conversation.anchor = open[0] ?? latest;
+        conversation.openCount = rows.filter(isOpenMessage).length;
+        conversation.sessionKey = latest.sessionKey ?? null;
+        conversation.sessionName = latest.sessionName ?? null;
+        conversation.sessionLabel = latest.sessionLabel ?? null;
+        conversation.projectKey = latest.projectKey ?? null;
+        conversation.machine = latest.machine ?? null;
+        conversation.objective = latest.objective ?? null;
+        // Merged task: the sessions behind it and who spoke from each. The
+        // thread fetches every member session; chips name each sub-agent.
+        const members = new Map();
+        for (const row of rows) {
+            if (!row.sessionKey) continue;
+            if (!members.has(row.sessionKey)) {
+                members.set(row.sessionKey, {
+                    sessionKey: row.sessionKey,
+                    sessionLabel: row.sessionLabel ?? row.sessionKey,
+                });
+            }
+        }
+        conversation.memberSessions = [...members.values()];
+        conversation.participants = participantsOf(rows);
+        conversation.merged = conversation.participants.length > 1;
+        const machines = new Set(rows.map(row => row.machine).filter(Boolean));
+        conversation.machines = [...machines];
+        conversations.push(conversation);
+    }
+    conversations.sort((a, b) => ((b.latest.createdAt ?? 0) - (a.latest.createdAt ?? 0))
+        || String(a.latest.messageId).localeCompare(String(b.latest.messageId)));
+    return conversations;
+}
+
+/**
+ * One icon per message kind a conversation holds, action-first order. The
+ * handoff's recording glyph is a "✓", which in a list reads as "done" — the
+ * exchange mark is the one the thread settled on.
+ */
+function conversationKinds(rows) {
+    const order = ['question', 'plan_review', 'handoff', 'work', 'notification', 'agent_message'];
+    const byKind = new Map();
+    for (const row of rows) {
+        const kind = messageType(row);
+        if (!byKind.has(kind)) byKind.set(kind, row.glyph ?? '');
+    }
+    return [...byKind.entries()]
+        .map(([kind, glyph]) => ({ kind, label: kind.replace(/_/g, ' '), glyph: glyph === '✓' ? '⇄' : glyph }))
+        .sort((a, b) => {
+            const ai = order.indexOf(a.kind);
+            const bi = order.indexOf(b.kind);
+            return (ai === -1 ? order.length : ai) - (bi === -1 ? order.length : bi);
+        });
+}
+
+/**
+ * One row per conversation (OWA-style), riding the same .message-row chrome
+ * as the flat list so virtualization and selection keep working.
+ */
+function conversationRow(conversation, { selectedId, selectedConversationKey, onSelect } = {}) {
+    const { latest, anchor } = conversation;
+    const unread = conversation.openCount > 0;
+    const row = el('div', 'message-row conversation-row');
+    row.dataset.messageId = anchor.messageId;
+    row.dataset.conversationKey = conversation.key;
+    row.dataset.status = latest.status;
+    row.setAttribute('role', 'button');
+    row.tabIndex = 0;
+    if (conversation.key === selectedConversationKey || anchor.messageId === selectedId) {
+        row.classList.add('is-selected');
+    }
+    if (unread) row.classList.add('conversation-row--unread');
+
+    // Line 1 names the agent and shows one icon per message kind present;
+    // line 2 carries the newest subject with its status and date.
+
+    const main = el('div', 'message-main');
+
+    const headline = el('div', 'message-headline');
+    const name = el('span', 'conversation-name',
+        conversation.sessionName || conversation.sessionLabel || 'Unattributed');
+    if (conversation.objective) name.title = conversation.objective;
+    headline.appendChild(name);
+    const kinds = conversationKinds(conversation.rows);
+    if (kinds.length) {
+        const icons = el('span', 'conversation-kinds');
+        for (const { label, glyph } of kinds) {
+            const icon = el('span', 'conversation-kind', glyph || '•');
+            icon.title = label;
+            icons.appendChild(icon);
+        }
+        headline.appendChild(icons);
+    }
+    if (conversation.openCount > 0) {
+        headline.appendChild(el('span', 'conversation-count', String(conversation.openCount)));
+    }
+    main.appendChild(headline);
+
+    const subject = el('div', 'conversation-subject');
+    subject.appendChild(el('span', 'conversation-subject-text', latest.title));
+    subject.appendChild(statusPill(latest));
+    const age = el('span', 'message-age', formatAge(latest.ageSeconds));
+    age.title = formatAbsolute(latest.createdAt);
+    subject.appendChild(age);
+    main.appendChild(subject);
+
+    // Merged task: one chip per sub-agent so the row says who is speaking
+    // inside the conversation without opening it.
+    if (conversation.merged) {
+        const roster = el('div', 'conversation-participants');
+        const MAX_CHIPS = 6;
+        for (const participant of conversation.participants.slice(0, MAX_CHIPS)) {
+            roster.appendChild(participantChip(participant));
+        }
+        const extra = conversation.participants.length - MAX_CHIPS;
+        if (extra > 0) {
+            const more = el('span', 'participant-more', `+${extra}`);
+            more.title = conversation.participants.slice(MAX_CHIPS)
+                .map(participant => participant.name).join(', ');
+            roster.appendChild(more);
+        }
+        main.appendChild(roster);
+    }
+
+    const metaBits = [];
+    if (!conversation.merged) {
+        if (conversation.sessionName && conversation.sessionLabel) metaBits.push(conversation.sessionLabel);
+        if (conversation.machine) metaBits.push(`on ${conversation.machine}`);
+        if (conversation.projectKey) metaBits.push(conversation.projectKey);
+    } else if (conversation.machines.length === 1) {
+        metaBits.push(`on ${conversation.machines[0]}`);
+    }
+    if (metaBits.length) main.appendChild(el('div', 'message-meta', metaBits.join(' · ')));
+    row.appendChild(main);
+
+    const select = () => onSelect?.(conversation);
+    row.addEventListener('click', select);
+    row.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            select();
+        }
+    });
+
+    return row;
+}
+
+/**
+ * The OWA-style list: one row per conversation, newest activity first.
+ * Conversation rows are anchor pseudo-rows, so the row-generic
+ * virtualization in `renderMessageList` carries them unchanged.
+ */
+export function renderConversationList(container, list, conversations, options = {}) {
+    const pseudoMessages = conversations.map(conversation => ({
+        ...conversation.anchor,
+        __conversation: conversation,
+    }));
+    const buildRow = (message, rowOptions) => conversationRow(message.__conversation, rowOptions);
+    return renderMessageList(container, { ...list, messages: pseudoMessages }, options, buildRow);
 }
 
 function visibleSelectedAnchor(container, anyVisible = false) {
@@ -377,7 +591,7 @@ function paintVirtual(state, anchor = virtualAnchor(state), stickToEnd = atVirtu
         spacer.style.height = `${state.offsets.at(-1)}px`;
         const nodes = [spacer];
         for (const index of [...indices].sort((a, b) => a - b)) {
-            const row = messageRow(state.messages[index], state.options);
+            const row = (state.options.buildRow ?? messageRow)(state.messages[index], state.options);
             row.classList.add('message-row--virtual');
             row.style.top = `${state.offsets[index]}px`;
             row.setAttribute('aria-description', `Message ${index + 1} of ${state.messages.length}`);
@@ -502,10 +716,12 @@ function renderVirtualList(container, list, options) {
     }
 }
 
-/** Render the list. Server-ordered newest first; nothing is re-sorted here. */
-export function renderMessageList(container, list, options = {}) {
+/** Render the list. Server-ordered newest first; nothing is re-sorted here.
+ * `buildRow` overrides the row shape (the conversation list uses it); the
+ * default is the flat per-message row. */
+export function renderMessageList(container, list, options = {}, buildRow = messageRow) {
     if (list.messages.length > VIRTUAL_THRESHOLD) {
-        renderVirtualList(container, list, options);
+        renderVirtualList(container, list, { ...options, buildRow });
         return;
     }
     const virtual = virtualLists.get(container);
@@ -523,7 +739,7 @@ export function renderMessageList(container, list, options = {}) {
     }
     const restoreToken = {};
     scrollRestoreTokens.set(container, restoreToken);
-    const nodes = list.messages.length ? list.messages.map(message => messageRow(message, options))
+    const nodes = list.messages.length ? list.messages.map(message => buildRow(message, options))
         : [el('p', 'list-empty', options.emptyText ?? emptyText(list))];
     reconcileMessageNodes(container, nodes);
     if (newOnTop) container.scrollTop = 0;

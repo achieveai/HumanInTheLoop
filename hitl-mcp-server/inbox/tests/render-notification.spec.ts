@@ -83,7 +83,7 @@ test.describe('Pane 3 — notifications (spec §8.1)', () => {
     // button that silently does nothing.
     await mount(page, 'notification', OPEN);
 
-    const button = page.locator('.detail-actions .button', { hasText: 'Dismiss' });
+    const button = page.getByRole('button', { name: 'Dismiss' });
     await expect(button).toBeDisabled();
     await expect(button).toHaveAttribute('data-unattached', 'true');
   });
@@ -91,7 +91,7 @@ test.describe('Pane 3 — notifications (spec §8.1)', () => {
   test('Dismiss hands the row back when the reply path is attached', async ({ page }) => {
     await mount(page, 'notification', OPEN, { wire: true });
 
-    await page.locator('.detail-actions .button', { hasText: 'Dismiss' }).click();
+    await page.getByRole('button', { name: 'Dismiss' }).click();
 
     expect(await recorded(page)).toEqual([{ action: 'dismiss', messageId: 'n-1' }]);
   });

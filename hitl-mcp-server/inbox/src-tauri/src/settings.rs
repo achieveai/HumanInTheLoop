@@ -32,7 +32,7 @@ fn recovery_error() -> String {
 
 /// The server as typed, without a trailing slash. HTTPS only: the phone talks
 /// to it over networks you do not control.
-fn normalize_url(url: &str) -> Result<String, String> {
+pub(crate) fn normalize_url(url: &str) -> Result<String, String> {
     let url = url.trim().trim_end_matches('/');
     let host = url.strip_prefix("https://").unwrap_or("");
     if host.is_empty()
@@ -46,7 +46,7 @@ fn normalize_url(url: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
-fn validate(input: &ConnectionInput) -> Result<(), String> {
+pub(crate) fn validate(input: &ConnectionInput) -> Result<(), String> {
     let topic = input.topic_id.as_str();
     if topic.is_empty()
         || topic.len() > 64

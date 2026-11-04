@@ -74,15 +74,57 @@ export function senderBadge(sender) {
     return badge;
 }
 
-/** The agent's own name for its session, its objective, and earlier names. */
-export function sessionLine(row) {
+// The glyphs themselves live in icons.js — pure strings, no DOM — which is
+// what lets review.js draw the same marks without taking on pane modules.
+import { iconSvg } from './icons.js';
+
+/**
+ * Small inline glyphs for the header badges — the machine an agent ran on,
+ * its repo folder, its branch — and, at larger sizes, for card and composer
+ * buttons. Same stroke idiom as the pane-3 orphan mark.
+ */
+
+/** A badge glyph as a span, so `textContent` around it stays escaped. */
+export function badgeIcon(name, size = 11) {
+    const span = el('span', 'badge-icon');
+    span.innerHTML = iconSvg(name, size);
+    return span;
+}
+
+/**
+ * Who spoke: one chip per sub-agent session in a merged task conversation.
+ * The dot's hue comes from hashing the participant's base label (see
+ * participants.js) via `--pc-hue`, so judge-k keeps its color in the list
+ * roster, the thread header, and every card. The name is always printed
+ * next to the dot — color is a shortcut, never the only encoding.
+ */
+export function participantChip(participant) {
+    const chip = el('span', 'participant-chip');
+    chip.dataset.participant = participant.name;
+    chip.title = participant.key;
+    chip.style.setProperty('--pc-hue', String(participant.hue ?? 260));
+    chip.appendChild(el('span', 'participant-dot'));
+    chip.appendChild(document.createTextNode(participant.name));
+    return chip;
+}
+
+/**
+ * The agent's own name for its session, its objective, and earlier names.
+ *
+ * `name: false` hides the session name — the thread header shows it as the
+ * pane's title already, so repeating it inside the line would say it twice.
+ * The objective and earlier names stay either way; when nothing remains,
+ * there is no line at all.
+ */
+export function sessionLine(row, { name = true } = {}) {
     if (!row.sessionName) return null;
     const line = el('p', 'detail-session');
-    line.appendChild(el('strong', 'detail-session-name', row.sessionName));
+    if (name) line.appendChild(el('strong', 'detail-session-name', row.sessionName));
     if (row.objective) line.appendChild(el('span', 'detail-session-objective', row.objective));
     if (row.formerNames?.length) {
         line.appendChild(el('span', 'detail-session-former', `Formerly: ${row.formerNames.join(' · ')}`));
     }
+    if (!line.childElementCount) return null;
     return line;
 }
 
@@ -108,14 +150,35 @@ export function detailHeader(detail, kicker) {
 
     const meta = el('div', 'detail-meta');
     appendWorkBadges(meta, row.work);
-    const badge = senderBadge(sender);
-    if (badge) meta.appendChild(badge);
     if (row.machine) {
-        const machine = el('span', 'badge badge-machine', `on ${row.machine}`);
+        const machine = el('span', 'badge badge-machine');
+        machine.appendChild(badgeIcon('machine'));
+        machine.appendChild(document.createTextNode(row.machine));
         machine.title = `The agent runs on ${row.machine}`;
         meta.appendChild(machine);
     }
-    if (row.badges?.repo) meta.appendChild(el('span', 'badge badge-repo', row.badges.repo));
+    // A path-tier sender resolution reads "repo · branch · worktree" — a superset
+    // of the repo badge. One folder chip says it all; two near-identical chips
+    // were the pane's duplicate.
+    const senderIsRepo = Boolean(sender?.label && row.badges?.repo
+        && sender.label.includes(row.badges.repo));
+    if (senderIsRepo) {
+        const badge = el('span', 'badge badge-sender');
+        badge.appendChild(badgeIcon('folder'));
+        badge.appendChild(document.createTextNode(sender.label));
+        badge.title = sender.source ? `${sender.label} (${sender.source})` : sender.label;
+        if (sender.source) badge.dataset.source = sender.source;
+        meta.appendChild(badge);
+    } else {
+        const badge = senderBadge(sender);
+        if (badge) meta.appendChild(badge);
+        if (row.badges?.repo) {
+            const repo = el('span', 'badge badge-repo');
+            repo.appendChild(badgeIcon('folder'));
+            repo.appendChild(document.createTextNode(row.badges.repo));
+            meta.appendChild(repo);
+        }
+    }
     if (row.badges?.revision) meta.appendChild(el('span', 'badge badge-revision', `r${row.badges.revision}`));
     if (row.badges?.plaintext === true) {
         meta.appendChild(el('span', 'badge badge-plaintext', 'plaintext'));
@@ -125,9 +188,9 @@ export function detailHeader(detail, kicker) {
     meta.appendChild(when);
     header.appendChild(meta);
 
-    const session = sessionLine(row);
-    if (session) header.appendChild(session);
-
+    // No session line on a card: every card in the thread belongs to the one
+    // session the thread header already names, and the conversation row named
+    // it before that. Repeating it per card said the same thing three times.
     const closed = closedLine(row);
     if (closed) header.appendChild(closed);
 
@@ -260,9 +323,37 @@ export function contextBlock(text) {
  * message affords, but it is disabled and says why rather than silently doing
  * nothing when clicked.
  */
-export function actionButton(label, className, handler) {
-    const button = el('button', `button ${className}`, label);
+export function actionButton(label, className, handler, iconName = null) {
+    const button = el('button', `button ${className}`);
+    if (iconName) {
+        button.appendChild(badgeIcon(iconName, 13));
+        button.appendChild(el('span', 'button-label', label));
+    } else {
+        button.textContent = label;
+    }
     button.type = 'button';
+    if (handler) {
+        button.addEventListener('click', handler);
+    } else {
+        button.disabled = true;
+        button.dataset.unattached = 'true';
+        button.title = 'This pane has no reply handler attached.';
+    }
+    return button;
+}
+
+/**
+ * An icon-only footer action — the send and dismiss buttons. The glyph carries
+ * the meaning; `label` rides the accessible name and the hover tip. Same
+ * unattached-handler contract as actionButton: drawn disabled, saying why,
+ * rather than hidden.
+ */
+export function iconActionButton(iconName, className, handler, label) {
+    const button = el('button', `button ${className}`);
+    button.type = 'button';
+    button.appendChild(badgeIcon(iconName, 14));
+    button.setAttribute('aria-label', label);
+    button.title = label;
     if (handler) {
         button.addEventListener('click', handler);
     } else {

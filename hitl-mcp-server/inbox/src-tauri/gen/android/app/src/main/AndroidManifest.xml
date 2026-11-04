@@ -22,6 +22,14 @@
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+            <!-- Scanned connection codes from the desktop "Share connection" QR.
+                 Any camera app can hand these to us; no camera permission needed. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="hitl-inbox" android:host="connect" />
+            </intent-filter>
         </activity>
 
         <provider

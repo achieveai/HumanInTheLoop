@@ -7,18 +7,20 @@
 import { createLayoutObserver, createPaneState } from './layout.js';
 import { createPaneSizing, bindPaneControls } from './panes.js';
 import { renderAgentTree } from './pane-agents.js';
-import { createDetailPane } from './pane-detail.js';
 import {
+    conversationKeyOf,
     filterMessagesByType,
+    groupConversations,
     messageType,
+    renderConversationList,
     renderFilterBar,
-    renderMessageList,
     renderTypeFilterBar,
     TYPES,
 } from './pane-list.js';
-import { listComposer, relabelListComposer } from './render-agent-message.js';
+import { createThreadPane } from './pane-thread.js';
 import { createReplyActions } from './reply.js';
 import { createConnectionSettings } from './settings.js';
+import { createConnectionShare } from './share.js';
 import { createNotificationToggle } from './notifications.js';
 
 /** Emitted by the Rust side when a genuinely new event lands. */
@@ -50,7 +52,6 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         actionErrorDialog,
         listActions,
         bulkStatus,
-        listCompose,
     } = elements;
 
     /** Pending local settlements layered over the latest authoritative rows. */
@@ -63,7 +64,7 @@ export function createInbox({ invoke, elements, onError = console.error, actions
     let rollbackFocus = null;
     let bulkSequence = 0;
     let bulkOperation = null;
-    const detailPane = createDetailPane({
+    const detailPane = createThreadPane({
         container: detail,
         invoke,
         onError,
@@ -116,12 +117,12 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         /** Local multi-select projection over the latest server-backed list. */
         types: new Set(TYPES.map(type => type.key)),
         selectedId: null,
+        /** The conversation (session+project) the selection belongs to. */
+        selectedConversationKey: null,
         /** The folded status pane 3 was last drawn with. See `refresh()`. */
         selectedStatus: null,
     };
     let latestList = null;
-    /** Who the box under the list is addressed to; it is rebuilt only when that changes. */
-    let composeTarget;
     let visibleMessages = [];
     /** A toast's message still on its way into the list: `{ messageId, until }`. */
     let pendingReveal = null;
@@ -153,9 +154,12 @@ export function createInbox({ invoke, elements, onError = console.error, actions
             .map(({ message }) => message);
         const messages = filterMessagesByType(statusMessages, state.types);
         renderTypeFilterBar(typeFilterSet, statusMessages, state.types, { onToggle: selectType });
-        renderMessageList(messageList, { ...list, messages }, {
+        // One row per conversation, newest activity first — pane 2 is an OWA
+        // conversation list now, not a flat per-message list.
+        renderConversationList(messageList, list, groupConversations(messages), {
             selectedId: state.selectedId,
-            onSelect: selectMessage,
+            selectedConversationKey: state.selectedConversationKey,
+            onSelect: selectConversation,
             emptyText: statusMessages.length > 0 && messages.length === 0
                 ? 'Nothing matches these filters.'
                 : undefined,
@@ -168,8 +172,19 @@ export function createInbox({ invoke, elements, onError = console.error, actions
     function selectAdjacent(messages, previousVisible) {
         if (!state.selectedId || messages.some(message => message.messageId === state.selectedId)) return false;
 
+        const waiting = latestList.messages.map(message => predictedRow(message, optimistic.get(message.messageId)))
+            .find(message => conversationKeyOf(message) === state.selectedConversationKey
+            && (message.status === 'pending' || message.status === 'stale'));
+        if (waiting) {
+            state.selectedId = waiting.messageId;
+            state.selectedStatus = waiting.status;
+            run(detailPane.update(waiting));
+            return true;
+        }
+
         if (!messages.length) {
             state.selectedId = null;
+            state.selectedConversationKey = null;
             state.selectedStatus = null;
             detailPane.clear();
             return true;
@@ -186,12 +201,22 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         if (!state.selectedId || !targetIds.has(state.selectedId)) return;
         const visibleIndex = previousVisible.findIndex(message => message.messageId === state.selectedId);
         const survivors = visibleMessages.filter(message => !targetIds.has(message.messageId));
+        const waiting = latestList.messages.map(message => predictedRow(message, optimistic.get(message.messageId)))
+            .find(message => !targetIds.has(message.messageId) && conversationKeyOf(message) === state.selectedConversationKey
+            && (message.status === 'pending' || message.status === 'stale'));
+        if (waiting) {
+            state.selectedId = waiting.messageId;
+            state.selectedStatus = waiting.status;
+            run(detailPane.update(waiting));
+            return;
+        }
         if (survivors.length) {
             const nextIndex = Math.min(Math.max(visibleIndex, 0), survivors.length - 1);
             selectMessage(survivors[nextIndex], { navigate: false });
             return;
         }
         state.selectedId = null;
+        state.selectedConversationKey = null;
         state.selectedStatus = null;
         for (const messageRow of messageList.querySelectorAll('.message-row')) {
             messageRow.classList.remove('is-selected');
@@ -637,19 +662,48 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         }
     }
 
+    /**
+     * Tree search widened to message content. Rows index as they are loaded;
+     * the harness pre-indexes the whole recording on
+     * `window.__INBOX_SEARCH_BODIES` — the live app searches what it knows
+     * and widens as messages are opened. A session whose bodies never loaded
+     * still matches on its metadata.
+     */
+    const searchBodies = new Map();
+    function indexRowsForSearch(rows) {
+        for (const row of rows ?? []) {
+            if (!row?.sessionKey) continue;
+            const text = [row.title, row.objective, row.contextSnippet, row.verdict, row.responder]
+                .filter(Boolean).join(' ').toLowerCase();
+            const known = searchBodies.get(row.sessionKey);
+            searchBodies.set(row.sessionKey, known ? `${known} ${text}` : text);
+        }
+    }
+    function sessionBodyText(session) {
+        const key = session?.sessionKey;
+        if (!key) return '';
+        // Merge, never choose: the progressive index knows titles for
+        // sessions whose bodies never loaded, the pre-recorded index knows
+        // bodies for everything the harness holds — either alone is a
+        // silently smaller search space.
+        const local = searchBodies.get(key) ?? '';
+        const recorded = window.__INBOX_SEARCH_BODIES?.[key] ?? '';
+        return local && recorded ? `${local} ${recorded}` : local || recorded;
+    }
+
     async function refreshGenerationOnce(generation, eventDriven = false) {
         const tree = await invoke('list_sessions');
         if (generation !== refreshGeneration) return;
         renderAgentTree(agents, tree, {
             selectedScope: state.scopeKey,
             onSelect: selectScope,
+            bodyTextFor: sessionBodyText,
         });
-        renderListCompose(tree);
-
         const list = await invoke('list_messages', {
             sessionKey: state.scopeKey,
             filter: state.filter,
         });
+        indexRowsForSearch(list?.messages);
         if (generation !== refreshGeneration) return;
         if (state.filter === null) state.filter = list.filter;
 
@@ -743,33 +797,6 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         return promise.catch(onError);
     }
 
-    /**
-     * The box under the list messages the agent picked in the tree. Rebuilt
-     * only when the target moves, so a refresh never eats half-typed text.
-     */
-    function renderListCompose(tree) {
-        if (!listCompose) return;
-        const session = tree.projects?.flatMap(project => project.sessions ?? [])
-            .find(row => row.scopeKey === state.scopeKey) ?? null;
-        const target = session ? `${session.scopeKey}|${session.sessionTag ?? ''}` : '';
-        if (target === composeTarget) {
-            relabelListComposer(listCompose, session);
-            return;
-        }
-        composeTarget = target;
-        listCompose.replaceChildren(listComposer(session, actions.onMessageAgent && sendFromList));
-    }
-
-    /**
-     * A message you send never needs you, so under `Needs you` — the usual
-     * default for an agent — it would vanish. Show the whole thread instead.
-     */
-    async function sendFromList(row, text) {
-        const id = await actions.onMessageAgent(row, text);
-        if (state.filter !== 'all') selectFilter('all');
-        return id;
-    }
-
     function selectScope(scopeKey) {
         pendingReveal = null;
         state.scopeKey = scopeKey;
@@ -802,16 +829,35 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         selectAdjacent(messages, previousVisible);
     }
 
+    /**
+     * One click on a conversation row opens the whole thread, anchored at the
+     * oldest message still waiting for you — or the newest thing said.
+     */
+    function selectConversation(conversation) {
+        pendingReveal = null;
+        const anchor = conversation.anchor;
+        state.selectedId = anchor.messageId;
+        state.selectedConversationKey = conversation.key;
+        state.selectedStatus = anchor.status;
+        panes?.show('detail');
+        for (const row of messageList.querySelectorAll('.message-row')) {
+            row.classList.toggle('is-selected', row.dataset.conversationKey === conversation.key);
+        }
+        return run(detailPane.show(anchor, conversation));
+    }
+
     function selectMessage(message, { navigate = true } = {}) {
         pendingReveal = null;
         state.selectedId = message.messageId;
+        state.selectedConversationKey = conversationKeyOf(message);
         state.selectedStatus = message.status;
         // Selection and layout are independent (spec §4.2): this records which
         // pane is frontmost, and never touches which message is selected. That
         // is why widening the window restores the pair intact.
         if (navigate) panes?.show('detail');
         for (const row of messageList.querySelectorAll('.message-row')) {
-            row.classList.toggle('is-selected', row.dataset.messageId === message.messageId);
+            row.classList.toggle('is-selected',
+                row.dataset.conversationKey === state.selectedConversationKey);
         }
         return run(detailPane.show(message));
     }
@@ -904,7 +950,6 @@ async function main() {
             listActions: document.getElementById('list-actions'),
             bulkStatus: document.getElementById('bulk-status'),
             messageList: document.getElementById('message-list'),
-            listCompose: document.getElementById('list-compose'),
             detail: document.getElementById('pane-detail'),
             actionErrorDialog: document.getElementById('action-error-dialog'),
         },
@@ -932,6 +977,15 @@ async function main() {
         onConfigured: () => startInbox().catch(console.error),
     });
     await connection.initialize();
+    // Desktop shows "Share connection" when configured; Android listens for
+    // scanned connection links and confirms them before importing.
+    await createConnectionShare({
+        invoke,
+        shareButton: document.getElementById('share-connection'),
+        shareDialog: document.getElementById('share-dialog'),
+        importDialog: document.getElementById('import-dialog'),
+        onImported: () => startInbox().catch(console.error),
+    }).initialize();
     await createNotificationToggle({
         invoke,
         button: document.getElementById('notifications-toggle'),

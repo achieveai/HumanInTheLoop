@@ -504,6 +504,15 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    vertical-align: middle;
+}
+
+.badge .badge-icon {
+    display: inline-flex;
+    flex-shrink: 0;
 }
 
 .badge-plaintext {
@@ -696,6 +705,29 @@ body {
     opacity: 0.5;
 }
 
+/* Icon-only footer actions (send, dismiss): the glyph is the whole
+ * content, so square the padding and flex-center it -- the asymmetric
+ * button padding left the mark riding high with a gap under it. The
+ * label rides the accessible name instead. */
+.detail-actions .button:has(> .badge-icon:only-child) {
+    align-items: center;
+    display: inline-flex;
+    justify-content: center;
+    padding: 8px;
+}
+
+/* Dismiss is the quiet one: "acknowledged and filed", not a primary
+ * decision, so it keeps the thread's calm rather than the siren. */
+.detail-actions .button-quiet {
+    background: transparent;
+    color: #718096;
+}
+
+.detail-actions .button-quiet:hover:not(:disabled) {
+    background: #edf2f7;
+    color: #4a5568;
+}
+
 .detail-error {
     background: #fff5f5;
     border-left: 3px solid #e53e3e;
@@ -778,23 +810,6 @@ body {
     color: #c53030;
 }
 
-/* The box under the list for the agent picked in the tree. */
-.list-compose {
-    flex: 0 0 auto;
-}
-
-.list-compose .detail-compose {
-    background: #f7fafc;
-    padding: 10px 16px 12px;
-}
-
-.list-compose-hint {
-    border-top: 1px solid #e2e8f0;
-    color: #718096;
-    font-size: 12px;
-    margin: 0;
-    padding: 10px 16px;
-}
 
 .detail-compose-text:disabled {
     background: #edf2f7;
@@ -870,6 +885,62 @@ body {
     margin-bottom: 4px;
 }
 
+.connection-scan {
+    background: #f7fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    display: grid;
+    gap: 8px;
+    margin-bottom: 6px;
+    padding: 12px;
+}
+
+.connection-scan[hidden] {
+    display: none;
+}
+
+.scan-connection {
+    align-items: center;
+    background: white;
+    border: 1px solid #a3b1c2;
+    border-radius: 6px;
+    color: #2d3748;
+    cursor: pointer;
+    display: flex;
+    font-weight: 600;
+    gap: 8px;
+    justify-content: center;
+    min-height: 44px;
+    padding: 10px 14px;
+}
+
+.scan-connection:hover {
+    background: #edf2f7;
+}
+
+.scan-connection svg,
+#share-connection svg {
+    height: 20px;
+    width: 20px;
+}
+
+#share-connection {
+    align-items: center;
+    display: inline-flex;
+    justify-content: center;
+}
+
+#share-connection[hidden] {
+    display: none;
+}
+
+.connection-scan-help {
+    color: #4a5568;
+    font-size: 13px;
+    line-height: 1.45;
+    margin: 0;
+}
+
 .connection-dialog label {
     font-size: 13px;
     font-weight: 600;
@@ -891,6 +962,70 @@ body {
 .connection-error {
     color: #c53030;
     min-height: 18px;
+}
+
+/* Connection sharing (desktop QR + Android import). Both reuse the
+   connection-dialog shell but have no form, so they get their own layout. */
+.share-dialog[open],
+.import-dialog[open] {
+    display: grid;
+    gap: 10px;
+    padding: 22px;
+}
+
+.share-qr {
+    display: flex;
+    justify-content: center;
+}
+
+.share-qr svg {
+    background: #fff;
+    /* White margin doubles as the QR quiet zone, whatever the renderer emits. */
+    box-sizing: border-box;
+    height: auto;
+    max-width: 280px;
+    padding: 12px;
+    width: 100%;
+}
+
+.share-warning {
+    color: #9c4221;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.share-countdown {
+    color: #718096;
+    font-size: 12px;
+    margin: 0;
+    text-align: center;
+}
+
+.import-preview {
+    display: grid;
+    gap: 4px 12px;
+    grid-template-columns: auto 1fr;
+    margin: 0;
+}
+
+.import-preview dt {
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.import-preview dd {
+    font-family: ui-monospace, monospace;
+    font-size: 13px;
+    margin: 0;
+    overflow-wrap: anywhere;
+}
+
+.import-overwrite-note {
+    color: #2d3748;
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0;
 }
 
 .connection-actions {
@@ -1146,9 +1281,10 @@ body {
 
 /* --- plan review (spec §8.3) ---
  *
- * The reviewer is client/src/review.js, unmodified. It was written to own a
- * whole window; here it owns a pane. These are the only two adjustments, and
- * both are geometry — nothing about how it behaves changes. */
+ * The reviewer is client/src/review.js, copied nearly whole. It was written
+ * to own a whole window; here it owns a pane, so its header starts collapsed
+ * (see review.js) — the one behavioural divergence. Everything else is the
+ * two geometry adjustments below. */
 
 .detail-review-host {
     display: flex;
@@ -1162,20 +1298,105 @@ body {
     height: 100%;
 }
 
-.review-reading-bar { padding: 6px 12px; border-bottom: 1px solid #e2e8f0; }
-.review-reading-bar .button { padding: 5px 10px; }
-
-/* Temporary review focus. Absolute positioning spans both Right and Bottom
-   layouts without overwriting the user's saved grid tracks or pane sizes. */
-html:not([data-layout='phone']) .inbox:has(.detail-review[data-expanded='true']) > #pane-detail {
-    position: absolute;
-    inset: 0;
-    grid-area: auto;
-    display: flex;
-    z-index: 5;
+/* Expanded, the reviewer's own titlebar already says "Plan review", so
+   this card's full header kicker would say it a second time -- hide it. */
+.detail-review > .detail-header > .detail-kicker {
+    display: none;
 }
-html:not([data-layout='phone']) .inbox:has(.detail-review[data-expanded='true']) > :not(#pane-detail) {
-    visibility: hidden;
+
+/* Fill the window with the plan: the card leaves the thread and takes the
+   whole inbox window until the reader puts it back (titlebar button from
+   render-review.js, Esc works too). */
+.detail-review-maximized {
+    background: #fff;
+    display: flex;
+    flex-direction: column;
+    inset: 0;
+    overflow: hidden;
+    position: fixed;
+    z-index: 30;
+}
+
+.detail-review-maximized .detail-review-host {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+}
+
+.detail-review-host .review-maximize {
+    align-items: center;
+    background: transparent;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    color: #718096;
+    cursor: pointer;
+    display: inline-flex;
+    height: 28px;
+    justify-content: center;
+    width: 28px;
+}
+
+.detail-review-host .review-maximize:hover {
+    background: #f7fafc;
+    color: #4c51bf;
+}
+
+.detail-review-host .review-maximize:focus-visible {
+    outline: 2px solid #667eea;
+    outline-offset: -2px;
+}
+
+/* Buttons that lead with a glyph (send, review verdicts): the icon margins
+   against a label; an icon-only button keeps its dead margin off. */
+.button > .badge-icon {
+    align-self: center;
+    display: inline-flex;
+}
+
+.button > .badge-icon:not(:only-child) {
+    margin-right: 6px;
+}
+
+/* The composer send is icon-only; pull its padding in to a square-ish hit. */
+.detail-compose-bar .button-primary:has(> .badge-icon:only-child) {
+    padding: 8px 12px;
+}
+
+/* Verdict footer (review.js markup, Inbox presentation): glyph and label
+   share one flex axis — inline-flow icons sat a pixel or two off the text
+   baseline — and only Approve stays solid. Reject and Request changes quiet
+   down to outline forms so a row of four solid buttons stops reading as four
+   equal sirens; Skip was never loud. */
+.detail-review-host .review-actions .button {
+    align-items: center;
+    display: inline-flex;
+    gap: 6px;
+}
+
+/* The shared glyph rule margins icons for inline flow; here flex gap owns
+   the spacing and that margin would double it. */
+.detail-review-host .review-actions .button > .badge-icon {
+    margin-right: 0;
+}
+
+.detail-review-host .review-actions .button-danger {
+    background: #fff5f5;
+    border: 1px solid #feb2b2;
+    color: #c53030;
+}
+
+.detail-review-host .review-actions .button-danger:hover:not(:disabled) {
+    background: #fed7d7;
+}
+
+.detail-review-host .review-actions .button-warning {
+    background: #fffaf0;
+    border: 1px solid #fbd38d;
+    color: #975a16;
+}
+
+.detail-review-host .review-actions .button-warning:hover:not(:disabled) {
+    background: #feebc8;
 }
 
 .detail-review-host .md-content { overflow-wrap: anywhere; }
@@ -1364,6 +1585,13 @@ body {
 [data-layout='phone'] .detail-actions .button {
     flex: 1;
     padding: 10px 12px;
+}
+
+/* Icon-only actions keep their square hit target on phone; the bar's other
+ * buttons still stretch. */
+[data-layout='phone'] .detail-actions .button:has(> .badge-icon:only-child) {
+    flex: 0 0 auto;
+    margin-left: auto;
 }
 
 /* Which control the bar shows. Back replaces the menu on the only screen where
@@ -1571,4 +1799,495 @@ body {
 .detail-session-former {
     color: #718096;
     font-size: 12px;
+}
+
+/* --- Conversation list (pane 2, OWA-style) --- */
+
+.conversation-name {
+    flex: 1;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.conversation-row--unread .conversation-name {
+    font-weight: 700;
+}
+
+.conversation-subject {
+    margin-top: 2px;
+    font-size: 13px;
+    color: #718096;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.conversation-row--unread .conversation-subject {
+    color: #2d3748;
+    font-weight: 600;
+}
+
+.conversation-count {
+    flex-shrink: 0;
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 11px;
+    font-weight: 600;
+    background: #667eea;
+    color: #fff;
+}
+
+/* --- Conversation thread (pane 3) --- */
+
+.thread-root {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+}
+
+.thread-header {
+    flex: 0 0 auto;
+}
+
+.thread-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-anchor: none;
+    padding: 12px 24px 20px;
+}
+
+/* The collapsed one-line form of a settled message. */
+.thread-line {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    width: 100%;
+    text-align: left;
+    padding: 8px 12px;
+    border: 0;
+    border-bottom: 1px solid #edf2f7;
+    background: transparent;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 13px;
+    color: #4a5568;
+}
+
+.thread-line:hover {
+    background: #f7fafc;
+}
+
+.thread-line:focus-visible {
+    outline: 2px solid #667eea;
+    outline-offset: -2px;
+}
+
+.thread-line-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.thread-line-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.thread-line-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+    color: #2d3748;
+}
+
+.thread-line-sub {
+    display: block;
+    margin-top: 1px;
+    font-size: 11px;
+    color: #a0aec0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The collapsed row's kind word wears the same treatment as the expanded
+ * card's .detail-kicker, so the two states of one header share their look. */
+.thread-line-kind {
+    color: #a0aec0;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.thread-card-slot {
+    margin: 12px 0;
+}
+
+.thread-card {
+    border-top: 1px solid #e2e8f0;
+    background: #fff;
+}
+
+/* Cards share the per-type renderers with the old single-message pane; the
+ * thread flattens their column layout so only the pane scrolls. */
+.thread-card .detail-root {
+    height: auto;
+}
+
+.thread-card .detail-header {
+    border-bottom: 1px solid #edf2f7;
+    cursor: pointer;
+    padding: 12px 16px 10px;
+}
+
+/* Clicking the header folds the card to its one line; the hover wash
+   carries the affordance. Only the background moves — text keeps its
+   colors, so contrast never drops. */
+.thread-card .detail-header:hover {
+    background: #edf2f7;
+}
+
+.thread-card .detail-title {
+    font-size: 15px;
+}
+
+.thread-card .detail-scroll {
+    flex: none;
+    overflow: visible;
+    padding: 12px 16px;
+}
+
+.thread-card .detail-actions {
+    border-top: 1px solid #edf2f7;
+    padding: 10px 16px;
+}
+
+/* A full-saturation primary at the foot of every card reads like a siren in
+ * a thread of quiet messages; the handoff reply goes sober instead. */
+.thread-card .detail-handoff .detail-actions .button-primary {
+    background: #fff;
+    color: #4c51bf;
+    border: 1px solid #e2e8f0;
+}
+
+.thread-card .detail-handoff .detail-actions .button-primary:hover:not(:disabled) {
+    background: #f0f1fa;
+    border-color: #c3c8f0;
+}
+
+.thread-card-header {
+    padding: 12px 16px;
+}
+
+.thread-card-missing {
+    margin: 0;
+    padding: 0 16px 12px;
+    color: #718096;
+    font-size: 12px;
+}
+
+.thread-compose {
+    flex: 0 0 auto;
+}
+
+.thread-compose .detail-compose {
+    background: #f7fafc;
+    padding: 10px 24px 12px;
+}
+
+/* --- the orphan mark, at conversation level (spec §16.5) ---
+ * The thread header carries it as one icon; the full explanation is a hover
+ * (or keyboard focus) popover rather than a banner inside every card. */
+
+.thread-orphan {
+    align-items: center;
+    background: #fffff0;
+    border: 1px solid #d69e2e;
+    border-radius: 50%;
+    color: #744210;
+    cursor: help;
+    display: inline-flex;
+    flex: 0 0 auto;
+    height: 22px;
+    justify-content: center;
+    position: relative;
+    width: 22px;
+}
+
+.thread-orphan::after {
+    background: #fffff0;
+    border: 1px solid #d69e2e;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+    color: #744210;
+    content: attr(data-tip);
+    display: none;
+    font-size: 12px;
+    font-weight: 400;
+    left: 0;
+    line-height: 1.5;
+    padding: 8px 10px;
+    position: absolute;
+    top: calc(100% + 6px);
+    width: 320px;
+    z-index: 20;
+}
+
+.thread-orphan:hover::after,
+.thread-orphan:focus-visible::after {
+    display: block;
+}
+
+.thread-orphan:focus-visible {
+    outline: 2px solid #667eea;
+    outline-offset: 1px;
+}
+
+/* --- the thread's reply box, collapsed until asked for --- */
+
+.thread-compose-open {
+    background: #f7fafc;
+    border: 0;
+    border-top: 1px solid #e2e8f0;
+    border-radius: 0;
+    color: #718096;
+    cursor: pointer;
+    display: block;
+    font-family: inherit;
+    font-size: 13px;
+    padding: 13px 24px;
+    text-align: left;
+    width: 100%;
+}
+
+.thread-compose-open:hover {
+    background: #edf2f7;
+    color: #4a5568;
+}
+
+.thread-compose-open:focus-visible {
+    outline: 2px solid #667eea;
+    outline-offset: -2px;
+}
+
+.thread-compose:not(.is-open) .detail-compose {
+    display: none;
+}
+
+.thread-compose.is-open .thread-compose-open {
+    display: none;
+}
+
+/* --- list chrome: never an empty bar --- */
+#filter-bar:empty,
+.type-filter-bar:has(.type-filter-set:empty) {
+    display: none;
+}
+
+.type-filter[hidden] {
+    display: none;
+}
+
+/* --- thread cards against the thread header ---
+ * A card identifies the message; the header identifies the session. Where
+ * the two repeat — same title, same machine chip — the copy hides. */
+.thread-card .detail-title.is-dup {
+    display: none;
+}
+
+.thread-card .detail-meta .badge-machine {
+    display: none;
+}
+
+/* An open composer reads at the bottom of the thread; give the last card
+ * room above it instead of letting the fold cut its final lines. */
+.thread-root:has(.thread-compose.is-open) .thread-scroll {
+    padding-bottom: 55vh;
+}
+
+
+/* --- Pin pass: folding, repo folders, kind icons --- */
+
+/* Every message folds both ways. The button floats at the card's top right
+   so it works no matter which renderer built the card beneath it. */
+/* Visible at rest, not only on hover: a quiet gray pill whose only job is
+   "fold this card", legible against both white cards and Work headers. */
+.thread-card-fold {
+    align-items: center;
+    background: #edf2f7;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    color: #4a5568;
+    cursor: pointer;
+    display: inline-flex;
+    float: right;
+    line-height: 1;
+    margin: 4px 0 2px 8px;
+    padding: 4px 6px;
+}
+
+.thread-card-fold:hover {
+    background: #e2e8f0;
+    color: #2d3748;
+}
+
+.thread-card-fold:focus-visible {
+    outline: 2px solid #667eea;
+    outline-offset: 1px;
+}
+
+/* The first unacted message anchors at the top of the reading pane. */
+.thread-scroll [data-message-id] {
+    scroll-margin-top: 8px;
+}
+
+/* Line 1 of a conversation row: one icon per message kind, action first. */
+.conversation-kinds {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+
+.conversation-kind {
+    width: 16px;
+    text-align: center;
+    font-size: 12px;
+    color: #718096;
+}
+
+/* Line 2 carries the newest subject with its status and date. */
+.conversation-subject {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.conversation-subject-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.conversation-subject .message-age {
+    flex-shrink: 0;
+}
+
+/* Machine subfolders inside a repo folder. */
+.agent-row--folder {
+    padding-left: 18px;
+    font-weight: 600;
+    color: #4a5568;
+    cursor: default;
+}
+
+/* --- Merged task conversations: who said what --- */
+
+/* Conversation row: the roster under the subject names each sub-agent. */
+.conversation-participants {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 3px 8px;
+    margin-top: 3px;
+}
+
+.participant-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    line-height: 1.2;
+    color: #4a5568;
+    white-space: nowrap;
+}
+
+.participant-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: oklch(56% 0.13 var(--pc-hue, 260));
+}
+
+.participant-more {
+    font-size: 11px;
+    color: #8a90a6;
+}
+
+/* Thread header: the same chips in one row under the meta line. */
+.thread-participants {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    padding: 2px 0 8px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid #e4e7f0;
+}
+
+/* Open card: a slim bar above the card's own header. */
+.thread-card-participant {
+    padding: 8px 14px 0;
+}
+
+.thread-card-participant .participant-chip {
+    font-size: 11px;
+    font-weight: 600;
+}
+
+/* Collapsed line: keep the sender with the secondary details. */
+.thread-line-sub > .participant-chip {
+    margin-right: 8px;
+    vertical-align: middle;
+}
+
+/* Machine headings and older repositories in the folder sidebar. */
+#pane-agents .agent-machine-heading {
+    font-size: 15px;
+    font-weight: 750;
+    padding-top: 16px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid currentColor;
+    border-radius: 0;
+    margin-bottom: 6px;
+}
+#pane-agents .agent-load-more {
+    display: block;
+    min-height: 44px;
+    margin-left: 18px;
+    padding: 8px 10px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+}
+#pane-agents .agent-load-more:hover { background: oklch(0.92 0.01 250); color: oklch(0.25 0.02 250); }
+#pane-agents .agent-load-more:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+/* Read state actions stay distinct from response/send controls. */
+.detail-notification .notification-read-action {
+    color: oklch(0.38 0.13 275);
+    background: oklch(0.95 0.025 275);
+    border-color: oklch(0.76 0.07 275);
+    min-width: 44px;
+    min-height: 44px;
+}
+.detail-notification .notification-read-action:hover {
+    color: oklch(0.28 0.13 275);
+    background: oklch(0.89 0.04 275);
+}
+.detail-notification .notification-read-action:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
 }

@@ -47,6 +47,12 @@ export async function mount(
   detail: unknown,
   options: MountOptions = {},
 ): Promise<void> {
+  // Renderer mounts never boot the recorded 77 MB fixture: a spec that
+  // wants a populated app sets __INBOX_FIXTURE in its own init script,
+  // which runs before this one, so the guard keeps it.
+  await page.addInitScript(() => {
+    (window as any).__INBOX_FIXTURE ??= {};
+  });
   await page.goto('/inbox-harness.html');
   await page.evaluate(async ({ module, detail, options }) => {
     const mod = await import(`./render-${module}.js`);

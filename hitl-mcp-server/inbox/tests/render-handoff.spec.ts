@@ -39,7 +39,7 @@ test.describe('Pane 3 — a handoff', () => {
     await page.locator('#handoff-next').fill('Now add a dedicated message type.');
     await expect(page.locator('#handoff-end')).not.toBeChecked();
 
-    await page.locator('.button', { hasText: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send' }).click();
     const [sent] = await recorded(page);
     expect(sent).toMatchObject({
       action: 'submit',
@@ -53,7 +53,7 @@ test.describe('Pane 3 — a handoff', () => {
     await mount(page, 'handoff', pending(), { wire: true });
 
     await page.locator('.handoff-end').click();
-    await page.locator('.button', { hasText: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send' }).click();
     const [sent] = await recorded(page);
     expect(sent).toMatchObject({ action: 'submit', selectedValues: ['end'], otherText: '' });
   });
@@ -70,7 +70,7 @@ test.describe('Pane 3 — a handoff', () => {
   test('an empty reply is refused rather than sent', async ({ page }) => {
     await mount(page, 'handoff', pending(), { wire: true });
 
-    await page.locator('.button', { hasText: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send' }).click();
     await expect(page.locator('.detail-error')).toHaveText('Type your next instruction, or check End.');
     expect(await recorded(page)).toEqual([]);
   });
@@ -98,6 +98,6 @@ test.describe('Pane 3 — a handoff', () => {
 
     await expect(page.locator('#handoff-next')).toBeDisabled();
     await expect(page.locator('#handoff-next')).toHaveValue('half-typed instruction');
-    await expect(page.locator('.button', { hasText: 'Send' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Send' })).toHaveCount(0);
   });
 });

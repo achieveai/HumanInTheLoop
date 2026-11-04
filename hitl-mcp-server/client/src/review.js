@@ -1032,8 +1032,8 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     //
     // The titlebar deliberately stays: it carries "Find in plan", and in the
     // popup client `review.js` is the entire window, so there is nowhere else
-    // for search to go. Remembered rather than reset per review, because a
-    // reader who collapsed it once means it for the next plan too.
+    // for search to go. The choice is remembered per review: a reader who
+    // expanded it once means it for the next plan too.
     const HEADER_COLLAPSED_KEY = 'review.headerCollapsed';
     const headerToggle = container.querySelector('#review-header-toggle');
     const headerBody = container.querySelector('#review-header-body');
@@ -1047,11 +1047,11 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     }
 
     try {
-        setHeaderCollapsed(localStorage.getItem(HEADER_COLLAPSED_KEY) === '1');
+        setHeaderCollapsed(localStorage.getItem(HEADER_COLLAPSED_KEY) !== '0');
     } catch {
         // A private window, cleared site data, or a browser set to refuse
         // storage. None of those are a reason to fail to draw the reviewer.
-        setHeaderCollapsed(false);
+        setHeaderCollapsed(true);
     }
 
     headerToggle?.addEventListener('click', () => {
