@@ -1,0 +1,240 @@
+/* Inbox dark theme. The existing blue remains the interaction accent. */
+html[data-theme='dark'] {
+    color-scheme: dark;
+    --dark-base: oklch(20% 0.02 260);
+    --dark-pane: oklch(24% 0.02 260);
+    --dark-raised: oklch(29% 0.025 260);
+    --dark-hover: oklch(36% 0.03 260);
+    --dark-border: oklch(43% 0.03 260);
+    --dark-text: oklch(94% 0.01 260);
+    --dark-muted: oklch(78% 0.02 260);
+    --dark-accent: oklch(77% 0.12 255);
+}
+html[data-theme='dark'], html[data-theme='dark'] body,
+html[data-theme='dark'] .pane-list, html[data-theme='dark'] .pane-detail,
+html[data-theme='dark'] .detail-root, html[data-theme='dark'] .thread-root {
+    background: var(--dark-base); color: var(--dark-text);
+}
+html[data-theme='dark'] .pane-agents, html[data-theme='dark'] .inbox-bar,
+html[data-theme='dark'] .filter-bar, html[data-theme='dark'] .type-filter-bar,
+html[data-theme='dark'] .detail-header, html[data-theme='dark'] .detail-actions,
+html[data-theme='dark'] .thread-header, html[data-theme='dark'] .thread-card,
+html[data-theme='dark'] dialog, html[data-theme='dark'] .review-header,
+html[data-theme='dark'] .review-footer, html[data-theme='dark'] .detail-compose {
+    background: var(--dark-pane); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .pane, html[data-theme='dark'] .message-row,
+html[data-theme='dark'] .thread-line, html[data-theme='dark'] .agent-row--root,
+html[data-theme='dark'] .detail-header, html[data-theme='dark'] .detail-actions {
+    border-color: var(--dark-border);
+}
+html[data-theme='dark'] .message-row:hover, html[data-theme='dark'] .agent-row:hover,
+html[data-theme='dark'] .thread-line:hover, html[data-theme='dark'] .inbox-bar button:hover,
+html[data-theme='dark'] .filter:hover, html[data-theme='dark'] .type-filter:hover:not(:disabled) {
+    background: var(--dark-hover); color: var(--dark-text);
+}
+html[data-theme='dark'] .message-row.is-selected, html[data-theme='dark'] .agent-row.is-selected,
+html[data-theme='dark'] .type-filter[aria-pressed='true'] {
+    background: oklch(40% 0.10 260); color: var(--dark-text);
+}
+html[data-theme='dark'] .filter, html[data-theme='dark'] .type-filter,
+html[data-theme='dark'] .inbox-bar button, html[data-theme='dark'] .thread-line,
+html[data-theme='dark'] .message-title, html[data-theme='dark'] .detail-title,
+html[data-theme='dark'] .agent-glyph, html[data-theme='dark'] .detail-compose-to,
+html[data-theme='dark'] .work-document, html[data-theme='dark'] .md-content {
+    color: var(--dark-text);
+}
+html[data-theme='dark'] .filter { background: var(--dark-raised); }
+html[data-theme='dark'] .filter.is-active { background: oklch(40% 0.10 260); color: var(--dark-text); }
+html[data-theme='dark'] .filter-count { opacity: 1; }
+html[data-theme='dark'] .agent-row, html[data-theme='dark'] .agent-row--folder,
+html[data-theme='dark'] .conversation-subject, html[data-theme='dark'] .conversation-row--unread .conversation-subject,
+html[data-theme='dark'] .participant-chip, html[data-theme='dark'] .conversation-kind,
+html[data-theme='dark'] .list-empty, html[data-theme='dark'] .agents-empty,
+html[data-theme='dark'] .detail-session, html[data-theme='dark'] .detail-session-name {
+    color: var(--dark-muted);
+}
+html[data-theme='dark'] .mark-all-read { color: var(--dark-accent); }
+html[data-theme='dark'] .detail-context-toggle,
+html[data-theme='dark'] .thread-card-fold, html[data-theme='dark'] .detail-compose-bar,
+html[data-theme='dark'] .review-toolbar, html[data-theme='dark'] .review-tabs,
+html[data-theme='dark'] .review-comments, html[data-theme='dark'] .review-find-btn,
+html[data-theme='dark'] .formatted-change-added, html[data-theme='dark'] .formatted-change-removed,
+html[data-theme='dark'] .before-after-side, html[data-theme='dark'] .diff-gutter {
+    background: var(--dark-raised); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .thread-line-title, html[data-theme='dark'] .thread-line-sub,
+html[data-theme='dark'] .other-label, html[data-theme='dark'] .detail-context-label,
+html[data-theme='dark'] .formatted-empty, html[data-theme='dark'] .review-comments-empty {
+    color: var(--dark-muted);
+}
+html[data-theme='dark'] .formatted-change-added { border-left-color: oklch(74% 0.13 150); }
+html[data-theme='dark'] .formatted-change-removed { border-left-color: oklch(75% 0.15 25); }
+html[data-theme='dark'] textarea::placeholder, html[data-theme='dark'] input::placeholder { color: var(--dark-muted); opacity: 1; }
+html[data-theme='dark'] .thread-former-toggle, html[data-theme='dark'] .thread-objective,
+html[data-theme='dark'] .message-glyph, html[data-theme='dark'] .review-title,
+html[data-theme='dark'] .review-feedback-label, html[data-theme='dark'] .formatted-change-label,
+html[data-theme='dark'] .detail-panel-note { color: var(--dark-muted); }
+html[data-theme='dark'] .thread-compose-open, html[data-theme='dark'] .rendered-selection-action {
+    background: var(--dark-raised); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .conversation-count, html[data-theme='dark'] .comment-count {
+    background: oklch(38% 0.11 260); color: var(--dark-text);
+}
+html[data-theme='dark'] .agent-pending { background: oklch(43% 0.18 25); color: var(--dark-text); }
+html[data-theme='dark'] .filter-count { color: var(--dark-text); }
+html[data-theme='dark'] .status-pill-label { color: oklch(25% 0.02 260); }
+html[data-theme='dark'] a {
+    color: var(--dark-accent); border-color: var(--dark-accent);
+}
+html[data-theme='dark'] .message-age, html[data-theme='dark'] .message-meta,
+html[data-theme='dark'] .message-context, html[data-theme='dark'] .agent-age,
+html[data-theme='dark'] .detail-kicker, html[data-theme='dark'] .detail-when,
+html[data-theme='dark'] .detail-closed, html[data-theme='dark'] .detail-retained,
+html[data-theme='dark'] .inbox-bar-title, html[data-theme='dark'] .work-freshness {
+    color: var(--dark-muted);
+}
+html[data-theme='dark'] input, html[data-theme='dark'] textarea,
+html[data-theme='dark'] select, html[data-theme='dark'] .button-secondary,
+html[data-theme='dark'] .detail-context, html[data-theme='dark'] .badge,
+html[data-theme='dark'] .work-task, html[data-theme='dark'] .detail-panel,
+html[data-theme='dark'] .review-body, html[data-theme='dark'] .diff-row,
+html[data-theme='dark'] .comment-card, html[data-theme='dark'] pre {
+    background: var(--dark-raised); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] :focus-visible { outline: 2px solid var(--dark-accent); outline-offset: 2px; }
+html[data-theme='dark'] .inbox-bar button { min-width: 44px; min-height: 44px; border-color: var(--dark-border); }
+html[data-theme='dark'] .thread-compose-open:hover,
+html[data-theme='dark'] .button-secondary:hover:not(:disabled),
+html[data-theme='dark'] .rendered-selection-action:hover:not(:disabled) {
+    background: var(--dark-hover); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .thread-card :is(.detail-handoff, .detail-review) > .detail-header:hover {
+    background: oklch(18% 0.02 260);
+    color: var(--dark-text);
+}
+
+/* Selected answers and inline paths in reading-pane messages. */
+html[data-theme='dark'] .thread-scroll :is(.detail-question .option.selected, .detail-question .option.is-chosen, .detail-handoff .handoff-end.selected) {
+    background: var(--dark-hover);
+    color: var(--dark-text);
+    border-color: var(--dark-accent);
+}
+html[data-theme='dark'] .thread-scroll .detail-question .option.selected .option-description,
+html[data-theme='dark'] .thread-scroll .detail-question .option.is-chosen .option-description {
+    color: var(--dark-text);
+}
+html[data-theme='dark'] .thread-scroll .detail-root .md-content :not(pre) > code {
+    background: var(--dark-raised);
+    color: var(--dark-text);
+}
+html[data-theme='dark'] .thread-scroll .detail-question .preview-panel {
+    background: var(--dark-raised); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .thread-scroll .detail-question .preview-panel-label {
+    color: var(--dark-muted);
+}
+
+/* Keep each expanded message visually together inside the reading pane. */
+html[data-theme='dark'] .thread-scroll > .thread-card-slot > .thread-card {
+    border: 1px solid var(--dark-border);
+    border-radius: 8px;
+}
+html[data-theme='dark'] .thread-scroll > .thread-card-slot > .thread-card > .detail-root {
+    background: var(--dark-pane);
+    border-radius: inherit;
+}
+html[data-theme='dark'] .thread-scroll > .thread-card-slot > .thread-card .detail-header {
+    background: var(--dark-raised);
+    border-radius: 7px 7px 0 0;
+}
+html[data-theme='dark'] .thread-scroll > .thread-card-slot > .thread-card .detail-header:hover {
+    background: var(--dark-base);
+    color: var(--dark-text);
+}
+
+/* Marked message status pills: subdued, with distinct text and backgrounds. */
+html[data-theme='dark'] .message-list .conversation-subject .status-pill--stale {
+    background: var(--dark-raised); color: var(--dark-text);
+}
+html[data-theme='dark'] .message-list .conversation-subject .status-pill--stale .status-pill-label {
+    color: inherit;
+}
+html[data-theme='dark'] .thread-scroll .detail-question .stepper-tabs .stepper-tab {
+    background: var(--dark-raised); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .thread-scroll .detail-question .stepper-tabs .stepper-tab.active {
+    background: var(--dark-hover); color: var(--dark-text); border-color: var(--dark-accent);
+}
+html[data-theme='dark'] .thread-scroll .detail-question .stepper-tabs .stepper-tab:hover {
+    background: var(--dark-base); color: var(--dark-text);
+}
+html[data-theme='dark'] .conversation-subject .status-pill--pending {
+    background: oklch(35% 0.07 80); color: oklch(91% 0.09 90);
+}
+html[data-theme='dark'] .conversation-subject .status-pill--pending .status-pill-label {
+    color: inherit;
+}
+html[data-theme='dark'] .thread-line .status-pill--answered {
+    background: oklch(34% 0.07 155); color: oklch(91% 0.08 155);
+}
+html[data-theme='dark'] .thread-line .status-pill--answered .status-pill-label {
+    color: inherit;
+}
+
+/* The review toolbar and comments header are shared controls inside the marked review. */
+html[data-theme='dark'] .detail-review-host .review-rendered-toolbar,
+html[data-theme='dark'] .detail-review-host .review-comments > .review-pane-label {
+    background: var(--dark-pane); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .detail-review-host .review-view-tabs,
+html[data-theme='dark'] .detail-review-host .review-change-nav button {
+    background: var(--dark-raised); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .detail-review-host .review-view-tabs [role='tab'] { color: var(--dark-text); }
+html[data-theme='dark'] .detail-review-host .review-view-tabs [role='tab'][aria-selected='true'] {
+    background: var(--dark-hover); color: var(--dark-text);
+}
+html[data-theme='dark'] .detail-review-host .review-change-nav button:hover:not(:disabled),
+html[data-theme='dark'] .detail-review-host .review-view-tabs [role='tab']:hover {
+    background: var(--dark-hover); color: var(--dark-text);
+}
+
+html[data-theme='dark'] .detail-handoff .detail-actions .button:has(> .badge-icon:only-child),
+html[data-theme='dark'] .detail-notification .detail-actions .button:has(> .badge-icon:only-child) {
+    background: var(--dark-raised); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .detail-handoff .detail-actions .button:has(> .badge-icon:only-child):hover:not(:disabled),
+html[data-theme='dark'] .detail-notification .detail-actions .button:has(> .badge-icon:only-child):hover:not(:disabled) {
+    background: var(--dark-hover); color: var(--dark-text);
+}
+
+html[data-theme='dark'] .detail-review-host .review-actions .button {
+    background: var(--dark-raised); color: var(--dark-text); border: 1px solid var(--dark-border);
+}
+html[data-theme='dark'] .detail-review-host .review-actions .button:hover:not(:disabled) {
+    background: var(--dark-hover); color: var(--dark-text);
+}
+html[data-theme='dark'] .detail-review-host .review-actions .button-danger { color: oklch(83% 0.12 25); }
+html[data-theme='dark'] .detail-review-host .review-actions .button-warning { color: oklch(88% 0.10 85); }
+html[data-theme='dark'] .detail-review-host .review-actions .button-primary {
+    background: oklch(39% 0.09 155); color: var(--dark-text); border-color: oklch(58% 0.10 155);
+}
+html[data-theme='dark'] .detail-review-host .review-actions .button-primary:hover:not(:disabled) {
+    background: oklch(46% 0.09 155); color: var(--dark-text);
+}
+
+html[data-theme='dark'] .detail-review-host .diagram-viewer[data-diagram-kind='mermaid'],
+html[data-theme='dark'] .detail-review-host .diagram-viewer[data-diagram-kind='mermaid'] .diagram-toolbar,
+html[data-theme='dark'] .detail-review-host .diagram-viewer[data-diagram-kind='mermaid'] .diagram-viewport {
+    background: var(--dark-pane); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .detail-review-host .diagram-viewer[data-diagram-kind='mermaid'] .diagram-toolbar button {
+    background: var(--dark-raised); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .detail-review-host .diagram-viewer[data-diagram-kind='mermaid'] .diagram-toolbar button:hover {
+    background: var(--dark-hover); color: var(--dark-text);
+}
+html[data-theme='dark'] .detail-review-host .diagram-viewer[data-diagram-kind='mermaid'] .diagram-viewport img {
+    filter: invert(1) hue-rotate(180deg);
+}

@@ -59,7 +59,7 @@ test('quiet updates do not create cards, ordinary notifications still render', a
 });
 
 for (const fails of [false, true]) {
- test(`revision during pending dismissal ${fails ? 'rolls back on failure' : 'is removed on success'}`, async ({ page }) => {
+ test(`revision during pending dismissal ${fails ? 'rolls back on failure' : 'remains visible on success'}`, async ({ page }) => {
   await page.goto(`/notifications-harness.html?notification=${encodeURIComponent(JSON.stringify(work()))}`);
   await send(page, { messageId: 'other', title: 'Other', body: 'Keep open', timestamp: Date.now() });
   await page.evaluate(() => { (window as any).__DEFER_DISMISS = true; });
@@ -72,7 +72,7 @@ for (const fails of [false, true]) {
    await expect(page.locator('.notification-card[data-id="work-1"]')).toBeVisible();
    await expect(page.locator('.notification-card[data-id="work-1"]')).toContainText('Change 3');
    await expect(page.locator('.notification-card[data-id="work-1"] .dismiss-btn')).toBeEnabled();
-  } else await expect(page.locator('.notification-card[data-id="work-1"]')).toHaveCount(0);
+  } else await expect(page.locator('.notification-card[data-id="work-1"]')).toContainText('Change 2');
   await expect(page.locator('.notification-card[data-id="other"]')).toBeVisible();
  });
 }

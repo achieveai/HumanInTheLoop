@@ -1,4 +1,5 @@
 @import url("./work-document.css");
+@import url("./dark-mode.css");
 /* LLM Inbox — three panes.
  *
  * Colours and type follow the existing client (notifications.css / styles.css)
@@ -226,24 +227,25 @@ body {
 
 .type-filter-set {
     display: flex;
-    flex: 1 1 auto;
+    flex: 1 1 285px;
     flex-wrap: wrap;
     gap: 4px;
     min-width: 0;
+    container-type: inline-size;
+}
+
+.type-filter-icon { display: none; }
+@container (max-width: 510px) {
+    .type-filter-set .type-filter-label { display: none; }
+    .type-filter-set .type-filter-icon { display: inline-flex; }
 }
 
 .list-actions {
     display: flex;
-    flex: 1 0 auto;
+    flex: 0 0 auto;
     justify-content: flex-end;
     margin-left: auto;
     min-width: 0;
-}
-
-@media (max-width: 599px) {
-    .list-actions {
-        flex-basis: 100%;
-    }
 }
 
 .mark-all-read,
@@ -1957,6 +1959,12 @@ body {
     font-size: 15px;
 }
 
+.thread-card .detail-question .detail-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .thread-card .detail-scroll {
     flex: none;
     overflow: visible;
@@ -2142,6 +2150,11 @@ body {
     outline-offset: 1px;
 }
 
+.thread-card .detail-notification > .detail-header[data-type="notification"] .detail-headline > .thread-card-fold {
+    flex: none;
+    margin: 0 0 0 auto;
+}
+
 /* The first unacted message anchors at the top of the reading pane. */
 .thread-scroll [data-message-id] {
     scroll-margin-top: 8px;
@@ -2280,8 +2293,6 @@ body {
     color: #4c51bf;
     background: #fff;
     border-color: #e2e8f0;
-    min-width: 44px;
-    min-height: 44px;
 }
 .detail-notification .notification-read-action:hover:not(:disabled) {
     color: #4c51bf;

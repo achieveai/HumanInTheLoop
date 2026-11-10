@@ -90,7 +90,7 @@ async fn submit_plan_review(
 
 /// Tauri command: dismiss a notification from the frontend.
 #[tauri::command]
-async fn dismiss_notification(app: tauri::AppHandle, notification_id: String, encrypted: Option<bool>) -> Result<(), String> {
+async fn dismiss_notification(app: tauri::AppHandle, notification_id: String, encrypted: Option<bool>, work_revision: Option<u64>) -> Result<(), String> {
     let config = load_config().map_err(|e| e.to_string())?;
 
     let msg = DismissNotificationMessage {
@@ -102,6 +102,7 @@ async fn dismiss_notification(app: tauri::AppHandle, notification_id: String, en
             .as_millis() as u64,
         notification_id,
         dismissed_from: config.device_name.clone(),
+        work_revision,
     };
 
     ntfy::publish_dismiss_notification(&config, &msg, encrypted.unwrap_or(false))
@@ -111,7 +112,10 @@ async fn dismiss_notification(app: tauri::AppHandle, notification_id: String, en
     // A renderer may reload while publication is pending. Record and deliver
     // success from native state, rather than relying on the old IPC caller.
     let (queued, entry) = app.state::<payload_store::NotificationStartup>()
-        .record("remove-notification", &serde_json::json!(msg.notification_id));
+        .record("remove-notification", &match msg.work_revision {
+            Some(revision) => serde_json::json!({"notificationId":msg.notification_id,"workRevision":revision}),
+            None => serde_json::json!(msg.notification_id),
+        });
     if !queued {
         if let Some(window) = app.get_webview_window("notifications") {
             use tauri::Emitter;

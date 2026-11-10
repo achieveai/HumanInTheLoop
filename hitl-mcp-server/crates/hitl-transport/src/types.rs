@@ -215,6 +215,8 @@ pub struct DismissNotificationMessage {
     pub timestamp: u64,
     pub notification_id: String,
     pub dismissed_from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_revision: Option<u64>,
 }
 
 /// Restore a notification by tombstoning one exact dismissal.
@@ -699,6 +701,7 @@ mod tests {
             timestamp: 1_700_000_000_000,
             notification_id: "31ba33d7-08a8-4761-9abf-5f4e6ba364b2".to_string(),
             dismissed_from: "phone".to_string(),
+            work_revision: None,
         };
 
         let json = serde_json::to_string(&dismiss).unwrap();

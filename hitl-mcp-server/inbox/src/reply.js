@@ -272,7 +272,8 @@ export function createReplyActions({ invoke }) {
             subAnswers: subAnswers ?? null,
         }).then(id => remember(row.messageId, id));
 
-    const dismissMany = notificationIds => invoke('dismiss_notifications', { notificationIds })
+    const dismissMany = (notificationIds, workRevisions) => invoke('dismiss_notifications', workRevisions && Object.keys(workRevisions).length
+        ? { notificationIds, workRevisions } : { notificationIds })
         .then(outcomes => {
             const result = normalizeDismissOutcomes(notificationIds, outcomes);
             for (const success of result.successes) {
@@ -298,7 +299,9 @@ export function createReplyActions({ invoke }) {
             answer(row, { selectedValues: [], otherText: '', subAnswers: null, skipped: true }),
 
         onDismiss: row =>
-            invoke('dismiss_notification', { notificationId: row.messageId })
+            invoke('dismiss_notification', row.work
+                ? { notificationId: row.messageId, workRevision: row.badges?.revision }
+                : { notificationId: row.messageId })
                 .then(id => remember(row.messageId, id)),
 
         onDismissMany: dismissMany,

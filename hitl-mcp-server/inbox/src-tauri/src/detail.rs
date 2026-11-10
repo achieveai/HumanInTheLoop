@@ -228,15 +228,27 @@ mod tests {
     }
 
     #[test]
-    fn work_completion_does_not_dismiss_and_updates_do_not_restore() {
+    fn work_dismissal_applies_only_to_its_revision() {
         let mut events = vec![work("first", 1)];
         assert_eq!(try_detail(&events, "work").unwrap().row.status, "pending");
-        events.push(ev("dismiss", NOW, r#"{"type":"dismiss_notification","messageId":"dismiss","notificationId":"work","dismissedFrom":"test"}"#));
+        events.push(ev("dismiss", NOW, r#"{"type":"dismiss_notification","messageId":"dismiss","notificationId":"work","workRevision":1,"dismissedFrom":"test"}"#));
+        assert_eq!(try_detail(&events, "work").unwrap().row.status, "dismissed");
         events.push(work("newer", 2));
         let detail = try_detail(&events, "work").unwrap();
-        assert_eq!(detail.row.status, "dismissed");
+        assert_eq!(detail.row.status, "pending");
         assert_eq!(detail.row.badges.revision, Some(2));
-        assert_eq!(detail.settlement.unwrap()["messageId"], "dismiss");
+        assert!(detail.settlement.is_none());
+        let filtered = view::build_list(&events, None, Some("answered"), NOW);
+        assert!(filtered.messages.is_empty());
+        assert_eq!(filtered.actionable_work_revisions.get("work"), Some(&2));
+        events.push(ev("dismiss2", NOW + 1, r#"{"type":"dismiss_notification","messageId":"dismiss2","notificationId":"work","workRevision":2,"dismissedFrom":"test"}"#));
+        let detail = try_detail(&events, "work").unwrap();
+        assert_eq!(detail.row.status, "dismissed");
+        assert_eq!(detail.settlement.unwrap()["messageId"], "dismiss2");
+        events.reverse();
+        assert_eq!(try_detail(&events, "work").unwrap().row.status, "dismissed");
+        events.push(ev("restore2", NOW + 2, r#"{"type":"restore_notification","messageId":"restore2","notificationId":"work","dismissalId":"dismiss2","restoredFrom":"test"}"#));
+        assert_eq!(try_detail(&events, "work").unwrap().row.status, "pending");
     }
 
     fn question() -> Event {

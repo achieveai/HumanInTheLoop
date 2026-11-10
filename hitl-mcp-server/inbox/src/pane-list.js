@@ -37,6 +37,15 @@ export const TYPES = [
     { key: 'agent_message', label: 'Sent' },
 ];
 
+const TYPE_ICONS = {
+    work: '<rect x="3" y="4" width="10" height="9" rx="1"/><path d="M6 4V2.5h4V4M3 7.5h10"/>',
+    notification: '<path d="M4 11h8l-1-1.5V7a3 3 0 0 0-6 0v2.5zM7 13h2"/>',
+    question: '<path d="M5.5 5.5a2.5 2.5 0 1 1 4 2c-1 .7-1.5 1.1-1.5 2.5M8 12.5h.01"/>',
+    plan_review: '<path d="M4 2h6l2 2v10H4zM6 7h4M6 10h4"/>',
+    handoff: '<path d="M2.5 5h10m-3-3 3 3-3 3M13.5 11h-10m3-3-3 3 3 3"/>',
+    agent_message: '<path d="M14 2 7 9M14 2l-4 12-3-5-5-3z"/>',
+};
+
 /** Work shares notification transport but has its own display family. */
 export const messageType = message => message.work ? 'work' : message.msgType;
 
@@ -114,7 +123,14 @@ export function renderTypeFilterBar(container, messages, enabled, { onToggle } =
         if (!button) {
             button = el('button', 'type-filter');
             button.dataset.type = type.key;
-            button.append(type.label, el('span', 'filter-count'));
+            const icon = el('span', 'type-filter-icon');
+            icon.setAttribute('aria-hidden', 'true');
+            icon.innerHTML = `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">${TYPE_ICONS[type.key]}</svg>`;
+            button.append(icon, el('span', 'type-filter-label', type.label), el('span', 'filter-count'));
+            button.setAttribute('aria-label', type.label);
+            button.querySelector('.filter-count').id = `type-filter-count-${type.key}`;
+            button.setAttribute('aria-describedby', `type-filter-count-${type.key}`);
+            button.title = type.label;
             button.addEventListener('click', () => onToggle?.(type.key));
             container.appendChild(button);
         }

@@ -860,6 +860,7 @@ pub struct MessageList {
     /// Pending/stale notifications in this scope, independent of the selected
     /// status filter. The native bulk action snapshots these exact IDs.
     pub actionable_notification_ids: Vec<String>,
+    pub actionable_work_revisions: HashMap<String, u64>,
     /// Counts over the *scope*, before the filter — so the filter bar can show
     /// what each tab would contain rather than what the current one does.
     pub counts: FilterCounts,
@@ -922,6 +923,11 @@ fn list_from(subjects: &[Subject], scope_key: Option<&str>, filter: Option<&str>
         .map(|row| row.message_id.clone())
         .collect();
 
+    let actionable_work_revisions = rows.iter()
+        .filter(|row| row.work.is_some() && matches!(row.status.as_str(), "pending" | "stale"))
+        .filter_map(|row| row.badges.revision.map(|revision| (row.message_id.clone(), revision)))
+        .collect();
+
     let counts = FilterCounts {
         all: rows.len() as u32,
         needs_you: rows.iter().filter(|r| Filter::NeedsYou.admits(r)).count() as u32,
@@ -937,6 +943,7 @@ fn list_from(subjects: &[Subject], scope_key: Option<&str>, filter: Option<&str>
     MessageList {
         messages: rows,
         actionable_notification_ids,
+        actionable_work_revisions,
         counts,
         filter: applied.as_str(),
         default_filter: default_filter.as_str(),
@@ -1940,6 +1947,7 @@ mod tests {
             keys(&list),
             [
                 "actionableNotificationIds",
+                "actionableWorkRevisions",
                 "counts",
                 "defaultFilter",
                 "filter",

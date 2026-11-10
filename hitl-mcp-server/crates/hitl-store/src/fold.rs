@@ -124,6 +124,8 @@ pub fn fold(events: &[Event]) -> MessageState {
     // exactly the race this has to resolve.
     let mut ordered: Vec<&Event> = events.iter().collect();
     ordered.sort_by(|a, b| (a.ntfy_time, &a.ntfy_id).cmp(&(b.ntfy_time, &b.ntfy_id)));
+    let work_revision = crate::events::latest_work_event(events)
+        .and_then(|event| event.json().get("revision").and_then(|v| v.as_u64()));
 
     // A restore is a targeted tombstone, not a chronological toggle. Collect
     // every exact reference before considering settlements so the result is
@@ -153,6 +155,19 @@ pub fn fold(events: &[Event]) -> MessageState {
     let mut settled = false;
 
     for event in &ordered {
+        if event.msg_type == "dismiss_notification" {
+            if let Some(current) = work_revision {
+                let target = event.json().get("workRevision").and_then(|v| v.as_u64())
+                    .or_else(|| {
+                        let earlier: Vec<Event> = ordered.iter()
+                            .filter(|candidate| (candidate.ntfy_time, &candidate.ntfy_id) < (event.ntfy_time, &event.ntfy_id))
+                            .map(|candidate| (*candidate).clone()).collect();
+                        crate::events::latest_work_event(&earlier)
+                            .and_then(|work| work.json().get("revision").and_then(|v| v.as_u64()))
+                    });
+                if target != Some(current) { continue; }
+            }
+        }
         if event.msg_type == "dismiss_notification"
             && event.subject_id.as_deref().is_some_and(|subject| {
                 restored_dismissals

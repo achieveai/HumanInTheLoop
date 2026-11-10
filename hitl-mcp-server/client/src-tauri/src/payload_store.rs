@@ -38,13 +38,17 @@ impl NotificationStartup {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.sequence += 1;
         let entry = serde_json::json!({"event":event,"payload":payload,"sequence":state.sequence});
-        let id = if event == "remove-notification" { payload.as_str() }
+        let id = if event == "remove-notification" { payload.as_str().or_else(|| payload["notificationId"].as_str()) }
             else if payload["type"] == "work_update" { payload["workId"].as_str() }
             else { payload["messageId"].as_str() };
         if let Some(id) = id {
             let index = state.entries.iter().position(|(key, _, _)| key == id);
             if event == "remove-notification" {
-                if let Some(index) = index { state.entries[index].2 = false; }
+                if let Some(index) = index {
+                    let current = state.entries[index].1.as_ref().and_then(|p| p["revision"].as_u64());
+                    let target = payload["workRevision"].as_u64();
+                    if target.is_none() || current == target { state.entries[index].2 = false; }
+                }
                 else { state.entries.push((id.to_string(), None, false)); }
             } else if event == "add-notification" {
                 let work = payload["type"] == "work_update";
@@ -153,6 +157,17 @@ pub fn take_window_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_revision_dismissal_does_not_hide_newer_work() {
+        let startup = NotificationStartup::default();
+        startup.queue("add-notification", &serde_json::json!({"type":"work_update","workId":"work","revision":1,"alert":true}));
+        startup.queue("add-notification", &serde_json::json!({"type":"work_update","workId":"work","revision":2,"alert":false}));
+        startup.queue("remove-notification", &serde_json::json!({"notificationId":"work","workRevision":1}));
+        assert_eq!(startup.ready()[1]["payload"]["alert"], true);
+        startup.queue("remove-notification", &serde_json::json!({"notificationId":"work","workRevision":2}));
+        assert_eq!(startup.ready()[1]["payload"]["alert"], false);
+    }
 
     #[test]
     fn notification_reload_keeps_latest_and_dismissal_during_listener_gap() {

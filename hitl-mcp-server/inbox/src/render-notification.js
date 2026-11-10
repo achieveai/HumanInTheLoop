@@ -75,8 +75,8 @@ export function renderNotification(container, detail, actions = {}) {
         const button = iconActionButton('ack', 'notification-read-action', handler,
             unread ? 'Mark as unread' : 'Mark as read');
         const svg = button.querySelector('svg');
-        svg.setAttribute('width', '18');
-        svg.setAttribute('height', '18');
+        svg.setAttribute('width', '14');
+        svg.setAttribute('height', '14');
         svg.innerHTML = unread
             ? '<rect x="1.5" y="3" width="13" height="10" rx="1.5"/><path d="m2 4 6 4.5L14 4"/>'
             : '<path d="M1.5 6 8 1.5 14.5 6v7a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V6Z"/><path d="m1.5 6 6.5 4 6.5-4M2 13l4-3M14 13l-4-3"/>';
@@ -110,8 +110,13 @@ export function renderNotification(container, detail, actions = {}) {
         const button = bar.querySelector('.button');
         if (button) button.disabled = true;
         error.hidden = true;
+        const dismissedRevision = currentRow.work ? currentRow.badges?.revision : null;
         try {
-            await actions.onDismiss(row);
+            const responseId = await actions.onDismiss(currentRow);
+            if (responseId && (!dismissedRevision || currentRow.badges?.revision === dismissedRevision) && (isOpen(currentRow)
+                || (currentRow.status === 'dismissed' && !currentRow.responseId))) {
+                applyRow({ ...currentRow, status: 'dismissed', responseId });
+            }
         } catch (err) {
             if (button) button.disabled = false;
             error.textContent = `Could not dismiss this — nothing left this machine. ${err?.message ?? err}`;
@@ -126,6 +131,8 @@ export function renderNotification(container, detail, actions = {}) {
         drawFooter();
         try {
             await actions.onRestore(currentRow);
+            applyRow({ ...currentRow, status: 'pending', responseId: null,
+                responder: null, respondedAt: null });
         } catch (err) {
             restoreInFlight = false;
             drawFooter();
@@ -138,7 +145,9 @@ export function renderNotification(container, detail, actions = {}) {
     function applyRow(nextRow) {
         currentRow = nextRow;
         root.dataset.status = nextRow.status;
+        const fold = root.querySelector(':scope > .detail-header[data-type="notification"] .thread-card-fold');
         replaceHeader(root, { ...detail, row: nextRow }, KICKER);
+        if (fold) root.querySelector(':scope > .detail-header > .detail-headline')?.appendChild(fold);
         settled = !isOpen(nextRow);
         restoreInFlight = false;
         error.hidden = true;

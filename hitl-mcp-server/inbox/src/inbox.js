@@ -172,9 +172,8 @@ export function createInbox({ invoke, elements, onError = console.error, actions
     function selectAdjacent(messages, previousVisible) {
         if (!state.selectedId || messages.some(message => message.messageId === state.selectedId)) return false;
 
-        const waiting = latestList.messages.map(message => predictedRow(message, optimistic.get(message.messageId)))
-            .find(message => conversationKeyOf(message) === state.selectedConversationKey
-            && (message.status === 'pending' || message.status === 'stale'));
+        const waiting = messages.find(message =>
+            conversationKeyOf(message) === state.selectedConversationKey);
         if (waiting) {
             state.selectedId = waiting.messageId;
             state.selectedStatus = waiting.status;
@@ -190,8 +189,10 @@ export function createInbox({ invoke, elements, onError = console.error, actions
             return true;
         }
 
-        const oldVisibleIndex = previousVisible.findIndex(message => message.messageId === state.selectedId);
-        const replacement = messages[Math.min(Math.max(oldVisibleIndex, 0), messages.length - 1)];
+        const oldVisibleIndex = groupConversations(previousVisible)
+            .findIndex(conversation => conversation.key === state.selectedConversationKey);
+        const conversations = groupConversations(messages);
+        const replacement = conversations[Math.min(Math.max(oldVisibleIndex, 0), conversations.length - 1)].anchor;
         // A projection update must not bring pane 3 in front on a phone.
         selectMessage(replacement, { navigate: false });
         return true;
@@ -199,11 +200,11 @@ export function createInbox({ invoke, elements, onError = console.error, actions
 
     function selectAfterTargets(targetIds, previousVisible) {
         if (!state.selectedId || !targetIds.has(state.selectedId)) return;
-        const visibleIndex = previousVisible.findIndex(message => message.messageId === state.selectedId);
-        const survivors = visibleMessages.filter(message => !targetIds.has(message.messageId));
-        const waiting = latestList.messages.map(message => predictedRow(message, optimistic.get(message.messageId)))
-            .find(message => !targetIds.has(message.messageId) && conversationKeyOf(message) === state.selectedConversationKey
-            && (message.status === 'pending' || message.status === 'stale'));
+        const visibleIndex = groupConversations(previousVisible)
+            .findIndex(conversation => conversation.key === state.selectedConversationKey);
+        const survivors = visibleMessages;
+        const waiting = survivors.find(message =>
+            conversationKeyOf(message) === state.selectedConversationKey);
         if (waiting) {
             state.selectedId = waiting.messageId;
             state.selectedStatus = waiting.status;
@@ -211,8 +212,9 @@ export function createInbox({ invoke, elements, onError = console.error, actions
             return;
         }
         if (survivors.length) {
-            const nextIndex = Math.min(Math.max(visibleIndex, 0), survivors.length - 1);
-            selectMessage(survivors[nextIndex], { navigate: false });
+            const conversations = groupConversations(survivors);
+            const nextIndex = Math.min(Math.max(visibleIndex, 0), conversations.length - 1);
+            selectMessage(conversations[nextIndex].anchor, { navigate: false });
             return;
         }
         state.selectedId = null;
@@ -229,6 +231,7 @@ export function createInbox({ invoke, elements, onError = console.error, actions
 
         const transaction = {
             row,
+            workRevision: row.work ? row.badges?.revision : null,
             prediction,
             actionLabel,
             scopeKey: latestList.scopeKey ?? state.scopeKey,
@@ -295,6 +298,11 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         const authoritativeById = new Map(list.messages.map(message => [message.messageId, message]));
         for (const [messageId, transaction] of optimistic) {
             const authoritative = authoritativeById.get(messageId);
+            if (transaction.workRevision && authoritative?.work
+                && authoritative.badges?.revision > transaction.workRevision) {
+                confirmOptimistic(messageId);
+                continue;
+            }
             const predictsOpen = statusAdmits(transaction.prediction, 'needs_you');
             if (predictsOpen) {
                 if (eventDriven && authoritative && statusAdmits(authoritative, 'needs_you')) {
@@ -477,6 +485,7 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         if (state.selectedId && targetIds.has(state.selectedId)) detailPane.park(state.selectedId);
         for (const messageId of ids) {
             optimistic.set(messageId, {
+                workRevision: latestList?.actionableWorkRevisions?.[messageId],
                 prediction: predictionFor(messageId),
                 actionLabel,
                 scopeKey,
@@ -541,7 +550,8 @@ export function createInbox({ invoke, elements, onError = console.error, actions
 
         let result;
         try {
-            result = await actions.onDismissMany(notificationIds);
+            const workRevisions = latestList.actionableWorkRevisions ?? {};
+            result = await actions.onDismissMany(notificationIds, workRevisions);
         } catch (error) {
             if (bulkOperation !== operation) return;
             removeBulkPredictions(notificationIds, 'Mark all read');
@@ -932,6 +942,19 @@ async function main() {
     // is now the correct response.
     window.__PANES = panes;
 
+    const themeToggle = document.getElementById('theme-toggle');
+    const applyTheme = dark => {
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        themeToggle?.setAttribute('aria-pressed', String(dark));
+    };
+    let savedTheme = null;
+    try { savedTheme = localStorage.getItem('hitl-inbox-theme'); } catch { /* Storage may be unavailable. */ }
+    applyTheme(savedTheme === 'dark');
+    themeToggle?.addEventListener('click', () => {
+        const dark = document.documentElement.dataset.theme !== 'dark';
+        applyTheme(dark);
+        try { localStorage.setItem('hitl-inbox-theme', dark ? 'dark' : 'light'); } catch { /* Keep the current session usable. */ }
+    });
     document.getElementById('agents-toggle')?.addEventListener('click', () => panes.toggleAgents());
     document.getElementById('pane-back')?.addEventListener('click', () => panes.back());
     document.getElementById('inbox-scrim')?.addEventListener('click', () => panes.toggleAgents(false));

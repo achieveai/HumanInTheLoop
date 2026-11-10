@@ -191,6 +191,8 @@ export interface DismissNotificationMessage extends BaseMessage {
   notificationId: string;
   /** Device that dismissed it */
   dismissedFrom: string;
+  /** Work document revision being dismissed, when the notification is a work update. */
+  workRevision?: number;
 }
 
 /** Published by a client to undo one exact notification dismissal. */

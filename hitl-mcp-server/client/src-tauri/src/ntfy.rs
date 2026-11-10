@@ -142,7 +142,11 @@ impl NtfySink for TauriSink {
 
     fn on_dismiss_notification(&self, dismiss: &DismissNotificationMessage) {
         if let Some(win) = self.app.get_webview_window("notifications") {
-            let (queued, entry) = self.app.state::<payload_store::NotificationStartup>().record("remove-notification", &serde_json::json!(dismiss.notification_id));
+            let payload = match dismiss.work_revision {
+                Some(revision) => serde_json::json!({"notificationId":dismiss.notification_id,"workRevision":revision}),
+                None => serde_json::json!(dismiss.notification_id),
+            };
+            let (queued, entry) = self.app.state::<payload_store::NotificationStartup>().record("remove-notification", &payload);
             if queued { return; }
             if let Err(e) = win.emit("remove-notification", &entry) {
                 log::error!("Failed to emit remove-notification: {}", e);

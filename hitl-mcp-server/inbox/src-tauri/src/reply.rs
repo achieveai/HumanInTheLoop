@@ -307,7 +307,7 @@ pub async fn send_agent_message(session_tag: String, text: String) -> Result<Str
 /// `dismissed` and keeps the message — which is the whole reason the Inbox can
 /// answer "what did that agent tell me an hour ago" and the popup cannot.
 #[tauri::command]
-pub async fn dismiss_notification(notification_id: String) -> Result<String, String> {
+pub async fn dismiss_notification(notification_id: String, work_revision: Option<u64>) -> Result<String, String> {
     let config = load_config().map_err(|e| e.to_string())?;
     let response_id = uuid::Uuid::new_v4().to_string();
 
@@ -317,6 +317,7 @@ pub async fn dismiss_notification(notification_id: String) -> Result<String, Str
         timestamp: now_millis(),
         notification_id,
         dismissed_from: config.device_name.clone(),
+        work_revision,
     };
 
     publish_dismiss_notification(&config, &msg, encrypt_replies(&config))
@@ -328,6 +329,7 @@ pub async fn dismiss_notification(notification_id: String) -> Result<String, Str
 
 async fn dismiss_notifications_with<Setup, Publish, Fut>(
     notification_ids: Vec<String>,
+    work_revisions: std::collections::HashMap<String, u64>,
     setup: Setup,
     publish: Publish,
 ) -> Result<Vec<DismissNotificationOutcome>, String>
@@ -345,8 +347,9 @@ where
             msg_type: "dismiss_notification".to_string(),
             message_id: uuid::Uuid::new_v4().to_string(),
             timestamp: now_millis(),
-            notification_id,
+            notification_id: notification_id.clone(),
             dismissed_from: device_name.clone(),
+            work_revision: work_revisions.get(&notification_id).copied(),
         })
         .collect();
 
@@ -369,9 +372,11 @@ where
 #[tauri::command]
 pub async fn dismiss_notifications(
     notification_ids: Vec<String>,
+    work_revisions: Option<std::collections::HashMap<String, u64>>,
 ) -> Result<Vec<DismissNotificationOutcome>, String> {
     dismiss_notifications_with(
         notification_ids,
+        work_revisions.unwrap_or_default(),
         load_bulk_publish_state,
         |state, message| async move {
             publish_dismiss_notification_with_client(
@@ -672,6 +677,7 @@ mod tests {
 
         let task = tokio::spawn(dismiss_notifications_with(
             inputs,
+            Default::default(),
             {
                 let setup_calls = setup_calls.clone();
                 move || {
@@ -953,6 +959,7 @@ mod tests {
         let dismiss_publishes = Arc::new(AtomicUsize::new(0));
         let dismiss_error = dismiss_notifications_with(
             vec!["n-1".to_string()],
+            Default::default(),
             || Err("config unavailable".to_string()),
             {
                 let dismiss_publishes = dismiss_publishes.clone();

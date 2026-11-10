@@ -1,6 +1,7 @@
 use std::{fs, io, path::Path};
 
 pub const RUNTIME_FILES: &[&str] = &[
+    "dark-mode.css",
     "detail-shell.js",
     "diagram-renderer.html",
     "diagram-renderer.js",

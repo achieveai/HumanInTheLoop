@@ -137,7 +137,7 @@ async function dismissNotification(messageId, cardEl) {
     }
 
     try {
-        await invoke('dismiss_notification', { notificationId: messageId, encrypted });
+        await invoke('dismiss_notification', { notificationId: messageId, encrypted, workRevision: isWork ? notification.revision : null });
     } catch (err) {
         console.error('Failed to dismiss notification:', err);
         if (isWork) {
@@ -149,6 +149,12 @@ async function dismissNotification(messageId, cardEl) {
         }
     }
     pendingWorkDismissals.delete(messageId);
+
+    const latest = notifications.find(item => notificationKey(item) === messageId);
+    if (isWork && latest && latest.revision > notification.revision) {
+        addNotificationCard(latest, findCard(messageId));
+        return;
+    }
 
     // Remove from array
     const idx = notifications.findIndex(n => notificationKey(n) === messageId);
@@ -182,9 +188,12 @@ export function applySenderIdentity(forMessageId, sender) {
     row.innerHTML = badgeHtml;
 }
 
-function removeNotificationById(messageId) {
+function removeNotificationById(target) {
+    const messageId = typeof target === 'string' ? target : target?.notificationId;
     const idx = notifications.findIndex(n => notificationKey(n) === messageId);
     if (idx === -1) return;
+    if (typeof target === 'object' && target?.workRevision != null
+        && notifications[idx].revision !== target.workRevision) return;
 
     notifications.splice(idx, 1);
 

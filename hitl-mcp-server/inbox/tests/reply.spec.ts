@@ -365,6 +365,27 @@ test.describe('Publishing a reply (spec §9.1)', () => {
     });
   });
 
+  test('work dismissal sends the displayed revision for single and bulk actions', async ({ page }) => {
+    await page.addInitScript(() => { (window as any).__INBOX_FIXTURE = {}; });
+    await page.goto('/inbox-harness.html');
+    const calls = await page.evaluate(async () => {
+      const { createReplyActions } = await import('./reply.js');
+      const calls: any[] = [];
+      const actions = createReplyActions({ invoke: (command: string, args: any) => {
+        calls.push({ command, args });
+        return Promise.resolve(command === 'dismiss_notifications'
+          ? [{ notificationId: 'work', status: 'dismissed', responseId: 'd2' }] : 'd1');
+      } });
+      await actions.onDismiss({ messageId: 'work', work: {}, badges: { revision: 3 } });
+      await actions.onDismissMany(['work'], { work: 3 });
+      return calls;
+    });
+    expect(calls).toEqual([
+      { command: 'dismiss_notification', args: { notificationId: 'work', workRevision: 3 } },
+      { command: 'dismiss_notifications', args: { notificationIds: ['work'], workRevisions: { work: 3 } } },
+    ]);
+  });
+
   test('an answer goes out and the controls stay down', async ({ page }) => {
     // Optimistic on purpose. Once the answer is on the wire this is a race, and
     // offering to send a second answer would only add a second loser.

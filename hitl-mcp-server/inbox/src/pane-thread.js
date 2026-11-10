@@ -401,9 +401,11 @@ export function createThreadPane({ container, invoke, onError = console.error, a
         article.querySelector('.detail-banner--orphan')?.remove();
         dedupeCard(article);
         tagCardParticipant(article, row);
-        // Keep the review's keyboard-accessible fold in its existing header.
-        const reviewHeader = article.querySelector(':scope > article.detail-review > header.detail-header');
-        if (reviewHeader) reviewHeader.prepend(fold);
+        // Keep the keyboard-accessible fold in the message header.
+        const messageHeader = article.querySelector(':scope > article:is(.detail-review, .detail-handoff) > header.detail-header, :scope > article.detail-notification > header.detail-header[data-type="work"]');
+        const notificationHeadline = article.querySelector(':scope > article.detail-notification > header.detail-header[data-type="notification"] > .detail-headline');
+        if (notificationHeadline) notificationHeadline.appendChild(fold);
+        else if (messageHeader) messageHeader.prepend(fold);
         else article.appendChild(fold);
         // The header is a collapse target too: clicking anywhere on it folds
         // the card to its one line — the same toggle the corner button
