@@ -404,6 +404,9 @@ export function createInbox({ invoke, elements, onError = console.error, actions
                     () => base.onRestore(row),
                 )
                 : undefined,
+            onMarkConversationRead: base.onDismissMany
+                ? payload => markConversationRead(payload)
+                : undefined,
         };
     }
 
@@ -531,16 +534,34 @@ export function createInbox({ invoke, elements, onError = console.error, actions
         return true;
     }
 
+    /** The list action bar's button: every actionable notification in scope. */
     async function markAllRead() {
-        if (bulkInFlight() || !actions.onDismissMany) return;
+        if (bulkInFlight() || !actions.onDismissMany) return null;
         const notificationIds = actionableIds();
-        if (!notificationIds.length) return;
+        if (!notificationIds.length) return null;
+        return bulkMarkRead(notificationIds, latestList?.actionableWorkRevisions ?? {},
+            scopeName(state.scopeKey));
+    }
 
+    /**
+     * The thread header's button: the conversation's own open notifications.
+     * `pane-thread` computes the targets from the rows it painted and passes
+     * them up, so the action is exact even while a status filter hides the
+     * conversation's open rows from the list projection.
+     */
+    async function markConversationRead({ notificationIds, workRevisions, conversationName }) {
+        if (bulkInFlight() || !actions.onDismissMany || !notificationIds?.length) return null;
+        return bulkMarkRead(notificationIds, workRevisions ?? {},
+            `conversation ${conversationName ?? 'open'}`);
+    }
+
+    /** Shared bulk dismiss: predictions, publish, undo pairs, error dialog. */
+    async function bulkMarkRead(notificationIds, workRevisions, operationScopeName) {
         const operation = {
             batchId: ++bulkSequence,
             phase: 'marking',
             scopeKey: state.scopeKey,
-            scopeName: scopeName(state.scopeKey),
+            scopeName: operationScopeName,
             targetCount: notificationIds.length,
             pairs: [],
             statusMessage: '',
@@ -550,7 +571,6 @@ export function createInbox({ invoke, elements, onError = console.error, actions
 
         let result;
         try {
-            const workRevisions = latestList.actionableWorkRevisions ?? {};
             result = await actions.onDismissMany(notificationIds, workRevisions);
         } catch (error) {
             if (bulkOperation !== operation) return;
@@ -593,6 +613,7 @@ export function createInbox({ invoke, elements, onError = console.error, actions
                 { kind: 'mark-all', scopeKey: operation.scopeKey },
             );
         }
+        return { successes, failures };
     }
 
     async function undoMarkAllRead() {
@@ -651,6 +672,15 @@ export function createInbox({ invoke, elements, onError = console.error, actions
             if (transaction.prediction._eventObservedOpen) confirmOptimistic(success.notificationId);
         }
         removeBulkPredictions(failures.map(failure => failure.notificationId), 'Undo mark all read');
+
+        // A conversation-scoped mark read also settled cards directly in the
+        // thread, outside the list projection. A successful Undo must refetch
+        // that painted conversation or its cards and header stay dismissed.
+        if (successes.length && state.scopeKey === operation.scopeKey) {
+            const selected = latestList?.messages.find(message =>
+                conversationKeyOf(message) === state.selectedConversationKey);
+            if (selected) run(detailPane.update(selected));
+        }
 
         operation.pairs = failures.map(failure => ({
             notificationId: failure.notificationId,

@@ -493,6 +493,212 @@ function renderBeforeAfterDocument(documentModel, kind, changedBlocks = new Map(
     }).join('');
 }
 
+/**
+ * Word-level highlights of what changed inside a removed/added block pair.
+ * Block alignment already says *which* blocks differ; these marks say *what*
+ * inside them differs, so a one-word edit stops reading as a rewritten
+ * paragraph. Tokens are whole words — whitespace is matched but never marked.
+ * Pairs over the token budget keep the plain block tint instead of paying
+ * for a large alignment; the block tint already carries the signal.
+ */
+const INLINE_DIFF_MAX_TOKENS = 1500;
+
+function wordTokens(root) {
+    const tokens = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode();
+    while (node) {
+        // The Added/Removed label is chrome, not document content — a mark
+        // around it would report the label itself as a changed word.
+        if (!node.parentElement?.closest('.formatted-change-label')) {
+            const text = node.nodeValue;
+            const pattern = /\S+|\s+/g;
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                tokens.push({ text: match[0], node, start: match.index, end: match.index + match[0].length });
+            }
+        }
+        node = walker.nextNode();
+    }
+    return tokens;
+}
+
+function applyWordMarks(tokens, className) {
+    if (tokens.length === 0) return;
+    const byNode = new Map();
+    for (const token of tokens) {
+        const list = byNode.get(token.node);
+        if (list) list.push(token);
+        else byNode.set(token.node, [token]);
+    }
+    for (const [node, nodeTokens] of byNode) {
+        // An earlier pair pass may already have replaced this text node.
+        if (!node.parentNode) continue;
+        const ranges = nodeTokens
+            .map(token => [token.start, token.end])
+            .sort((a, b) => a[0] - b[0]);
+        const fragment = document.createDocumentFragment();
+        let cursor = 0;
+        for (const [start, end] of ranges) {
+            if (start > cursor) fragment.append(document.createTextNode(node.nodeValue.slice(cursor, start)));
+            const mark = document.createElement('mark');
+            mark.className = className;
+            mark.textContent = node.nodeValue.slice(start, end);
+            fragment.append(mark);
+            cursor = Math.max(cursor, end);
+        }
+        if (cursor < node.nodeValue.length) fragment.append(document.createTextNode(node.nodeValue.slice(cursor)));
+        node.parentNode.replaceChild(fragment, node);
+    }
+}
+
+function highlightChangedPair(removedEl, addedEl) {
+    const diffApi = window.Diff;
+    if (!diffApi || typeof diffApi.diffArrays !== 'function') return;
+    const removedTokens = wordTokens(removedEl);
+    const addedTokens = wordTokens(addedEl);
+    if (removedTokens.length + addedTokens.length > INLINE_DIFF_MAX_TOKENS) return;
+    const runs = diffApi.diffArrays(removedTokens, addedTokens, {
+        comparator: (a, b) => a.text === b.text,
+    });
+    if (!Array.isArray(runs)) return;
+    const removedChanged = [];
+    const addedChanged = [];
+    // Whitespace-only tokens ride along inside an added/removed run; marking
+    // them would paint empty gaps, so only word tokens become marks.
+    for (const run of runs) {
+        if (run.removed) removedChanged.push(...run.value.filter(token => /\S/.test(token.text)));
+        else if (run.added) addedChanged.push(...run.value.filter(token => /\S/.test(token.text)));
+    }
+    applyWordMarks(removedChanged, 'inline-diff-removed');
+    applyWordMarks(addedChanged, 'inline-diff-added');
+}
+
+/** Pair removed/added block wrappers index-wise per hunk and mark word changes. */
+function highlightHunkWordChanges(removedScope, addedScope, hunks) {
+    if (!removedScope || !addedScope || !Array.isArray(hunks) || hunks.length === 0) return;
+    for (const hunk of hunks) {
+        if (!hunk?.id) continue;
+        const removed = removedScope
+            .querySelectorAll(`.formatted-change-removed[data-change-hunk="${hunk.id}"]`);
+        const added = addedScope
+            .querySelectorAll(`.formatted-change-added[data-change-hunk="${hunk.id}"]`);
+        const pairs = Math.min(removed.length, added.length);
+        for (let i = 0; i < pairs; i++) highlightChangedPair(removed[i], added[i]);
+    }
+}
+
+/**
+ * Pad the shorter side of each removed/added block pair with vertical blank
+ * space so identical content sits at the same height in both before/after
+ * panes. A pad is a plain div; dropping it between two blocks changes their
+ * margin collapse (the gap grows by min(prevMarginBottom, nextMarginTop)
+ * for free), so the div's height is the remaining difference and the
+ * visible padding is exactly what the taller side needs. Re-runs remove
+ * prior pads first, so the observer and the rAF both converge.
+ */
+function alignBeforeAfterPanes(beforeRoot, afterRoot, hunks) {
+    if (!beforeRoot || !afterRoot) return;
+    for (const root of [beforeRoot, afterRoot]) {
+        root.querySelectorAll('.before-after-pad').forEach(pad => pad.remove());
+    }
+    // The narrow layout shows one pane at a time (the other is display:none)
+    // — nothing to line up, and hidden nodes measure 0.
+    if (!beforeRoot.offsetWidth || !afterRoot.offsetWidth) return;
+    if (!Array.isArray(hunks) || hunks.length === 0) return;
+    const isPad = el => el.classList.contains('before-after-pad');
+    const groupByHunk = (root, kind) => {
+        const groups = new Map();
+        for (const el of root.querySelectorAll(`.formatted-change-${kind}[data-change-hunk]`)) {
+            const id = el.getAttribute('data-change-hunk');
+            const list = groups.get(id);
+            if (list) list.push(el);
+            else groups.set(id, [el]);
+        }
+        return groups;
+    };
+    const beforeGroups = groupByHunk(beforeRoot, 'removed');
+    const afterGroups = groupByHunk(afterRoot, 'added');
+    const freeGap = (prev, next) => {
+        if (!prev || !next) return 0;
+        const mb = parseFloat(getComputedStyle(prev).marginBottom) || 0;
+        const mt = parseFloat(getComputedStyle(next).marginTop) || 0;
+        return Math.max(0, Math.min(mb, mt));
+    };
+    const placePad = (prev, next, height, root) => {
+        const pad = document.createElement('div');
+        pad.className = 'before-after-pad';
+        pad.setAttribute('aria-hidden', 'true');
+        pad.style.height = `${height}px`;
+        if (prev) prev.after(pad);
+        else if (next) next.before(pad);
+        else root.append(pad);
+    };
+    for (const hunk of hunks) {
+        const removed = beforeGroups.get(hunk.id) || [];
+        const added = afterGroups.get(hunk.id) || [];
+        const pairs = Math.max(removed.length, added.length);
+        let beforeTotal = 0;
+        let afterTotal = 0;
+        for (let i = 0; i < pairs; i++) {
+            const bandBefore = removed[i] ? removed[i].getBoundingClientRect().height : 0;
+            const bandAfter = added[i] ? added[i].getBoundingClientRect().height : 0;
+            const diff = (beforeTotal + bandBefore) - (afterTotal + bandAfter);
+            beforeTotal += bandBefore;
+            afterTotal += bandAfter;
+            if (Math.abs(diff) <= 0.5) continue;
+            const beforeShorter = diff < 0;
+            const chain = beforeShorter ? removed : added;
+            const root = beforeShorter ? beforeRoot : afterRoot;
+            let prev = null;
+            let next = null;
+            const anchor = chain[i] || chain[chain.length - 1] || null;
+            if (anchor) {
+                prev = anchor;
+                next = anchor.nextElementSibling;
+            } else {
+                // Empty chain (pure removal/addition): the pad belongs at the
+                // hunk's slot — right after the equal block that precedes it.
+                // Equal blocks render 1:1 in document order in both panes.
+                const firstOther = (beforeShorter ? added : removed)[0];
+                let equalIndex = 0;
+                for (let node = firstOther?.previousElementSibling; node; node = node.previousElementSibling) {
+                    if (!node.classList.contains('formatted-change') && !isPad(node)) equalIndex += 1;
+                }
+                const equalBlocks = [...root.children]
+                    .filter(el => !el.classList.contains('formatted-change') && !isPad(el));
+                prev = equalIndex > 0 ? equalBlocks[equalIndex - 1] : null;
+                next = equalIndex < equalBlocks.length ? equalBlocks[equalIndex] : null;
+            }
+            const height = Math.abs(diff) - freeGap(prev, next);
+            if (height <= 0.5) continue; // the debt carries into the next pair
+            placePad(prev, next, height, root);
+            if (beforeShorter) beforeTotal += height + freeGap(prev, next);
+            else afterTotal += height + freeGap(prev, next);
+        }
+    }
+}
+
+/**
+ * Keep the two comparison documents scrolled together. Proportional, not
+ * pixel-for-pixel: an added paragraph makes the After side taller, and
+ * anchoring by ratio keeps the same region of the plan in view on both.
+ */
+function syncScrollBetween(beforeSide, afterSide) {
+    if (!beforeSide || !afterSide) return;
+    let syncing = false;
+    const mirror = (source, target) => {
+        if (syncing) return;
+        syncing = true;
+        const sourceMax = source.scrollHeight - source.clientHeight;
+        const targetMax = target.scrollHeight - target.clientHeight;
+        target.scrollTop = sourceMax > 0 ? Math.round((source.scrollTop / sourceMax) * targetMax) : 0;
+        syncing = false;
+    };
+    beforeSide.addEventListener('scroll', () => mirror(beforeSide, afterSide), { passive: true });
+    afterSide.addEventListener('scroll', () => mirror(afterSide, beforeSide), { passive: true });
+}
+
 function mappedElementData(element) {
     const startLine = Number(element?.getAttribute('data-source-start'));
     const endLine = Number(element?.getAttribute('data-source-end'));
@@ -994,6 +1200,7 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     const tMd = performance.now();
     const collapsedRuns = new Map();
     renderedEl.innerHTML = renderChangesHtml(formattedModel, collapsedRuns);
+    highlightHunkWordChanges(renderedEl, renderedEl, formattedModel.hunks);
     const changedOld = new Map((formattedModel.hunks || [])
         .flatMap(hunk => hunk.removed.map(block => [block, hunk.id])));
     const changedNew = new Map((formattedModel.hunks || [])
@@ -1004,10 +1211,14 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
         const started = performance.now();
         beforeEl.innerHTML = renderBeforeAfterDocument(formattedModel.oldDocument, 'removed', changedOld);
         afterEl.innerHTML = renderBeforeAfterDocument(formattedModel.newDocument, 'added', changedNew);
+        highlightHunkWordChanges(beforeEl, afterEl, formattedModel.hunks);
         perf.lastModeDomRenderMs = performance.now() - started;
         beforeAfterRendered = true;
         mappedController?.paintComments(comments);
         mappedController?.paintSelection(selectionAnchorObject());
+        // The panel is still hidden at this point (setViewMode unhides after
+        // this returns), and hidden nodes measure 0 — align after the unhide.
+        requestAnimationFrame(() => alignBeforeAfterPanes(beforeEl, afterEl, formattedModel.hunks));
     }
     if (!formattedModel.ok) {
         ensureBeforeAfterRendered();
@@ -1121,6 +1332,20 @@ export function renderPlanReview(container, planMessage, callbacks = {}) {
     setViewMode(formattedModel.ok ? 'changes' : 'before-after');
 
     const comparisonGrid = container.querySelector('.before-after-grid');
+    syncScrollBetween(
+        comparisonGrid?.querySelector('.before-after-side[aria-label="Before"]'),
+        comparisonGrid?.querySelector('.before-after-side[aria-label="After"]'),
+    );
+    if (typeof ResizeObserver === 'function' && comparisonGrid) {
+        let alignFrame = 0;
+        new ResizeObserver(() => {
+            if (!beforeAfterRendered || alignFrame) return;
+            alignFrame = requestAnimationFrame(() => {
+                alignFrame = 0;
+                alignBeforeAfterPanes(beforeEl, afterEl, formattedModel.hunks);
+            });
+        }).observe(comparisonGrid);
+    }
     const setComparisonSide = side => {
         comparisonGrid.dataset.narrowSide = side;
         container.querySelectorAll('[data-comparison-side]').forEach(candidate => {

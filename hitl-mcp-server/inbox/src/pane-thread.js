@@ -174,6 +174,27 @@ export function createThreadPane({ container, invoke, onError = console.error, a
             title.appendChild(el('span', 'conversation-count',
                 `${openCount} need${openCount === 1 ? 's' : ''} you`));
         }
+        // The same bulk dismiss as the list's mark-all-read, scoped to this
+        // conversation: open notifications only — questions and plan reviews
+        // keep needing an answer (spec §8.1's Dismiss is per-notification).
+        if (rows.some(row => row.msgType === 'notification' && isOpenMessage(row))
+            && actions.onMarkConversationRead) {
+            const markRead = el('button', 'thread-mark-read mark-all-read', 'Mark all read');
+            markRead.type = 'button';
+            markRead.addEventListener('click', () => markConversationRead(markRead, anchor));
+            title.appendChild(markRead);
+        }
+        // One gesture folds every open card back to its one line; the button
+        // sleeps while everything is folded and wakes on a hand re-expand.
+        if (rows.some(cardIsOpen)) {
+            const foldAll = el('button', 'thread-collapse-all');
+            foldAll.type = 'button';
+            foldAll.title = 'Collapse all to one line';
+            foldAll.setAttribute('aria-label', 'Collapse all messages to one line');
+            foldAll.innerHTML = iconSvg('collapseAll', 15);
+            foldAll.addEventListener('click', () => collapseAllCards(foldAll));
+            title.appendChild(foldAll);
+        }
         header.appendChild(title);
 
         const meta = el('div', 'detail-meta');
@@ -257,6 +278,9 @@ export function createThreadPane({ container, invoke, onError = console.error, a
         // the same header in two states.
         const kind = el('span', 'thread-line-kind', row.work ? 'Work' : messageType(row));
         sub.appendChild(kind);
+        // A revised plan's collapsed line must say which revision it opens:
+        // the Before & after panes only gain content from revision 2 onward.
+        if (!row.work && row.badges?.revision) sub.appendChild(el('span', '', ` · rev ${row.badges.revision}`));
         if (row.responder) sub.appendChild(el('span', '', ` · ${row.responder}`));
         main.appendChild(sub);
         line.appendChild(main);
@@ -289,6 +313,7 @@ export function createThreadPane({ container, invoke, onError = console.error, a
             const node = state.nodes?.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
             if (node) expandRow(row, node);
         }
+        syncCollapseAllButton();
     }
 
     function expandRow(row, node) {
@@ -307,6 +332,31 @@ export function createThreadPane({ container, invoke, onError = console.error, a
         captureDraft(messageId, card);
         disposeCard(messageId);
         card.node.replaceWith(collapsedLine(row));
+    }
+
+    /**
+     * Fold every open card in one gesture. Each row takes the same path as
+     * its own fold button — drafts are captured, open messages join
+     * `collapsed`, hand-expanded ones leave `expanded` — so a refresh honours
+     * the choice exactly as it would a hand-made one.
+     */
+    function collapseAllCards(button) {
+        const state = painted;
+        if (!state) return;
+        for (const row of state.rows) {
+            if (!cardIsOpen(row)) continue;
+            if (isOpenMessage(row)) collapsed.add(row.messageId);
+            else expanded.delete(row.messageId);
+            collapseCard(row.messageId);
+        }
+        button.disabled = true;
+    }
+
+    /** The header's fold-all mirrors the reader's folds: live while any card is open. */
+    function syncCollapseAllButton() {
+        const button = container.querySelector('.thread-header .thread-collapse-all');
+        if (!button || !painted) return;
+        button.disabled = !painted.rows.some(cardIsOpen);
     }
 
     /**
@@ -580,6 +630,7 @@ export function createThreadPane({ container, invoke, onError = console.error, a
             sessionKeys: [...new Set(sessionKeys)],
             nodes: scroll,
         };
+        refreshThreadReadState(painted);
 
         // The first unacted message owns the reading pane: anchor it at the
         // top. Cards stream their details in async, and a scroll issued
@@ -650,6 +701,7 @@ export function createThreadPane({ container, invoke, onError = console.error, a
                 for (const row of list.messages) rows.set(row.messageId, row);
             }
             reconcile([...rows.values()]);
+            refreshThreadReadState(state);
         } catch (error) {
             if (token === generation && painted === state) onError?.(error);
         } finally {
@@ -714,6 +766,7 @@ export function createThreadPane({ container, invoke, onError = console.error, a
         state.rows = ordered;
         state.latestId = latestOf(ordered)?.messageId;
         paintOrphanMark(ordered);
+        syncCollapseAllButton();
     }
 
     /**
@@ -749,6 +802,86 @@ export function createThreadPane({ container, invoke, onError = console.error, a
         if (current && line) current.replaceWith(line);
         else if (current) current.remove();
         else if (line) header.querySelector('.detail-meta')?.appendChild(line);
+    }
+
+    /**
+     * Header action: dismiss every open notification in this conversation
+     * through the list's bulk flow. Settles the painted rows and header count
+     * on success; a failure leaves the thread untouched — the shared flow
+     * already restored the list and raised the error dialog.
+     */
+    async function markConversationRead(button, anchor) {
+        const state = painted;
+        if (!state || button.getAttribute('aria-disabled') === 'true') return;
+        const targets = state.rows.filter(row => row.msgType === 'notification' && isOpenMessage(row));
+        if (!targets.length || !actions.onMarkConversationRead) return;
+
+        button.setAttribute('aria-disabled', 'true');
+        button.textContent = `Marking ${targets.length}…`;
+        const workRevisions = {};
+        for (const row of targets) {
+            if (row.work && row.badges?.revision !== undefined) {
+                workRevisions[row.messageId] = row.badges.revision;
+            }
+        }
+        let result = null;
+        try {
+            result = await actions.onMarkConversationRead({
+                notificationIds: targets.map(row => row.messageId),
+                workRevisions,
+                conversationName: anchor.sessionName || anchor.sessionLabel || 'open',
+            });
+        } catch {
+            // The shared flow surfaced the publish failure; restore below.
+        } finally {
+            if (painted === state && button.isConnected) button.removeAttribute('aria-disabled');
+        }
+        if (painted !== state) return;
+        if (!result) {
+            refreshThreadReadState(state);
+            return;
+        }
+        const dismissalById = new Map((result.successes ?? [])
+            .map(success => [success.notificationId, success.dismissalId]));
+        for (const row of state.rows) {
+            const dismissalId = dismissalById.get(row.messageId);
+            if (dismissalId === undefined) continue;
+            const dismissed = { ...row, status: 'dismissed', responseId: dismissalId };
+            state.rows[state.rows.indexOf(row)] = dismissed;
+            const card = cards.get(row.messageId);
+            if (card) {
+                card.row = dismissed;
+                card.node.dataset.status = dismissed.status;
+                card.controller?.applyRow?.(dismissed);
+            }
+        }
+        refreshThreadReadState(state);
+    }
+
+    /**
+     * (Re)stamp the header's open-count badge and mark-all-read button from
+     * the painted rows. Called on paint and after a conversation-scoped
+     * mark read, so the count the button was clicked with never lingers.
+     */
+    function refreshThreadReadState(state) {
+        const header = container.querySelector('.thread-header');
+        if (!header || painted !== state) return;
+        const openCount = state.rows.filter(isOpenMessage).length;
+        const badge = header.querySelector('.conversation-count');
+        if (openCount > 0) {
+            const label = `${openCount} need${openCount === 1 ? 's' : ''} you`;
+            if (badge) badge.textContent = label;
+            else header.querySelector('.detail-headline')?.appendChild(el('span', 'conversation-count', label));
+        } else {
+            badge?.remove();
+        }
+        const button = header.querySelector('.thread-mark-read');
+        if (!button) return;
+        const markable = state.rows.filter(row => row.msgType === 'notification' && isOpenMessage(row)).length;
+        if (!markable) button.remove();
+        else if (button.getAttribute('aria-disabled') !== 'true') {
+            button.textContent = `Mark all read (${markable})`;
+        }
     }
 
     function clear() {

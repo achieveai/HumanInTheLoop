@@ -25,7 +25,10 @@ type Job = {
 };
 
 type Workflow = {
-  on: { push: { tags: string[] }; workflow_dispatch: unknown };
+  on: {
+    push: { tags: string[] };
+    workflow_dispatch: { inputs: Record<string, { required: boolean; default?: string }> };
+  };
   jobs: Record<string, Job>;
 };
 
@@ -41,29 +44,64 @@ function namedStep(jobName: string, stepName: string): Step {
 }
 
 describe('Inbox release workflow', () => {
-  it('routes Inbox tags to an isolated Windows build while preserving manual build-only dispatch', () => {
+  it('routes full releases and isolated Inbox tags through the release context', () => {
     expect(workflow.on.push.tags).toEqual(['v*', 'inbox-v*']);
 
     const tray = workflow.jobs['build-client'];
-    expect(tray.if).toContain("github.event_name == 'workflow_dispatch'");
-    expect(tray.if).toContain("refs/tags/v");
-    expect(tray.if).not.toContain('refs/tags/inbox-v');
+    expect(tray.needs).toBe('prepare-release');
+    expect(tray.if).toBe("needs.prepare-release.outputs.full_release == 'true'");
 
     const inbox = workflow.jobs['build-inbox'];
+    expect(inbox.needs).toBe('prepare-release');
     expect(inbox['runs-on']).toBe('windows-latest');
-    expect(inbox.if).toContain("github.event_name == 'workflow_dispatch'");
-    expect(inbox.if).toContain("refs/tags/v");
-    expect(inbox.if).toContain("refs/tags/inbox-v");
+    expect(inbox.if).toContain("full_release == 'true'");
+    expect(inbox.if).toContain('refs/tags/inbox-v');
 
-    expect(workflow.jobs['publish-release'].if).toContain("refs/tags/v");
-    expect(workflow.jobs['publish-inbox-release'].if).toContain("refs/tags/inbox-v");
-    expect(workflow.jobs['publish-npm'].if).toContain("refs/tags/v");
+    expect(workflow.jobs['publish-release'].if).toBe("needs.prepare-release.outputs.full_release == 'true'");
+    expect(workflow.jobs['publish-inbox-release'].if).toContain('refs/tags/inbox-v');
+    expect(workflow.jobs['publish-npm'].if).toBe("needs.prepare-release.outputs.full_release == 'true'");
+  });
+
+  it('bumps minor automatically, accepts an exact baseline, and publishes in the same run', () => {
+    const version = workflow.on.workflow_dispatch.inputs.version;
+    expect(version.required).toBe(false);
+    expect(version.default).toBe('');
+
+    const automatic = namedStep('prepare-release', 'Bump, commit, and tag an automatic minor release');
+    expect(automatic.run).toContain('github.event.repository.default_branch');
+    expect(automatic.run).toContain('scripts/release-version.mjs "$REQUESTED_VERSION"');
+    expect(automatic.run).toContain('scripts/release-version.mjs)');
+    expect(automatic.run).toContain('git commit -m "Release $tag"');
+    expect(automatic.run).toContain('git push origin "HEAD:$GITHUB_REF"');
+    expect(automatic.run).toContain('git push origin "refs/tags/$tag"');
+    expect(automatic.run).toContain('already exists');
+
+    for (const jobName of ['build-client', 'build-inbox', 'publish-release', 'publish-inbox-release', 'publish-npm']) {
+      const checkout = workflow.jobs[jobName].steps.find((step) => step.uses === 'actions/checkout@v4');
+      expect(checkout?.with?.ref).toBe('${{ needs.prepare-release.outputs.tag }}');
+    }
+    expect(namedStep('publish-release', 'Create GitHub Release').with?.tag_name)
+      .toBe('${{ needs.prepare-release.outputs.tag }}');
   });
 
   it('publishes from GitHub Actions using npm trusted publishing', () => {
     const publish = workflow.jobs['publish-npm'];
     expect(publish.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
-    expect(namedStep('publish-npm', 'Install Node.js').with?.['node-version']).toBe(24);
+
+    const checkout = publish.steps.find((step) => step.uses === 'actions/checkout@v4');
+    expect(checkout?.with).toEqual({
+      ref: '${{ needs.prepare-release.outputs.tag }}',
+      'persist-credentials': false,
+    });
+    const node = namedStep('publish-npm', 'Install Node.js');
+    expect(node.uses).toBe('actions/setup-node@v7');
+    expect(node.with).toMatchObject({
+      'node-version': 24,
+      'check-latest': true,
+      'registry-url': 'https://registry.npmjs.org',
+      'package-manager-cache': false,
+    });
+    expect(namedStep('publish-npm', 'Install npm for trusted publishing').run).toBe('npm install -g npm@latest');
 
     const step = namedStep('publish-npm', 'Publish to npm');
     expect(step['working-directory']).toBe('hitl-mcp-server/server');
@@ -128,11 +166,11 @@ describe('Inbox release workflow', () => {
   });
 
   it('publishes Inbox-only tags without coupling them to tray builds or npm', () => {
-    expect(workflow.jobs['publish-release'].needs).toEqual(['build-client', 'build-inbox']);
-    expect(workflow.jobs['publish-npm'].needs).toBe('build-client');
+    expect(workflow.jobs['publish-release'].needs).toEqual(['prepare-release', 'build-client', 'build-inbox']);
+    expect(workflow.jobs['publish-npm'].needs).toEqual(['prepare-release', 'build-client']);
 
     const publishInbox = workflow.jobs['publish-inbox-release'];
-    expect(publishInbox.needs).toBe('build-inbox');
+    expect(publishInbox.needs).toEqual(['prepare-release', 'build-inbox']);
 
     const download = namedStep('publish-inbox-release', 'Download Inbox artifacts');
     expect(download.with?.name).toBe('hitl-inbox-windows-x64');

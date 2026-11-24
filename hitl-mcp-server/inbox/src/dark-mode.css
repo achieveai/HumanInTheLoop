@@ -55,6 +55,10 @@ html[data-theme='dark'] .detail-session, html[data-theme='dark'] .detail-session
     color: var(--dark-muted);
 }
 html[data-theme='dark'] .mark-all-read { color: var(--dark-accent); }
+html[data-theme='dark'] .thread-collapse-all { color: var(--dark-accent); }
+html[data-theme='dark'] .thread-collapse-all:hover:not([disabled]) {
+    background: var(--dark-hover); color: var(--dark-text);
+}
 html[data-theme='dark'] .detail-context-toggle,
 html[data-theme='dark'] .thread-card-fold, html[data-theme='dark'] .detail-compose-bar,
 html[data-theme='dark'] .review-toolbar, html[data-theme='dark'] .review-tabs,
@@ -70,6 +74,17 @@ html[data-theme='dark'] .formatted-empty, html[data-theme='dark'] .review-commen
 }
 html[data-theme='dark'] .formatted-change-added { border-left-color: oklch(74% 0.13 150); }
 html[data-theme='dark'] .formatted-change-removed { border-left-color: oklch(75% 0.15 25); }
+html[data-theme='dark'] .formatted-change mark.inline-diff-removed { background: oklch(45% 0.15 25); color: var(--dark-text); }
+html[data-theme='dark'] .formatted-change mark.inline-diff-added { background: oklch(43% 0.11 160); color: var(--dark-text); }
+html[data-theme='dark'] .before-after-heading {
+    background: var(--dark-raised); color: var(--dark-muted); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .review-banner-superseded {
+    background: oklch(32% 0.07 255); color: oklch(85% 0.09 255); border-color: oklch(48% 0.10 255);
+}
+html[data-theme='dark'] .review-banner-cancelled {
+    background: oklch(32% 0.08 60); color: oklch(85% 0.11 60); border-color: oklch(48% 0.12 60);
+}
 html[data-theme='dark'] textarea::placeholder, html[data-theme='dark'] input::placeholder { color: var(--dark-muted); opacity: 1; }
 html[data-theme='dark'] .thread-former-toggle, html[data-theme='dark'] .thread-objective,
 html[data-theme='dark'] .message-glyph, html[data-theme='dark'] .review-title,
@@ -182,9 +197,10 @@ html[data-theme='dark'] .thread-line .status-pill--answered .status-pill-label {
     color: inherit;
 }
 
-/* The review toolbar and comments header are shared controls inside the marked review. */
+/* The review toolbar and pane header strips (source diff, before/after,
+   comments) are shared controls inside the marked review. */
 html[data-theme='dark'] .detail-review-host .review-rendered-toolbar,
-html[data-theme='dark'] .detail-review-host .review-comments > .review-pane-label {
+html[data-theme='dark'] .detail-review-host .review-pane-label {
     background: var(--dark-pane); color: var(--dark-text); border-color: var(--dark-border);
 }
 html[data-theme='dark'] .detail-review-host .review-view-tabs,
@@ -198,6 +214,50 @@ html[data-theme='dark'] .detail-review-host .review-view-tabs [role='tab'][aria-
 html[data-theme='dark'] .detail-review-host .review-change-nav button:hover:not(:disabled),
 html[data-theme='dark'] .detail-review-host .review-view-tabs [role='tab']:hover {
     background: var(--dark-hover); color: var(--dark-text);
+}
+
+/* Inline comment UI keeps dark surfaces: the composer, its anchor label, and
+   the comment card body (review.css paints the body #2d3748 explicitly). */
+html[data-theme='dark'] .comment-composer {
+    background: var(--dark-raised); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .composer-anchor { color: var(--dark-muted); }
+html[data-theme='dark'] .comment-card-body { color: var(--dark-text); }
+
+/* Selection, candidate, and find highlights in the rendered plan view: review.css
+   gives these light backgrounds (#ebf8ff / #fefcbf) that white text cannot sit on. */
+html[data-theme='dark'] .review-view-panels [data-source-start].is-selected {
+    background: oklch(40% 0.10 260); color: var(--dark-text);
+}
+html[data-theme='dark'] .review-view-panels [data-source-start].is-selection-candidate {
+    background: var(--dark-hover); color: var(--dark-text); outline-color: var(--dark-accent);
+}
+html[data-theme='dark'] .md-content .is-find-current { background: var(--dark-hover); color: var(--dark-text); }
+
+/* Source-view diff rows: review.css paints hunk/add/del rows light (#edf2f7,
+   #f0fff4, #fff5f5) with mid-tone marks that wash out on dark surfaces. */
+html[data-theme='dark'] .diff-row-hunk, html[data-theme='dark'] .diff-row-meta {
+    background: var(--dark-pane); color: var(--dark-muted);
+}
+html[data-theme='dark'] .diff-row-add { background: oklch(30% 0.06 160); }
+html[data-theme='dark'] .diff-row-add .diff-mark { color: oklch(76% 0.13 160); }
+html[data-theme='dark'] .diff-row-del { background: oklch(29% 0.06 25); }
+html[data-theme='dark'] .diff-row-del .diff-mark { color: oklch(71% 0.12 25); }
+html[data-theme='dark'] .diff-row.is-selected { background: oklch(40% 0.10 260); }
+html[data-theme='dark'] .diff-row.is-selected.diff-row-add { background: oklch(38% 0.09 160); }
+html[data-theme='dark'] .diff-row.is-selected.diff-row-del { background: oklch(37% 0.09 25); }
+html[data-theme='dark'] .diff-row.is-find-current { background: var(--dark-hover); }
+
+/* Comment-card Edit/Delete controls: review.css leaves them light-gray
+   (#718096 on near-white) which disappears against the dark card. */
+html[data-theme='dark'] .comment-control {
+    color: var(--dark-muted); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .comment-control:hover {
+    background: var(--dark-hover); color: var(--dark-text); border-color: var(--dark-border);
+}
+html[data-theme='dark'] .comment-delete:hover {
+    background: oklch(30% 0.06 25); color: oklch(74% 0.13 25); border-color: oklch(44% 0.11 25);
 }
 
 html[data-theme='dark'] .detail-handoff .detail-actions .button:has(> .badge-icon:only-child),

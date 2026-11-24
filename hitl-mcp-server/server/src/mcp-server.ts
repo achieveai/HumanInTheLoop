@@ -57,15 +57,17 @@ import type { ReviewPlanResult } from './plan-review.js';
 import { parseVerdict, normalizeResponseBody, ReviewResponseError } from './plan-review.js';
 import { startMemorySyncer } from './memory/syncer.js';
 import { detectChannelMode, runChannel } from './channel.js';
+import { claimNew, pollAgentMessages, pruneClaims } from './agent-messages.js';
 
 const TOOL_NAME = 'AskUserQuestion';
 const NOTIFY_TOOL_NAME = 'Notify';
 const SETUP_TOOL_NAME = 'setup';
 const REVIEW_TOOL_NAME = 'ReviewPlan';
+const POLL_MESSAGES_TOOL_NAME = 'PollMessages';
 export const HANDOFF_TOOL_NAME = 'HandOff';
 const NAME_SESSION_TOOL_NAME = 'NameSession';
 /** Tools whose results remind an unnamed session to name itself. */
-const NAME_REMINDER_TOOLS = new Set([TOOL_NAME, NOTIFY_TOOL_NAME, REVIEW_TOOL_NAME, HANDOFF_TOOL_NAME, 'UpdateWork']);
+const NAME_REMINDER_TOOLS = new Set([TOOL_NAME, NOTIFY_TOOL_NAME, REVIEW_TOOL_NAME, HANDOFF_TOOL_NAME, POLL_MESSAGES_TOOL_NAME, 'UpdateWork']);
 const HANDOFF_END_VALUE = 'end';
 /** Keeps end-of-work summaries short enough to read at a glance. */
 const HANDOFF_SUMMARY_MAX = 1200;
@@ -334,6 +336,17 @@ IMPORTANT: When in doubt, ASK. Getting human input ensures accuracy and saves ti
           },
         },
         {
+          name: POLL_MESSAGES_TOOL_NAME,
+          description:
+            'Check for new messages the human sent this session from HITL Inbox. Returns immediately with ' +
+            '{ success, messages: [{ messageId, text, from, timestamp }] }; an empty messages array means none are waiting. ' +
+            'Each message is delivered only once across this tool, plugin hooks, and Claude channels. ' +
+            'On Codex, Copilot, and Kimi, call this at the start of a turn, after meaningful work checkpoints, and before ' +
+            'handing off or ending a turn. Act on each returned message as human guidance and reply with Notify using inReplyTo. ' +
+            'This is polling, not a push channel: it cannot wake a host that is already idle.',
+          inputSchema: { type: 'object', properties: {} },
+        },
+        {
           name: SETUP_TOOL_NAME,
           description:
             'Set up the HITL (Human-in-the-Loop) client on this machine. ' +
@@ -429,10 +442,18 @@ Blocking past 60 seconds requires the calling MCP host to opt into resetTimeoutO
           description: `Hand your finished work to the human and wait for their next instruction. Call this instead of ending your turn when you have finished everything you were asked to do.
 
 The summary appears in the user's HITL Inbox app (not the tray popup). The user is dyslexic with ADHD and reads it at a glance, so keep it short and use exactly this shape:
+
 **Outcome:** done | done with risks | blocked | failed
-**Did:** 3-5 bullets
-**Not done / risks:** bullets, only if any
-**Needs you:** bullets, only if any
+
+**Did:**
+- 3-5 bullets
+
+**Not done / risks:**
+- bullets, only if any
+
+**Needs you:**
+- bullets, only if any
+
 Short sentences. No preamble. Do not repeat what the title says.
 
 This call blocks until the user replies. Returns JSON { success, respondedFrom, action, instructions?, note? }:
@@ -468,6 +489,9 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
   private async callTool(request: CallToolRequest, extra: RequestExtra): Promise<ToolResult> {
     if (request.params.name === NAME_SESSION_TOOL_NAME) {
       return await this.handleNameSession(request.params.arguments, extra);
+    }
+    if (request.params.name === POLL_MESSAGES_TOOL_NAME) {
+      return await this.handlePollMessages(extra);
     }
     if (request.params.name === 'UpdateWork' || request.params.name === 'ReadWork') {
       try {
@@ -688,6 +712,33 @@ This call blocks until the user replies. Returns JSON { success, respondedFrom, 
         ErrorCode.InternalError,
         `Failed to get human response: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
+    }
+  }
+
+  /**
+   * PollMessages: an immediate, non-blocking alternative to channel push for
+   * hosts that cannot inject an MCP notification as a new conversation turn.
+   * Claiming is shared with hooks and channels, so each message has one winner.
+   */
+  private async handlePollMessages(extra: RequestExtra): Promise<ToolResult> {
+    const tag = currentSessionTag(extra);
+    if (!tag) throw new McpError(ErrorCode.InternalError, 'This host names no session, so there is nothing to poll.');
+
+    try {
+      const messages = claimNew(tag, await pollAgentMessages(this.config, tag));
+      pruneClaims(tag);
+      const result = {
+        success: true,
+        messages: messages.map(msg => ({
+          messageId: msg.messageId,
+          text: msg.text,
+          from: msg.from,
+          timestamp: msg.timestamp,
+        })),
+      };
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      throw new McpError(ErrorCode.InternalError, `Failed to poll Inbox messages: ${describeError(error)}`);
     }
   }
 

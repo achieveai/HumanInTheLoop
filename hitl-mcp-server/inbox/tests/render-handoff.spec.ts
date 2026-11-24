@@ -11,6 +11,20 @@ const REQUEST = {
   context: 'Hitl_MCP: repaint freeze',
 };
 
+const FULL_SUMMARY = [
+  '**Outcome:** done',
+  '',
+  '**Did:**',
+  '- merged the fix',
+  '- 228 tests pass',
+  '',
+  '**Not done / risks:**',
+  '- unrelated tests remain red',
+  '',
+  '**Needs you:**',
+  '- review the wording',
+].join('\n');
+
 function pending(over = {}) {
   return detail(
     message({ messageId: 'h-1', msgType: 'handoff', title: 'Inbox fix merged', ...over }),
@@ -29,6 +43,21 @@ test.describe('Pane 3 — a handoff', () => {
     await expect(page.locator('#handoff-end')).toHaveAttribute('type', 'checkbox');
     await expect(page.locator('#handoff-end')).not.toBeChecked();
     await expect(page.locator('input[type="radio"]')).toHaveCount(0);
+  });
+
+  test('renders every documented summary section as a separate Markdown block', async ({ page }) => {
+    const full = detail(
+      message({ messageId: 'h-full', msgType: 'handoff', title: 'Inbox fix merged' }),
+      { request: { ...REQUEST, summary: FULL_SUMMARY } },
+    );
+    await mount(page, 'handoff', full, { wire: true });
+
+    await expect(page.locator('.handoff-summary > p > strong')).toHaveText([
+      'Outcome:', 'Did:', 'Not done / risks:', 'Needs you:',
+    ]);
+    await expect(page.locator('.handoff-summary > ul')).toHaveCount(3);
+    await expect(page.locator('.handoff-summary li')).toHaveCount(4);
+    await expect(page.locator('.handoff-summary li strong')).toHaveCount(0);
   });
 
   test('typing an instruction unchecks End, and Send delivers the instruction', async ({ page }) => {

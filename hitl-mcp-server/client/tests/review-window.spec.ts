@@ -205,6 +205,25 @@ test.describe('Formatted review modes', () => {
     await expect(after.locator('[data-source-side="new"]')).not.toHaveCount(0);
   });
 
+  test('Before & after pads the shorter side so equal blocks line up across the panes', async ({ page }) => {
+    await page.getByRole('tab', { name: 'Before & after' }).click();
+    // Vertical blank pads bridge the height a removed/added block pair loses
+    // on the other side; without them equal content drifts between the panes.
+    await expect(page.locator('#review-pane-before-after .before-after-pad').first()).toBeAttached();
+    const tops = await page.evaluate(() => {
+      const collect = (selector: string) => {
+        const root = document.querySelector(selector)!;
+        return [...root.children]
+          .filter(el => !el.classList.contains('formatted-change') && !el.classList.contains('before-after-pad'))
+          .map(el => Math.round(el.getBoundingClientRect().top));
+      };
+      return { before: collect('#before-content'), after: collect('#after-content') };
+    });
+    expect(tops.before.length).toBeGreaterThan(0);
+    expect(tops.before.length).toBe(tops.after.length);
+    expect(tops.before).toEqual(tops.after);
+  });
+
   test('comments stay anchored when Before & after is materialized lazily', async ({ page }) => {
     await page.evaluate(() => {
       const block = document.querySelector('#rendered-content .formatted-change-removed [data-source-side="old"]')!;

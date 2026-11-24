@@ -11,6 +11,9 @@ const ICONS = {
     send: '<path d="M14.7 1.3 7.3 8.7"/><path d="M14.7 1.3 10 14.7 7.3 8.7 1.3 5.3z"/>',
     expand: '<path d="M5.5 10.5 10.5 5.5"/><path d="M7.7 5.5h2.8v2.8"/><path d="M8.3 10.5H5.5V7.7"/>',
     collapse: '<path d="M5.5 10.5 10.5 5.5"/><path d="M6.9 6.3v2.8h2.8"/><path d="M9.1 9.7V6.9H6.3"/>',
+    // Fold the whole stack: list lines over an up-chevront — the reader's
+    // "everything back to one line", in the same stroke idiom as chevronDown.
+    collapseAll: '<path d="M2.5 3h11"/><path d="M2.5 6.5h11"/><path d="m5.4 13 2.6-2.6 2.6 2.6"/>',
     chevronDown: '<path d="m4 6 4 4 4-4"/>',
     chevronRight: '<path d="m6 4 4 4-4 4"/>',
     approve: '<path d="m3 8.5 3.5 3.5L13 5"/>',

@@ -209,15 +209,14 @@ function missingState(body) {
  * The message `review.js` expects, built from the row, the request payload and
  * the decoded body.
  *
- * Diff mode is spec §8.3: a diff is only meaningful against a previous
- * revision, so `isNewPlan` and revision 1 both show the plan whole even when a
- * diff happens to be present in the payload.
+ * Diff mode: whenever the payload carries a diff it is shown, including for
+ * a new plan — a creation diff renders as an empty Before pane and the whole
+ * plan added in After/Changes.
  */
 function planMessage(detail, body) {
     const { row, request } = detail;
     const revision = request?.revision ?? row.badges?.revision ?? 1;
     const isNewPlan = request?.isNewPlan === true;
-    const showDiff = revision > 1 && !isNewPlan;
 
     return {
         messageId: row.messageId,
@@ -233,7 +232,7 @@ function planMessage(detail, body) {
         isNewPlan,
         body: {
             content: body.content || '',
-            diff: showDiff ? (body.diff || '') : '',
+            diff: body.diff || '',
         },
     };
 }

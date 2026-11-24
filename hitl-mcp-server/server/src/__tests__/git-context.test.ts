@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { execSync } from 'child_process';
-import { mkdtempSync, mkdirSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync } from 'fs';
+import { removeTree as rmSync } from './test-fs.js';
 import { tmpdir } from 'os';
 import path from 'path';
 import { isLinkedWorktree } from '../git-context.js';

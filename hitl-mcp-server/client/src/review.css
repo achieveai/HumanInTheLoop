@@ -385,6 +385,18 @@ body {
     margin-bottom: 2px;
 }
 
+/* Word-level marks inside a changed block — the block tint says a block
+   differs, these say which words do. Kept translucent-adjacent tints of the
+   same red/green family so the block color still reads as one surface. */
+.formatted-change mark.inline-diff-removed,
+.formatted-change mark.inline-diff-added {
+    border-radius: 2px;
+    padding: 0 1px;
+    color: inherit;
+}
+.formatted-change mark.inline-diff-removed { background: #feb2b2; }
+.formatted-change mark.inline-diff-added { background: #9ae6b4; }
+
 .source-change-indicator {
     border: 1px solid #d69e2e;
     border-radius: 5px;

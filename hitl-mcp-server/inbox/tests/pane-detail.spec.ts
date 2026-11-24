@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { Fixture, bodyOk, detail, list, message, project, session, tree } from './fixtures.js';
+import { Fixture, bodyOk, detail, list, message, project, session, tree, NOW, MINUTE, HOUR } from './fixtures.js';
 
 // Pane 3's shell (spec §8, §11) — driven through the real app, not a mounted
 // renderer, because what is under test here is the wiring: which command is
@@ -1313,5 +1313,281 @@ test.describe('Pane 3 — optimistic rollback and settlement races', () => {
     await expect(page.locator('#review-error')).toContainText('needs a reason');
     await expect(page.locator('#action-error-dialog')).toBeHidden();
     expect(await replyCount(page, 'submit_plan_review')).toBe(0);
+  });
+});
+
+// The conversation header's mark-all-read: the same bulk dismiss as the list
+// action, scoped to the open notifications of the one conversation pane 3
+// shows. Questions and plan reviews keep needing an answer.
+test.describe('conversation mark all read', () => {
+  const SESSION_A = 'Hitl_MCP · master · a3f2';
+  const SESSION_B = 'Hitl_MCP · master · b4g7';
+
+  const nOlder = message({
+    messageId: 'c-n-old', msgType: 'notification', sessionKey: SESSION_A,
+    title: 'Older notice', createdAt: NOW - 30 * MINUTE,
+  });
+  const nWork = message({
+    messageId: 'c-n-work', msgType: 'notification', sessionKey: SESSION_A,
+    title: 'Work notice', createdAt: NOW - 20 * MINUTE,
+    work: { status: 'in_progress', owner: 'gautamb', totalTasks: 2, completedTasks: 1, blockedTasks: 0 },
+    badges: { repo: null, batchCount: null, revision: 3, attachment: false, plaintext: null },
+  });
+  const qOpen = message({
+    messageId: 'c-q-open', msgType: 'question', sessionKey: SESSION_A,
+    title: 'Still needs an answer', createdAt: NOW - 10 * MINUTE,
+  });
+  const nOther = message({
+    messageId: 'c-n-other', msgType: 'notification', sessionKey: SESSION_B,
+    title: 'Other conversation', createdAt: NOW - 5 * MINUTE,
+  });
+  const rowsA = [nOlder, nWork, qOpen];
+
+  function rowDetail(row: ReturnType<typeof message>) {
+    return row.msgType === 'notification'
+      ? detail(row, { request: { body: `${row.title} body.` } })
+      : detail(row, { request: { question: row.title, options: [{ label: 'Continue', value: 'continue' }] } });
+  }
+
+  async function openConversations(page: Page) {
+    await open(page, {
+      messages: {
+        'all|*': list({
+          messages: [nOther, qOpen, nWork, nOlder],
+          filter: 'needs_you',
+          defaultFilter: 'needs_you',
+        }),
+        [`session:${SESSION_A}|*`]: list({ messages: rowsA, filter: 'all', defaultFilter: 'needs_you' }),
+        [`session:${SESSION_B}|*`]: list({ messages: [nOther], filter: 'all', defaultFilter: 'needs_you' }),
+      },
+      details: Object.fromEntries([...rowsA, nOther].map(row => [row.messageId, rowDetail(row)])),
+    });
+    // The conversation row's anchor is its oldest open message — the thread
+    // opens at the top of the unread run.
+    await page.locator('.message-row[data-message-id="c-n-old"]').click();
+  }
+
+  test('marks every open notification in the conversation and leaves questions alone', async ({ page }) => {
+    await openConversations(page);
+    await expect(page.locator('.thread-header .conversation-count')).toHaveText('3 need you');
+    const button = page.locator('.thread-header .thread-mark-read');
+    await expect(button).toHaveAccessibleName('Mark all read (2)');
+
+    await controlReply(page, 'dismiss_notifications');
+    await button.click();
+    await expect(button).toHaveAccessibleName('Marking 2…');
+    await expect(button).toHaveAttribute('aria-disabled', 'true');
+
+    await expect.poll(() => replyCount(page, 'dismiss_notifications')).toBe(1);
+    const invocation = await page.evaluate(() =>
+      (window as any).__INVOCATIONS.find((call: any) => call.cmd === 'dismiss_notifications'));
+    expect(invocation.args).toEqual({
+      notificationIds: ['c-n-old', 'c-n-work'],
+      workRevisions: { 'c-n-work': 3 },
+    });
+
+    await page.evaluate(() => (window as any).__resolveReply([
+      { status: 'dismissed', notificationId: 'c-n-old', responseId: 'd-old' },
+      { status: 'dismissed', notificationId: 'c-n-work', responseId: 'd-work' },
+    ]));
+
+    await expect(page.locator('.thread-header .conversation-count')).toHaveText('1 needs you');
+    await expect(page.locator('.thread-header .thread-mark-read')).toHaveCount(0);
+    await expect(page.locator('.detail-root[data-message-id="c-n-old"]')).toHaveAttribute('data-status', 'dismissed');
+    await expect(page.locator('.detail-root[data-message-id="c-n-work"]')).toHaveAttribute('data-status', 'dismissed');
+    await expect(page.locator('.detail-root[data-message-id="c-n-old"] .detail-retained'))
+      .toContainText('Dismissed everywhere');
+    // The open question is untouched: no dismissal, card still pending.
+    await expect(page.locator('.detail-root[data-message-id="c-q-open"]')).toHaveAttribute('data-status', 'pending');
+    expect(await replyCount(page, 'submit_answer')).toBe(0);
+    // The shared bulk flow reports and offers its undo.
+    await expect(page.locator('#bulk-status')).toContainText('Marked 2 notifications read');
+    await expect(page.getByRole('button', { name: 'Undo mark all read' })).toBeFocused();
+  });
+
+  test('Undo restores the painted cards and conversation count', async ({ page }) => {
+    await openConversations(page);
+    await controlReply(page, 'dismiss_notifications');
+    await page.locator('.thread-header .thread-mark-read').click();
+    await page.evaluate(() => (window as any).__resolveReply([
+      { status: 'dismissed', notificationId: 'c-n-old', responseId: 'd-old' },
+      { status: 'dismissed', notificationId: 'c-n-work', responseId: 'd-work' },
+    ]));
+    await expect(page.locator('.thread-header .conversation-count')).toHaveText('1 needs you');
+
+    await controlReply(page, 'restore_notifications');
+    await page.getByRole('button', { name: 'Undo mark all read' }).click();
+    await expect.poll(() => replyCount(page, 'restore_notifications')).toBe(1);
+    await page.evaluate(() => (window as any).__resolveReply([
+      { status: 'restored', notificationId: 'c-n-old', dismissalId: 'd-old', responseId: 'r-old' },
+      { status: 'restored', notificationId: 'c-n-work', dismissalId: 'd-work', responseId: 'r-work' },
+    ]));
+
+    await expect(page.locator('.thread-header .conversation-count')).toHaveText('3 need you');
+    await expect(page.locator('.detail-root[data-message-id="c-n-old"]')).toHaveAttribute('data-status', 'pending');
+    await expect(page.locator('.detail-root[data-message-id="c-n-work"]')).toHaveAttribute('data-status', 'pending');
+    await expect(page.locator('#bulk-status')).toContainText('Marked 2 notifications unread');
+  });
+
+  test('a failed publish restores the header button and changes nothing', async ({ page }) => {
+    await openConversations(page);
+    const button = page.locator('.thread-header .thread-mark-read');
+    await expect(button).toHaveAccessibleName('Mark all read (2)');
+
+    await controlReply(page, 'dismiss_notifications');
+    await button.click();
+    await expect(button).toHaveAccessibleName('Marking 2…');
+    await page.evaluate(() => (window as any).__rejectReply('offline'));
+
+    await expect(page.locator('#action-error-dialog')).toBeVisible();
+    await expect(page.locator('#action-error-dialog')).toContainText('offline');
+    await page.keyboard.press('Escape');
+
+    await expect(page.locator('.thread-header .conversation-count')).toHaveText('3 need you');
+    await expect(button).toHaveAccessibleName('Mark all read (2)');
+    await expect(button).not.toHaveAttribute('aria-disabled', 'true');
+    await expect(page.locator('.detail-root[data-message-id="c-n-old"]')).toHaveAttribute('data-status', 'pending');
+    await expect(page.locator('.detail-root[data-message-id="c-n-old"] .notification-read-action'))
+      .toHaveAccessibleName('Mark as read');
+  });
+
+  test('a conversation with nothing to mark shows no button', async ({ page }) => {
+    const settled = message({
+      messageId: 'c-n-done', msgType: 'notification', sessionKey: SESSION_A,
+      title: 'Already read', status: 'dismissed', responseId: 'd-earlier',
+      createdAt: NOW - HOUR,
+    });
+    await open(page, {
+      messages: {
+        'all|*': list({ messages: [settled], filter: 'all', defaultFilter: 'all' }),
+        [`session:${SESSION_A}|*`]: list({ messages: [settled], filter: 'all', defaultFilter: 'all' }),
+      },
+      details: { [settled.messageId]: rowDetail(settled) },
+    });
+    await page.locator('.message-row[data-message-id="c-n-done"]').click();
+
+    await expect(page.locator('.thread-header .conversation-count')).toHaveCount(0);
+    await expect(page.locator('.thread-header .thread-mark-read')).toHaveCount(0);
+  });
+});
+
+
+// The conversation header's fold-all: one gesture takes every open card back
+// to its one-line form — the same explicit choice as folding each by hand
+// (drafts captured, a refresh can't reopen what was folded), just faster.
+test.describe('conversation collapse all', () => {
+  const SESSION_A = 'Hitl_MCP · master · a3f2';
+
+  const fSettled = message({
+    messageId: 'f-n-done', msgType: 'notification', sessionKey: SESSION_A,
+    title: 'Already read', status: 'dismissed', responseId: 'd-earlier',
+    createdAt: NOW - HOUR,
+  });
+  const fOpen = message({
+    messageId: 'f-n-open', msgType: 'notification', sessionKey: SESSION_A,
+    title: 'Open notice', createdAt: NOW - 10 * MINUTE,
+  });
+  const fQuestion = message({
+    messageId: 'f-q-open', msgType: 'question', sessionKey: SESSION_A,
+    title: 'Still needs an answer', createdAt: NOW - 5 * MINUTE,
+  });
+
+  function rowDetail(row: ReturnType<typeof message>) {
+    return row.msgType === 'notification'
+      ? detail(row, { request: { body: `${row.title} body.` } })
+      : detail(row, { request: { question: row.title, options: [{ label: 'Continue', value: 'continue' }] } });
+  }
+
+  async function openThread(page: Page) {
+    await open(page, {
+      messages: {
+        'all|*': list({ messages: [fQuestion, fOpen, fSettled], filter: 'all', defaultFilter: 'all' }),
+        [`session:${SESSION_A}|*`]: list({ messages: [fSettled, fOpen, fQuestion], filter: 'all', defaultFilter: 'all' }),
+      },
+      details: Object.fromEntries([fSettled, fOpen, fQuestion].map(row => [row.messageId, rowDetail(row)])),
+    });
+    await page.locator('.message-row', { hasText: 'master · a3f2' }).click();
+  }
+
+  test('folds every open card to one line and sleeps until one reopens', async ({ page }) => {
+    await openThread(page);
+    // The settled message starts folded; the two open ones paint as cards.
+    await expect(page.locator('.thread-card')).toHaveCount(2);
+    const foldAll = page.locator('.thread-header .thread-collapse-all');
+    await expect(foldAll).toBeEnabled();
+
+    await foldAll.click();
+
+    await expect(page.locator('.thread-card')).toHaveCount(0);
+    await expect(page.locator('.thread-line')).toHaveCount(3);
+    await expect(foldAll).toBeDisabled();
+
+    // A hand re-expand wakes the button again.
+    await page.locator('.thread-line[data-message-id="f-q-open"]').click();
+    await expect(page.locator('.thread-card')).toHaveCount(1);
+    await expect(foldAll).toBeEnabled();
+  });
+
+  test('a conversation with nothing open shows no button', async ({ page }) => {
+    await open(page, {
+      messages: {
+        'all|*': list({ messages: [fSettled], filter: 'all', defaultFilter: 'all' }),
+        [`session:${SESSION_A}|*`]: list({ messages: [fSettled], filter: 'all', defaultFilter: 'all' }),
+      },
+      details: { [fSettled.messageId]: rowDetail(fSettled) },
+    });
+    await page.locator('.message-row', { hasText: 'master · a3f2' }).click();
+
+    await expect(page.locator('.thread-card')).toHaveCount(0);
+    await expect(page.locator('.thread-header .thread-collapse-all')).toHaveCount(0);
+  });
+});
+
+// Revised plans: the collapsed thread line must say which revision it opens.
+// The Before & after panes only gain content from revision 2 onward, so an
+// unlabeled line sends the reader to a creation diff with an empty Before.
+test.describe('plan revision labels on thread lines', () => {
+  const SESSION_A = 'Hitl_MCP · master · a3f2';
+
+  const p1 = message({
+    messageId: 'r-p1', msgType: 'plan_review', sessionKey: SESSION_A,
+    title: 'docs/plans/inbox.md', status: 'answered', verdict: 'changes_requested',
+    createdAt: NOW - 30 * MINUTE,
+  });
+  const p2 = message({
+    messageId: 'r-p2', msgType: 'plan_review', sessionKey: SESSION_A,
+    title: 'docs/plans/inbox.md', status: 'answered', verdict: 'changes_requested',
+    createdAt: NOW - 20 * MINUTE,
+    badges: { repo: null, batchCount: null, revision: 2, attachment: false, plaintext: null },
+  });
+  const p3 = message({
+    messageId: 'r-p3', msgType: 'plan_review', sessionKey: SESSION_A,
+    title: 'docs/plans/inbox.md', status: 'answered', verdict: 'approved',
+    createdAt: NOW - 10 * MINUTE,
+    badges: { repo: null, batchCount: null, revision: 3, attachment: false, plaintext: null },
+  });
+
+  function planDetail(row: ReturnType<typeof message>) {
+    return detail(row, {
+      request: {
+        planId: 'plan-1', snapshotHash: 'abc123', displayPath: 'docs/plans/inbox.md',
+        revision: row.badges?.revision ?? 1, isNewPlan: row.badges?.revision == null,
+      },
+    });
+  }
+
+  test('a revised plan names its revision on the collapsed line', async ({ page }) => {
+    await open(page, {
+      messages: {
+        'all|*': list({ messages: [p3, p2, p1], filter: 'all', defaultFilter: 'all' }),
+        [`session:${SESSION_A}|*`]: list({ messages: [p1, p2, p3], filter: 'all', defaultFilter: 'all' }),
+      },
+      details: Object.fromEntries([p1, p2, p3].map(row => [row.messageId, planDetail(row)])),
+    });
+    await page.locator('.message-row', { hasText: 'master · a3f2' }).click();
+
+    await expect(page.locator('.thread-line[data-message-id="r-p1"] .thread-line-sub')).not.toContainText('rev 1');
+    await expect(page.locator('.thread-line[data-message-id="r-p2"] .thread-line-sub')).toContainText('rev 2');
+    await expect(page.locator('.thread-line[data-message-id="r-p3"] .thread-line-sub')).toContainText('rev 3');
   });
 });

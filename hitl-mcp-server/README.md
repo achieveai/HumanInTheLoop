@@ -164,7 +164,7 @@ Defaults are `inbox.db` and `archive.db` under the state directory. Treat databa
 
 ## MCP Tools
 
-The server exposes `NameSession`, `AskUserQuestion`, `ReviewPlan`, `Notify`, `UpdateWork`, `ReadWork`, and `setup`.
+The server exposes `NameSession`, `AskUserQuestion`, `ReviewPlan`, `HandOff`, `Notify`, `PollMessages`, `UpdateWork`, `ReadWork`, and `setup`.
 
 ### `AskUserQuestion`
 
@@ -269,9 +269,11 @@ How the agent receives it:
 
 - **Claude Code, any app:** the hitl plugin's hooks hand it over after a tool call or at the next prompt. A background Stop hook wakes an idle session.
 - **Claude Code in a terminal, with channels:** start `claude --dangerously-load-development-channels server:hitl`. The message arrives as a channel event straight away. Set `HITL_CHANNEL=0|1` to override detection.
-- **Codex and Copilot CLI:** the same hooks deliver it after a tool call or hold the agent at its stop. They cannot wake an idle session.
+- **Codex, Copilot CLI, and Kimi Code:** the agent calls `PollMessages` at the start of a turn, after meaningful checkpoints, and before handing off or ending. The plugin hooks also deliver waiting messages after tool calls, at prompts, and at stop where supported. These hosts cannot be woken once idle.
 
-The agent replies with `Notify` and `inReplyTo`. A message is guidance, not approval for risky actions.
+`PollMessages` takes no arguments and returns immediately. Its JSON result is `{ "success": true, "messages": [{ "messageId", "text", "from", "timestamp" }] }`; an empty array means no new messages. Each message is claimed once across polling, hooks, and channels. The tool needs an `encryptionKey` because agent messages are always encrypted.
+
+The agent acts on each returned message and replies with `Notify` and `inReplyTo`. A message is guidance, not approval for risky actions. Polling retrieves messages during a turn; it is not a push channel and cannot start a new turn on an idle host.
 
 ### `NameSession`
 
@@ -343,7 +345,9 @@ It also turns off each installed host's built-in chat question tool (Claude Code
 
 ## Blocking and host timeouts
 
-`AskUserQuestion` and `ReviewPlan` block the agent until a human responds. How long they are *allowed* to block is decided by your MCP host, not by this server.
+`AskUserQuestion`, `ReviewPlan`, and `HandOff` block the agent until a human responds. How long they are *allowed* to block is decided by your MCP host, not by this server.
+
+The `setup-hitl` skill configures a **24-hour per-server limit for every HITL tool** where supported: Codex `tool_timeout_sec = 86400`, Copilot CLI `timeout = 86400000` ms, and Kimi Code `toolTimeoutMs = 86400000`. Codex also gets `startup_timeout_sec = 45`. Restart or reconnect the host after changing registration.
 
 While a call is blocked the server emits MCP progress notifications every 15 seconds. Hosts that set **`resetTimeoutOnProgress`** treat each of those as a sign of life and extend the deadline, so the call survives as long as it needs to. That option **defaults to `false` in the MCP SDK**: on a host that leaves it alone, the request is cancelled at the SDK's default of 60 seconds no matter what the server does.
 
@@ -520,12 +524,32 @@ UI suites use local harnesses with mocked native boundaries. Also smoke-test the
 - A pushed `v*` tag builds tray and Inbox assets and publishes a GitHub Release after both builds succeed.
 - A pushed `inbox-v*` tag builds and publishes **only Windows Inbox**. It does not build the tray client or publish npm. The version after `inbox-v` must match `inbox/package.json`.
 - The npm job bundles all four tray binaries with the TypeScript server.
-- The npm job on `v*` tags uses trusted publishing. GitHub Actions supplies a short-lived credential.
-- Manual workflow dispatch builds downloadable workflow artifacts; it does not publish a release under the current tag-only conditions.
-- The manual `tag` input currently does not change that behavior.
+- npm publication uses GitHub OIDC trusted publishing. GitHub Actions supplies a short-lived credential; no `NPM_TOKEN` is used or required.
+- Manual workflow dispatch creates and publishes a full release. Leave `version` blank to increment minor and reset patch, or enter an exact newer `x.y.z` baseline such as `3.0.0`.
 - The archivist and Android APK are not built by this release workflow.
 
-Pushing a version tag is a **publication action**, not just a local build.
+Pushing a version tag or manually starting the workflow is a **publication action**, not just a local build.
+
+### Automatic full releases
+
+In GitHub, open **Actions → Build & Release HITL Client → Run workflow** on the default branch. Leave `version` blank for the next minor release (`2.17.1` becomes `2.18.0`). Enter an exact version only when establishing a new baseline, such as `3.0.0`; later blank runs become `3.1.0`, `3.2.0`, and so on.
+
+The workflow runs `scripts/release-version.mjs`, which updates all npm manifests, Cargo manifests, Tauri configs, and both lockfiles together. It refuses malformed versions, downgrades, duplicate tags, and existing manifest drift. It then commits `Release v<version>`, pushes the default-branch commit and annotated tag, and uses that tag for every build and publishing job in the same run. A token-created tag does not need to trigger a second workflow.
+
+The automatic release must be able to fast-forward the default branch. If branch protection rejects the `GITHUB_TOKEN` push, allow the Actions bot through the appropriate ruleset or use a narrowly scoped GitHub App; do not weaken branch protection globally. If a run fails after its version commit/tag was pushed, fix the problem and rerun that tag's release instead of blindly skipping to another minor.
+
+For a local manual bump, run `node scripts/release-version.mjs` from `hitl-mcp-server` for the next minor, or append an exact newer version. The script does not commit, tag, or publish by itself.
+
+### GitHub and npm publishing settings
+
+No repository variables or npm secrets are required for the standard configuration:
+
+- `GITHUB_TOKEN` is supplied by Actions automatically. The workflow requests `contents: write` to push the release commit/tag and create releases.
+- `id-token: write` on `publish-npm` is a workflow permission, not a variable. GitHub supplies the OIDC request credentials automatically.
+- npm trusted publishing requires npm CLI 11.5.1 or later and Node 22.14.0 or later. The publish job installs Node 24 and the current npm CLI explicitly.
+- On npmjs.com, the trusted publisher must name the exact GitHub organization/user, repository, and `release.yml` filename (not its full path). If **Allowed actions** is restricted, it must permit direct `npm publish`; a stage-only publisher requires the separate staged-publishing flow.
+- If the npm trusted publisher includes a GitHub **Environment name**, add that exact `environment` to the `publish-npm` job and configure any desired reviewers there. If no environment was named on npm, do not add one.
+- Public trusted publishes from a public repository receive npm provenance automatically; no extra variable or `--provenance` flag is needed.
 
 ### npm trusted publisher setup
 
@@ -552,7 +576,7 @@ Each Inbox build produces:
 - `hitl-inbox-windows-x64.zip` — the executable only
 - `hitl-inbox-windows-x64.sha256` — hashes of the MSI, EXE, and ZIP
 
-The workflow fails if required artifacts are missing or empty. Manual builds expose them under the `hitl-inbox-windows-x64` Actions artifact. Tagged builds also attach them to a public GitHub Release. Inbox-only releases do not replace the project's latest full release.
+The workflow fails if required artifacts are missing or empty. Every run exposes them under the `hitl-inbox-windows-x64` Actions artifact. Full releases and Inbox-only tags also attach them to a public GitHub Release. Inbox-only releases do not replace the project's latest full release.
 
 The artifacts are currently unsigned. The portable ZIP needs Microsoft Edge WebView2 Runtime and the user's configuration under `.hitl`; it is not a self-contained runtime or configuration backup. Never distribute your own config or encryption key with it.
 

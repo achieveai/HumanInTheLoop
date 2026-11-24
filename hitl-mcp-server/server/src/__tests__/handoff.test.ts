@@ -53,6 +53,24 @@ describe('HandOff', () => {
     return JSON.parse(result.content[0].text);
   }
 
+  it('advertises a template with blank lines between every Markdown section', async () => {
+    const listTools = (
+      server as unknown as { server: { _requestHandlers: Map<string, unknown> } }
+    ).server._requestHandlers.get('tools/list') as (req: unknown, extra: unknown) => Promise<{
+      tools: Array<{ name: string; description: string }>;
+    }>;
+    const listed = await listTools({ method: 'tools/list', params: {} }, {});
+    const tool = listed.tools.find(item => item.name === 'HandOff');
+
+    expect(tool).toBeDefined();
+    expect(tool?.description).toContain(
+      '**Outcome:** done | done with risks | blocked | failed\n\n' +
+      '**Did:**\n- 3-5 bullets\n\n' +
+      '**Not done / risks:**\n- bullets, only if any\n\n' +
+      '**Needs you:**\n- bullets, only if any'
+    );
+  });
+
   it('publishes a handoff message carrying the title, summary and context', async () => {
     nextAnswer = async () => ({ selectedValues: ['end'] });
     await handOff();

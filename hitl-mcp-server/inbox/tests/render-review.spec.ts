@@ -195,11 +195,10 @@ test.describe('Pane 3 — a reviewable plan (spec §8.3)', () => {
     expect(scheduledRefreshes).toBe(1);
   });
 
-  test('a revision shows the diff; a new plan shows the plan whole', async ({ page }) => {
-    // A diff is only meaningful against a previous revision. Revision 1 and
-    // `isNewPlan` both mean there is nothing to diff against, so the payload's
-    // diff — if it carries one at all — is not what to read.
-    await mount(page, 'review', review({ revision: 2, isNewPlan: false }, { badges: { revision: 2 } as any }),
+  test('a payload diff is shown for a revision and for a new plan alike', async ({ page }) => {
+    // Whenever the payload carries a diff it is what to read. A new plan's
+    // diff is a creation diff: every row shows as added.
+    await mount(page, 'review', review({ revision: 2, isNewPlan: false }, { badges: { revision: 2 } } as any),
       { body: bodyOk(CONTENT, DIFF) });
 
     await page.getByRole('tab', { name: 'Source' }).click();
@@ -208,8 +207,8 @@ test.describe('Pane 3 — a reviewable plan (spec §8.3)', () => {
 
     await mount(page, 'review', review({ revision: 1, isNewPlan: true }), { body: bodyOk(CONTENT, DIFF) });
     await page.getByRole('tab', { name: 'Source' }).click();
-    await expect(page.locator('.diff-row-add')).toHaveCount(0);
-    await expect(page.locator('.diff-row[data-line]')).toHaveCount(6);
+    await expect(page.locator('.diff-row-add')).toHaveCount(1);
+    await expect(page.locator('.diff-row-del')).toHaveCount(1);
   });
 
   test('a settled review keeps the plan and loses the controls', async ({ page }) => {
@@ -464,5 +463,89 @@ test.describe('the review header collapses (spec §8.3)', () => {
 
     await expect(page.locator(toggle)).toHaveAttribute('aria-expanded', 'true');
     await expect(page.locator(body)).toBeVisible();
+  });
+});
+
+
+test.describe('Before & after comparison view', () => {
+  // A full-document diff (reconstructReviewDocuments requires one hunk
+  // covering the whole plan) with a single phrase edited inside one line.
+  const REVISED_CONTENT = '# Plan\n\nFirst step.\nSecond step, revised.\nThird step.\n';
+  const REVISED_DIFF = [
+    '--- a/plan.md',
+    '+++ b/plan.md',
+    '@@ -1,5 +1,5 @@',
+    ' # Plan',
+    ' ',
+    ' First step.',
+    '-Second step.',
+    '+Second step, revised.',
+    ' Third step.',
+    '',
+  ].join('\n');
+
+  test('changed blocks mark the differing words, not only the block', async ({ page }) => {
+    await mount(page, 'review', review({ revision: 2, isNewPlan: false }), { body: bodyOk(REVISED_CONTENT, REVISED_DIFF) });
+
+    // Changes view: one word was edited — exactly that word is marked on each side.
+    await expect(page.locator('#rendered-content mark.inline-diff-removed')).toHaveText(['step.']);
+    await expect(page.locator('#rendered-content mark.inline-diff-added')).toHaveText(['step,', 'revised.']);
+
+    // Before & after view: the same marks inside each full document.
+    await page.getByRole('tab', { name: 'Before & after' }).click();
+    await expect(page.locator('#before-content mark.inline-diff-removed')).toHaveText(['step.']);
+    await expect(page.locator('#after-content mark.inline-diff-added')).toHaveText(['step,', 'revised.']);
+
+    // The marks wrap words; the paragraph text itself is unchanged, and the
+    // Added/Removed labels are chrome, never marked.
+    await expect(page.locator('#after-content .formatted-change-added')).toContainText('Second step, revised.');
+    await expect(page.locator('#after-content .formatted-change-label mark')).toHaveCount(0);
+  });
+
+  test('scrolling one side scrolls the other to the same relative position', async ({ page }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    // Hide the agents and list panes so the review host is wide enough for
+    // the two-column comparison — below the 760px container breakpoint only
+    // one side renders and there is nothing to sync.
+    await page.addInitScript(() => localStorage.setItem('inbox.panes', JSON.stringify({ collapse: 2 })));
+    const oldLines = Array.from({ length: 120 }, (_, i) => `Step ${i + 1} does the thing.`);
+    const newLines = [...oldLines];
+    newLines[59] = 'Step 60 does the thing, revised.';
+    const oldSource = oldLines.join('\n') + '\n';
+    const newSource = newLines.join('\n') + '\n';
+    const rows = ['--- a/plan.md', '+++ b/plan.md', `@@ -1,${oldLines.length} +1,${newLines.length} @@`];
+    for (let i = 0; i < 59; i++) rows.push(' ' + oldLines[i]);
+    rows.push('-' + oldLines[59]);
+    rows.push('+' + newLines[59]);
+    for (let i = 60; i < oldLines.length; i++) rows.push(' ' + oldLines[i]);
+
+    await mount(page, 'review', review({ revision: 2, isNewPlan: false }),
+      { body: bodyOk(newSource, rows.join('\n') + '\n') });
+    await page.getByRole('tab', { name: 'Before & after' }).click();
+    // Two columns actually rendered — this is the layout the sync serves.
+    await expect(page.locator('.before-after-side[aria-label="After"]')).toBeVisible();
+
+    const mirrored = await page.evaluate(() => {
+      const [before, after] = Array.from(document.querySelectorAll('.before-after-side'));
+      const beforeMax = before.scrollHeight - before.clientHeight;
+      const afterMax = after.scrollHeight - after.clientHeight;
+      const read = () => ({ beforeTop: before.scrollTop, afterTop: after.scrollTop });
+
+      before.scrollTop = Math.round(beforeMax / 2);
+      before.dispatchEvent(new Event('scroll'));
+      const first = read();
+      before.scrollTop = beforeMax;
+      before.dispatchEvent(new Event('scroll'));
+      const second = read();
+      after.scrollTop = Math.round(afterMax / 2);
+      after.dispatchEvent(new Event('scroll'));
+      const third = read();
+      return { first, second, third, beforeMax, afterMax };
+    });
+
+    expect(mirrored.beforeMax, 'the before side should overflow').toBeGreaterThan(0);
+    expect(mirrored.first.afterTop).toBe(Math.round(mirrored.afterMax / 2));
+    expect(mirrored.second.afterTop).toBe(mirrored.afterMax);
+    expect(mirrored.third.beforeTop).toBe(Math.round(mirrored.beforeMax / 2));
   });
 });

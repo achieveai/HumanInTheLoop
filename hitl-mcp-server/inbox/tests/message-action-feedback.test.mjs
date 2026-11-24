@@ -34,7 +34,7 @@ const thread=readFileSync(new URL('../src/pane-thread.js',import.meta.url),'utf8
 test('settled collapsed line uses the incoming status',()=>{
  const start=thread.indexOf('    function reconcile(incoming)');const stop=thread.indexOf('\n    /**',start);
  const old={messageId:'a',status:'pending'},fresh={...old,status:'dismissed'};let collapsedStatus;
- const ctx=vm.createContext({painted:{rows:[old],nodes:{querySelectorAll:()=>[]}},generation:1,cards:new Map([['a',{row:old}]]),expanded:new Set(),isOpenMessage:r=>r.status==='pending',collapseCard:()=>{collapsedStatus=ctx.painted.rows[0].status},latestOf:r=>r[0],paintOrphanMark:()=>{}});
+ const ctx=vm.createContext({painted:{rows:[old],nodes:{querySelectorAll:()=>[]}},generation:1,cards:new Map([['a',{row:old}]]),expanded:new Set(),isOpenMessage:r=>r.status==='pending',collapseCard:()=>{collapsedStatus=ctx.painted.rows[0].status},latestOf:r=>r[0],paintOrphanMark:()=>{},syncCollapseAllButton:()=>{}});
  vm.runInContext(thread.slice(start,stop)+'\nglobalThis.run=reconcile',ctx);ctx.run([fresh]);assert.equal(collapsedStatus,'dismissed');
 });
 

@@ -7,16 +7,112 @@ on:
       - 'inbox-v*'
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Release tag (e.g. v2.0.0)'
+      version:
+        description: 'Exact x.y.z baseline (for example 3.0.0); blank increments minor'
         required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
 
 jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag_context.outputs.version || steps.automatic.outputs.version }}
+      tag: ${{ steps.tag_context.outputs.tag || steps.automatic.outputs.tag }}
+      full_release: ${{ steps.tag_context.outputs.full_release || steps.automatic.outputs.full_release }}
+    steps:
+      - name: Resolve a tag-triggered release
+        if: github.event_name == 'push'
+        id: tag_context
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              version="${GITHUB_REF_NAME#v}"
+              full_release=true
+              ;;
+            refs/tags/inbox-v*)
+              version="${GITHUB_REF_NAME#inbox-v}"
+              full_release=false
+              ;;
+            *)
+              echo "::error::Unexpected release ref: $GITHUB_REF"
+              exit 1
+              ;;
+          esac
+          {
+            echo "version=$version"
+            echo "tag=$GITHUB_REF_NAME"
+            echo "full_release=$full_release"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the default branch for an automatic release
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump, commit, and tag an automatic minor release
+        if: github.event_name == 'workflow_dispatch'
+        id: automatic
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          default_branch='${{ github.event.repository.default_branch }}'
+          if [ "$GITHUB_REF" != "refs/heads/$default_branch" ]; then
+            echo "::error::Automatic releases must run from $default_branch, not $GITHUB_REF_NAME."
+            exit 1
+          fi
+
+          git fetch origin --tags
+          if [ -n "$REQUESTED_VERSION" ]; then
+            version="$(node hitl-mcp-server/scripts/release-version.mjs "$REQUESTED_VERSION")"
+          else
+            version="$(node hitl-mcp-server/scripts/release-version.mjs)"
+          fi
+          tag="v$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null || \
+             git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::error::$tag already exists. Choose a newer explicit version or resolve the existing tag first."
+            exit 1
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            hitl-mcp-server/package.json \
+            hitl-mcp-server/package-lock.json \
+            hitl-mcp-server/server/package.json \
+            hitl-mcp-server/client/package.json \
+            hitl-mcp-server/inbox/package.json \
+            hitl-mcp-server/client/src-tauri/tauri.conf.json \
+            hitl-mcp-server/inbox/src-tauri/tauri.conf.json \
+            hitl-mcp-server/client/src-tauri/Cargo.toml \
+            hitl-mcp-server/inbox/src-tauri/Cargo.toml \
+            hitl-mcp-server/crates/hitl-transport/Cargo.toml \
+            hitl-mcp-server/crates/hitl-store/Cargo.toml \
+            hitl-mcp-server/crates/hitl-archivist/Cargo.toml \
+            hitl-mcp-server/Cargo.lock
+          git diff --cached --check
+          git commit -m "Release $tag"
+          git push origin "HEAD:$GITHUB_REF"
+          git tag -a "$tag" -m "$tag"
+          # A token-created tag does not start another workflow. This run uses
+          # the tag output directly and performs the build/publication itself.
+          git push origin "refs/tags/$tag"
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "full_release=true"
+          } >> "$GITHUB_OUTPUT"
+
   build-client:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: prepare-release
+    if: needs.prepare-release.outputs.full_release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -41,6 +137,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -120,10 +218,13 @@ jobs:
           if-no-files-found: error
 
   build-inbox:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/inbox-v')
+    needs: prepare-release
+    if: needs.prepare-release.outputs.full_release == 'true' || startsWith(github.ref, 'refs/tags/inbox-v')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -205,11 +306,13 @@ jobs:
           if-no-files-found: error
 
   publish-release:
-    needs: [build-client, build-inbox]
+    needs: [prepare-release, build-client, build-inbox]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.prepare-release.outputs.full_release == 'true'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -223,6 +326,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.prepare-release.outputs.tag }}
           files: release-assets/*
           generate_release_notes: true
           draft: false
@@ -231,11 +335,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-inbox-release:
-    needs: build-inbox
+    needs: [prepare-release, build-inbox]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/inbox-v')
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
 
       - name: Download Inbox artifacts
         uses: actions/download-artifact@v4
@@ -249,6 +355,7 @@ jobs:
       - name: Create Inbox GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ needs.prepare-release.outputs.tag }}
           files: release-assets/*
           body: |
             Windows x64 Inbox build. These artifacts are unsigned.
@@ -262,15 +369,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-npm:
-    needs: build-client
+    needs: [prepare-release, build-client]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.prepare-release.outputs.full_release == 'true'
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
           persist-credentials: false
 
       - name: Install Node.js
@@ -280,6 +388,9 @@ jobs:
           check-latest: true
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+
+      - name: Install npm for trusted publishing
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         working-directory: hitl-mcp-server
@@ -346,6 +457,8 @@ jobs:
           fi
           echo "All 4 client binaries present."
 
+      # npm detects the GitHub OIDC environment and authenticates through the
+      # trusted publisher configured for this workflow. No npm token is used.
       - name: Publish to npm
         working-directory: hitl-mcp-server/server
         run: npm publish --access public

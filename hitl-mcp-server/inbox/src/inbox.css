@@ -306,6 +306,46 @@ body {
     display: none;
 }
 
+/* The conversation header carries the same action for its own scope: right
+   side of the title row, dropping under a long session name. Whichever action
+   comes first takes the row's right edge; a second sits beside it. */
+.thread-header .detail-headline {
+    flex-wrap: wrap;
+    row-gap: 4px;
+}
+
+.thread-header .detail-headline > button:first-of-type {
+    margin-left: auto;
+}
+
+/* Icon-only companion to mark-all-read: the same quiet button treatment,
+   sized for the glyph. Asleep while every message is folded. */
+.thread-header .thread-collapse-all {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    border-radius: 5px;
+    color: #4c51bf;
+    cursor: pointer;
+    display: inline-flex;
+    font-family: inherit;
+    padding: 4px 6px;
+}
+
+.thread-header .thread-collapse-all:hover:not([disabled]) {
+    background: #edf2f7;
+}
+
+.thread-header .thread-collapse-all:focus-visible {
+    outline: 2px solid #4c51bf;
+    outline-offset: 2px;
+}
+
+.thread-header .thread-collapse-all[disabled] {
+    cursor: default;
+    opacity: 0.45;
+}
+
 .visually-hidden {
     clip: rect(0 0 0 0);
     clip-path: inset(50%);
