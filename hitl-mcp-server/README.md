@@ -520,12 +520,26 @@ UI suites use local harnesses with mocked native boundaries. Also smoke-test the
 - A pushed `v*` tag builds tray and Inbox assets and publishes a GitHub Release after both builds succeed.
 - A pushed `inbox-v*` tag builds and publishes **only Windows Inbox**. It does not build the tray client or publish npm. The version after `inbox-v` must match `inbox/package.json`.
 - The npm job bundles all four tray binaries with the TypeScript server.
-- npm publication runs only when `NPM_TOKEN` is configured. Otherwise, it is skipped.
+- The npm job on `v*` tags uses trusted publishing. GitHub Actions supplies a short-lived credential.
 - Manual workflow dispatch builds downloadable workflow artifacts; it does not publish a release under the current tag-only conditions.
 - The manual `tag` input currently does not change that behavior.
 - The archivist and Android APK are not built by this release workflow.
 
 Pushing a version tag is a **publication action**, not just a local build.
+
+### npm trusted publisher setup
+
+Open the [npm package settings](https://www.npmjs.com/package/@achieveai/hitl-mcp-server/access) as a maintainer. Under **Trusted publishing**, choose **GitHub Actions**.
+
+| Setting | Value |
+| --- | --- |
+| Organization or user | `achieveai` |
+| Repository | `HumanInTheLoop` |
+| Workflow filename | `release.yml` |
+| Environment name | Leave blank |
+| Allowed action | Enable `npm publish` |
+
+Save the connection when the next full release is ready. npm requires a successful first publish within two days. Push the next `v*` tag from a commit that includes this workflow and an unpublished server version. Check that `publish-npm` succeeds and that the new version shows provenance on npm. See the [npm trusted publishing guide](https://docs.npmjs.com/trusted-publishers/).
 
 ### Windows Inbox distribution
 

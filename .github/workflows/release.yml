@@ -265,22 +265,25 @@ jobs:
     needs: build-client
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
-    # Lifted to job-level env so the publish step can test for the secret's
-    # presence: the `secrets` context is not available in a step-level `if`.
-    env:
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
+          check-latest: true
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
 
       - name: Install dependencies
         working-directory: hitl-mcp-server
-        run: npm install
+        run: npm ci
 
       - name: Build server
         working-directory: hitl-mcp-server
@@ -343,16 +346,6 @@ jobs:
           fi
           echo "All 4 client binaries present."
 
-      # Runs only when an npm automation token is configured. Without one the
-      # maintainer publishes by hand (the npm account requires interactive 2FA),
-      # and that must not turn the tag's workflow run red.
       - name: Publish to npm
-        if: env.NPM_TOKEN != ''
         working-directory: hitl-mcp-server/server
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Note skipped npm publish
-        if: env.NPM_TOKEN == ''
-        run: echo "::notice::NPM_TOKEN is not configured - skipping automated npm publish. Publish @achieveai/hitl-mcp-server manually from hitl-mcp-server/server."
