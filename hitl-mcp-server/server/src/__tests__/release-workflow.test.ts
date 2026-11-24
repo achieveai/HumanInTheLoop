@@ -20,6 +20,7 @@ type Job = {
   if?: string;
   needs?: string | string[];
   'runs-on'?: string;
+  permissions?: Record<string, string>;
   steps: Step[];
 };
 
@@ -57,6 +58,18 @@ describe('Inbox release workflow', () => {
     expect(workflow.jobs['publish-release'].if).toContain("refs/tags/v");
     expect(workflow.jobs['publish-inbox-release'].if).toContain("refs/tags/inbox-v");
     expect(workflow.jobs['publish-npm'].if).toContain("refs/tags/v");
+  });
+
+  it('publishes from GitHub Actions using npm trusted publishing', () => {
+    const publish = workflow.jobs['publish-npm'];
+    expect(publish.permissions).toEqual({ contents: 'read', 'id-token': 'write' });
+    expect(namedStep('publish-npm', 'Install Node.js').with?.['node-version']).toBe(24);
+
+    const step = namedStep('publish-npm', 'Publish to npm');
+    expect(step['working-directory']).toBe('hitl-mcp-server/server');
+    expect(step.run).toBe('npm publish --access public');
+    expect(step.if).toBeUndefined();
+    expect(JSON.stringify(publish)).not.toMatch(/\b(?:NPM_TOKEN|NODE_AUTH_TOKEN)\b/);
   });
 
   it('builds the existing Inbox configuration for Windows x64 with Node 24 and the shared UI hook', () => {
